@@ -1,0 +1,55 @@
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Rust / Cargo
+target/
+Cargo.lock
+
+# Anchor
+.DS_Store
+.anchor/
+.mpl-cache/
+dist/
+coverage/
+
+# Solana
+*.log
+*.json-ld
+# Local keypairs – be careful with this!
+id.json
+*.keypair.json
+target/deploy/*.json
+
+# Build artifacts
+*.so
+*.dll
+*.dylib
+*.rlib
+*.rmeta
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Tests / coverage
+coverage/
+.nyc_output/
+.jest/

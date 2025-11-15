@@ -1,0 +1,24 @@
+[toolchain]
+
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+
+[programs.devnet]
+privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+
+[programs.mainnet]
+privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "/Users/pintu/.config/solana/id.json"
+
+[scripts]
+test = "yarn run mocha -t 1000000 tests/"
