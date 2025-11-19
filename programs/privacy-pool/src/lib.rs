@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 
@@ -7,83 +6,49 @@ declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 pub mod privacy_pool {
     use super::*;
 
-    pub fn initialize_pool(
-        ctx: Context<InitializePool>,
-        _bump: u8,
+    /// Publish a new secret note:
+    /// - `commitment_bytes`: hash of the note (value, blinding, etc.)
+    /// - `owner_hint`: can be real recipient pubkey or Pubkey::default()
+    /// - `ciphertext`: encrypted envelope for off-chain decryption
+    pub fn publish_note(
+        ctx: Context<PublishNote>,
+        commitment_bytes: [u8; 32],
+        owner_hint: Pubkey,
+        ciphertext: Vec<u8>,
     ) -> Result<()> {
-        let state = &mut ctx.accounts.pool_state;
-        state.admin = ctx.accounts.authority.key();
-        state.mint = ctx.accounts.mint.key();
-        state.bump = *ctx.bumps.get("pool_state").unwrap();
+        let note = &mut ctx.accounts.note;
 
-        let commitments = &mut ctx.accounts.commitments;
-        commitments.bump = *ctx.bumps.get("commitments").unwrap();
-        commitments.len = 0;
+        note.author = ctx.accounts.sender.key();
+        note.owner_hint = owner_hint;
+        note.commitment = commitment_bytes;
+        note.ciphertext = ciphertext;
+        note.nullified = false;
+        note.created_at_slot = Clock::get()?.slot;
+
+        emit!(NotePublished {
+            note: ctx.accounts.note.key(),
+            commitment: commitment_bytes,
+            owner_hint,
+            author: ctx.accounts.sender.key(),
+        });
 
         Ok(())
     }
 
-    /// V1: public → shielded deposit (no zk yet)
-    /// Later: require a zk-proof that the commitment matches internal note data.
-    pub fn deposit_public_to_shielded(
-        ctx: Context<DepositPublicToShielded>,
-        amount: u64,
-        commitment: [u8; 32],
+    /// Mark a nullifier as used.
+    /// Later you'll likely combine this with zk-proof verification.
+    pub fn register_nullifier(
+        ctx: Context<RegisterNullifier>,
+        nullifier_bytes: [u8; 32],
     ) -> Result<()> {
-        // Transfer SPL tokens from user to pool vault
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.user_token_account.to_account_info(),
-            to: ctx.accounts.pool_token_vault.to_account_info(),
-            authority: ctx.accounts.user.to_account_info(),
-        };
-        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, amount)?;
+        let record = &mut ctx.accounts.nullifier;
 
-        // For now, store commitments in a simple vector account.
-        // Later: you’ll switch to a Merkle tree structure or paginated commitments.
-        let commitments = &mut ctx.accounts.commitments;
-        require!(
-            (commitments.len as usize) < commitments.values.len(),
-            PrivacyError::CommitmentsFull
-        );
-        commitments.values[commitments.len as usize] = commitment;
-        commitments.len += 1;
+        require!(!record.used, ZkError::NullifierAlreadyUsed);
 
-        Ok(())
-    }
+        record.nullifier = nullifier_bytes;
+        record.used = true;
 
-    /// V1: shielded → public withdraw (fake proof bytes for now)
-    /// Later: verify zk-proof and nullifiers before allowing withdraw.
-    pub fn withdraw_shielded_to_public(
-        ctx: Context<WithdrawShieldedToPublic>,
-        amount: u64,
-        _fake_proof: Vec<u8>,     // placeholder, to be replaced with real proof bytes
-        _nullifier: [u8; 32],     // placeholder, will be checked against nullifier set
-    ) -> Result<()> {
-        // TODO: later:
-        // - verify zk proof
-        // - check nullifier not used, then mark it used
-
-        // Transfer SPL tokens from pool vault to user
-        let pool_state = &ctx.accounts.pool_state;
-        let seeds: &[&[u8]] = &[
-            b"pool_state",
-            pool_state.mint.as_ref(),
-            &[pool_state.bump],
-        ];
-        let signer_seeds = &[seeds];
-
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.pool_token_vault.to_account_info(),
-            to: ctx.accounts.user_token_account.to_account_info(),
-            authority: ctx.accounts.pool_state.to_account_info(),
-        };
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            cpi_accounts,
-            signer_seeds,
-        );
-        token::transfer(cpi_ctx, amount)?;
+        emit!(NullifierRegistered { nullifier: nullifier_bytes });
 
         Ok(())
     }
@@ -92,135 +57,97 @@ pub mod privacy_pool {
 // === Accounts ===
 
 #[derive(Accounts)]
-#[instruction(bump: u8)]
-pub struct InitializePool<'info> {
+#[instruction(commitment_bytes: [u8; 32])]
+pub struct PublishNote<'info> {
+    /// PDA that holds this note:
+    /// seeds = ["note", commitment_bytes]
     #[account(
         init,
-        payer = authority,
-        seeds = [b"pool_state", mint.key().as_ref()],
+        payer = sender,
+        seeds = [b"note".as_ref(), &commitment_bytes],
         bump,
-        space = 8 + PoolState::SIZE
+        space = 8 + NoteAccount::SIZE
     )]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
-
-    #[account(
-        init,
-        payer = authority,
-        token::mint = mint,
-        token::authority = pool_state,
-    )]
-    pub pool_token_vault: Account<'info, TokenAccount>,
-
-    #[account(
-        init,
-        payer = authority,
-        seeds = [b"commitments", pool_state.key().as_ref()],
-        bump,
-        space = 8 + Commitments::SIZE
-    )]
-    pub commitments: Account<'info, Commitments>,
+    pub note: Account<'info, NoteAccount>,
 
     #[account(mut)]
-    pub authority: Signer<'info>,
+    pub sender: Signer<'info>,
 
     pub system_program: Program<'info, System>,
-    pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
-pub struct DepositPublicToShielded<'info> {
-    #[account(mut, has_one = mint)]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
-
+#[instruction(nullifier_bytes: [u8; 32])]
+pub struct RegisterNullifier<'info> {
+    /// PDA that records the nullifier:
+    /// seeds = ["nullifier", nullifier_bytes]
     #[account(
-        mut,
-        constraint = pool_token_vault.mint == mint.key(),
-        constraint = pool_token_vault.owner == pool_state.key(),
+        init,
+        payer = payer,
+        seeds = [b"nullifier".as_ref(), &nullifier_bytes],
+        bump,
+        space = 8 + NullifierAccount::SIZE
     )]
-    pub pool_token_vault: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == mint.key(),
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: Account<'info, TokenAccount>,
+    pub nullifier: Account<'info, NullifierAccount>,
 
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub payer: Signer<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"commitments", pool_state.key().as_ref()],
-        bump = commitments.bump,
-    )]
-    pub commitments: Account<'info, Commitments>,
-
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
-pub struct WithdrawShieldedToPublic<'info> {
-    #[account(mut, has_one = mint)]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
-
-    #[account(
-        mut,
-        constraint = pool_token_vault.mint == mint.key(),
-        constraint = pool_token_vault.owner == pool_state.key(),
-    )]
-    pub pool_token_vault: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == mint.key(),
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: Account<'info, TokenAccount>,
-
-    #[account(mut)]
-    pub user: Signer<'info>,
-
-    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 // === State ===
 
 #[account]
-pub struct PoolState {
-    pub admin: Pubkey,
-    pub mint: Pubkey,
-    pub bump: u8,
+pub struct NoteAccount {
+    pub author: Pubkey,         // who published the note
+    pub owner_hint: Pubkey,     // optional (Pubkey::default if none)
+    pub commitment: [u8; 32],   // zk commitment to secret note
+    pub nullified: bool,        // optional: whether this specific note is known-spent
+    pub created_at_slot: u64,   // for ordering / proving freshness
+    pub ciphertext: Vec<u8>,    // encrypted envelope
 }
 
-impl PoolState {
-    pub const SIZE: usize = 32 + 32 + 1;
+impl NoteAccount {
+    // Upper bound on ciphertext size (bytes) we allow in this account.
+    pub const MAX_CIPHERTEXT_LEN: usize = 512;
+
+    // Layout:
+    // author (32) + owner_hint (32) + commitment (32) + nullified (1)
+    // + created_at_slot (8) + ciphertext vec header (4) + data (MAX)
+    pub const SIZE: usize =
+        32 + 32 + 32 + 1 + 8 + 4 + Self::MAX_CIPHERTEXT_LEN;
 }
 
-/// Extremely rough V1 storage for commitments
-/// Later: replace this with a more scalable structure (Merkle tree / paginated).
 #[account]
-pub struct Commitments {
-    pub bump: u8,
-    pub len: u32,
-    pub values: [[u8; 32]; 1024], // up to 1024 commitments for V1
+pub struct NullifierAccount {
+    pub nullifier: [u8; 32],
+    pub used: bool,
 }
 
-impl Commitments {
-    pub const SIZE: usize = 1 + 4 + (32 * 1024);
+impl NullifierAccount {
+    pub const SIZE: usize = 32 + 1;
+}
+
+// === Events ===
+
+#[event]
+pub struct NotePublished {
+    pub note: Pubkey,
+    pub commitment: [u8; 32],
+    pub owner_hint: Pubkey,
+    pub author: Pubkey,
+}
+
+#[event]
+pub struct NullifierRegistered {
+    pub nullifier: [u8; 32],
 }
 
 // === Errors ===
 
 #[error_code]
-pub enum PrivacyError {
-    #[msg("Commitments storage account is full")]
-    CommitmentsFull,
+pub enum ZkError {
+    #[msg("Nullifier already used")]
+    NullifierAlreadyUsed,
 }
