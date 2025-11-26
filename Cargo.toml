@@ -5,6 +5,9 @@ members = [
     "programs/*",
 ]
 
+[programs.localnet]
+privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
