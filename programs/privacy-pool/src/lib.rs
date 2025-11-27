@@ -1,90 +1,255 @@
-import "mocha";
-import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram } from "@solana/web3.js";
-import { randomBytes } from "crypto";
+use anchor_lang::prelude::*;
 
-import { PrivacyPool } from "../target/types/privacy_pool";
+declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 
-describe("privacy-pool note + nullifier", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+// --- parameters ---
 
-  const program = anchor.workspace.PrivacyPool as Program<PrivacyPool>;
-  const wallet = provider.wallet as anchor.Wallet;
+/// Depth of the off-chain Merkle tree you maintain
+const NOTE_TREE_DEPTH: u8 = 24;
 
-  it("initialize → publish_note → verify_and_nullify", async () => {
-    // 1) derive PDAs
-    const [noteTreePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("note_tree")],
-      program.programId
-    );
+/// Sliding window of recent roots stored on-chain
+const MAX_ROOTS: usize = 64;
 
-    const [nullifiersPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifiers")],
-      program.programId
-    );
+/// How many nullifiers we remember on-chain
+const MAX_NULLIFIERS: usize = 1024;
 
-    // 2) initialize global state
-    await program.methods
-      .initialize()
-      .accounts({
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        payer: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
+// --- program ---
 
-    // 3) fake root + nullifier (in real life: output of zk + Merkle tree)
-    const fakeRoot = randomBytes(32);
-    const fakeNullifier = randomBytes(32);
+#[program]
+pub mod privacy_pool {
+    use super::*;
 
-    // publish the root
-    await program.methods
-      .publishNote(Array.from(fakeRoot))
-      .accounts({
-        noteTree: noteTreePda,
-        authority: wallet.publicKey,
-      })
-      .rpc();
+    /// One-time init: create global note tree & nullifier registry PDAs
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let tree = &mut ctx.accounts.note_tree;
+        tree.bump = ctx.bumps.note_tree;
+        tree.depth = NOTE_TREE_DEPTH;
+        tree.next_index = 0;
+        tree.current_root = [0u8; 32];
+        tree.roots = [[0u8; 32]; MAX_ROOTS];
+        tree.root_count = 0;
 
-    // 4) first spend (should succeed)
-    await program.methods
-      .verifyAndNullify(
-        Array.from(fakeRoot),
-        Array.from(fakeNullifier),
-        Buffer.alloc(0) // placeholder proof bytes
-      )
-      .accounts({
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        relayer: wallet.publicKey,
-      })
-      .rpc();
+        let nulls = &mut ctx.accounts.nullifiers;
+        nulls.bump = ctx.bumps.nullifiers;
+        nulls.count = 0;
+        nulls.values = [[0u8; 32]; MAX_NULLIFIERS];
 
-    // 5) second spend with same nullifier must fail
-    let doubleSpendFailed = false;
-    try {
-      await program.methods
-        .verifyAndNullify(
-          Array.from(fakeRoot),
-          Array.from(fakeNullifier),
-          Buffer.alloc(0)
-        )
-        .accounts({
-          noteTree: noteTreePda,
-          nullifiers: nullifiersPda,
-          relayer: wallet.publicKey,
-        })
-        .rpc();
-    } catch (e) {
-      doubleSpendFailed = true;
-      console.log("Expected double-spend failure:", (e as any).toString());
+        Ok(())
     }
 
-    if (!doubleSpendFailed) {
-      throw new Error("Nullifier double-spend unexpectedly succeeded");
+    /// Append a new Merkle root (computed off-chain).
+    ///
+    /// Off-chain:
+    /// - maintain the Merkle tree of commitments
+    /// - after inserting a note, compute `new_root`
+    /// - call `publish_note(new_root)` to advance on-chain root window
+    pub fn publish_note(ctx: Context<PublishNote>, new_root: [u8; 32]) -> Result<()> {
+        let tree = &mut ctx.accounts.note_tree;
+
+        // These are just leaf indexes; actual tree is off-chain
+        require!(
+            tree.next_index < (1u32 << tree.depth),
+            PrivacyError::TreeFull
+        );
+
+        // sliding-window root buffer
+        let slot = (tree.root_count as usize) % MAX_ROOTS;
+        tree.roots[slot] = new_root;
+        tree.current_root = new_root;
+        tree.root_count = tree
+            .root_count
+            .checked_add(1)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        let idx = tree.next_index;
+        tree.next_index = tree
+            .next_index
+            .checked_add(1)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        emit!(NotePublished {
+            root: new_root,
+            index: idx,
+        });
+
+        Ok(())
     }
-  });
-});
+
+    /// Spend a note:
+    /// - Off-chain zk proof proves:
+    ///   * commitment is in Merkle tree (membership)
+    ///   * caller knows secret for that commitment
+    ///   * nullifier = H(secret, salt) (same as in proof)
+    /// - On-chain:
+    ///   * root must be in known roots
+    ///   * nullifier must not be used yet
+    ///   * then we mark nullifier as used
+    ///
+    /// `proof` is currently unused placeholder.
+    pub fn verify_and_nullify(
+        ctx: Context<VerifyAndNullify>,
+        root: [u8; 32],
+        nullifier: [u8; 32],
+        _proof: Vec<u8>,
+    ) -> Result<()> {
+        let tree = &ctx.accounts.note_tree;
+        let nulls = &mut ctx.accounts.nullifiers;
+
+        // 1) root must be known (within sliding window)
+        let mut found = false;
+        let max = core::cmp::min(tree.root_count as usize, MAX_ROOTS);
+        for i in 0..max {
+            if tree.roots[i] == root {
+                found = true;
+                break;
+            }
+        }
+        require!(found, PrivacyError::UnknownRoot);
+
+        // 2) nullifier must not be used yet
+        for i in 0..nulls.count as usize {
+            if nulls.values[i] == nullifier {
+                return err!(PrivacyError::NullifierAlreadyUsed);
+            }
+        }
+
+        // 3) mark nullifier as used
+        require!(
+            (nulls.count as usize) < MAX_NULLIFIERS,
+            PrivacyError::NullifierSetFull
+        );
+        nulls.values[nulls.count as usize] = nullifier;
+        nulls.count = nulls
+            .count
+            .checked_add(1)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        emit!(NullifierUsed { nullifier });
+
+        Ok(())
+    }
+}
+
+// --- accounts ---
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(
+        init,
+        payer = payer,
+        seeds = [b"note_tree"],
+        bump,
+        space = 8 + NoteTree::SIZE
+    )]
+    pub note_tree: Account<'info, NoteTree>,
+
+    #[account(
+        init,
+        payer = payer,
+        seeds = [b"nullifiers"],
+        bump,
+        space = 8 + NullifierRegistry::SIZE
+    )]
+    pub nullifiers: Account<'info, NullifierRegistry>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct PublishNote<'info> {
+    #[account(
+        mut,
+        seeds = [b"note_tree"],
+        bump = note_tree.bump,
+    )]
+    pub note_tree: Account<'info, NoteTree>,
+
+    /// Who can append roots (for now: any signer; later: pool admin)
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct VerifyAndNullify<'info> {
+    #[account(
+        seeds = [b"note_tree"],
+        bump = note_tree.bump,
+    )]
+    pub note_tree: Account<'info, NoteTree>,
+
+    #[account(
+        mut,
+        seeds = [b"nullifiers"],
+        bump = nullifiers.bump,
+    )]
+    pub nullifiers: Account<'info, NullifierRegistry>,
+
+    /// Relayer / caller who pays tx fees
+    pub relayer: Signer<'info>,
+}
+
+// --- state ---
+
+#[account]
+pub struct NoteTree {
+    pub bump: u8,
+    pub depth: u8,
+    pub next_index: u32,
+    pub current_root: [u8; 32],
+    pub roots: [[u8; 32]; MAX_ROOTS],
+    pub root_count: u32,
+}
+
+impl NoteTree {
+    pub const SIZE: usize =
+        1 + // bump
+        1 + // depth
+        4 + // next_index
+        32 + // current_root
+        (32 * MAX_ROOTS) + // roots
+        4; // root_count
+}
+
+#[account]
+pub struct NullifierRegistry {
+    pub bump: u8,
+    pub count: u32,
+    pub values: [[u8; 32]; MAX_NULLIFIERS],
+}
+
+impl NullifierRegistry {
+    pub const SIZE: usize =
+        1 + // bump
+        4 + // count
+        (32 * MAX_NULLIFIERS); // values
+}
+
+// --- events ---
+
+#[event]
+pub struct NotePublished {
+    pub root: [u8; 32],
+    pub index: u32,
+}
+
+#[event]
+pub struct NullifierUsed {
+    pub nullifier: [u8; 32],
+}
+
+// --- errors ---
+
+#[error_code]
+pub enum PrivacyError {
+    #[msg("Merkle tree is full")]
+    TreeFull,
+    #[msg("Unknown Merkle root")]
+    UnknownRoot,
+    #[msg("Nullifier already used")]
+    NullifierAlreadyUsed,
+    #[msg("Nullifier set full")]
+    NullifierSetFull,
+    #[msg("Arithmetic overflow")]
+    ArithmeticOverflow,
+}
