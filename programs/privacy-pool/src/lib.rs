@@ -114,14 +114,14 @@ pub mod privacy_pool {
 
         // 3) mark nullifier as used
         require!(
-            (nulls.count as usize) < MAX_NULLIFIERS,
+            (nulls.count as usize) < nulls.values.len(),
             PrivacyError::NullifierSetFull
         );
-        nulls.values[nulls.count as usize] = nullifier;
-        nulls.count = nulls
-            .count
-            .checked_add(1)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        // take a snapshot of count first to avoid overlapping borrows
+        let idx = nulls.count as usize;
+        nulls.values[idx] = nullifier;
+        nulls.count = nulls.count + 1;
 
         emit!(NullifierUsed { nullifier });
 
