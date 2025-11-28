@@ -1,365 +1,314 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_lang::solana_program::{program::invoke, system_instruction};
 
 declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 
-/// Merkle tree + nullifier configs
-pub const TREE_DEPTH: u8 = 24;
-pub const ROOT_HISTORY: usize = 32;        // how many roots to remember
-pub const NULLIFIER_CAPACITY: usize = 1024; // max nullifiers stored
+// Storage bounds
+pub const MAX_ROOTS: usize = 16;
+pub const MAX_NULLIFIERS: usize = 32;
 
-/// Fixed denominations for deposits / withdrawals (in smallest units of the SPL mint).
-/// For dev / localnet you can set them to 1, 5, 10, etc.
-/// In production you’d probably use 1e9, 5e9, 10e9 or similar.
-pub const ALLOWED_DENOMS: [u64; 3] = [1, 5, 10];
-
-fn is_allowed_denom(amount: u64) -> bool {
-    ALLOWED_DENOMS.iter().any(|d| *d == amount)
-}
+// Fixed denominations in lamports (1 / 5 / 10 SOL)
+pub const ALLOWED_DENOMS: [u64; 3] = [
+    1_000_000_000,  // 1 SOL
+    5_000_000_000,  // 5 SOL
+    10_000_000_000, // 10 SOL
+];
 
 #[program]
 pub mod privacy_pool {
     use super::*;
 
-    /// Create the pool:
-    /// - PoolState PDA (binds mint + admin + bump)
-    /// - Vault token account owned by PoolState
-    /// - NoteTree PDA (Merkle root ring buffer)
-    /// - Nullifiers PDA (used nullifiers)
-    pub fn initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
-        let pool = &mut ctx.accounts.pool_state;
-        pool.admin = ctx.accounts.payer.key();
-        pool.mint = ctx.accounts.mint.key();
-        pool.bump = ctx.bumps.pool_state;
+    /// Bootstrap everything: config, note tree, nullifier set, SOL vault.
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        cfg.bump = ctx.bumps.config;
+        cfg.vault_bump = ctx.bumps.vault;
+        cfg.admin = ctx.accounts.payer.key();
+        cfg.relayer = ctx.accounts.payer.key();
+        cfg.paused = false;
 
         let tree = &mut ctx.accounts.note_tree;
-        tree.depth = TREE_DEPTH;
-        tree.current_root_index = 0;
-        tree.num_roots = 0;
         tree.bump = ctx.bumps.note_tree;
+        tree.current_root_index = 0;
 
         let nulls = &mut ctx.accounts.nullifiers;
-        nulls.count = 0;
         nulls.bump = ctx.bumps.nullifiers;
+        nulls.count = 0;
+
+        let vault = &mut ctx.accounts.vault;
+        vault.bump = ctx.bumps.vault;
 
         Ok(())
     }
 
-    /// Public → shielded deposit in a **fixed denomination**.
-    ///
-    /// - Checks `amount` is in ALLOWED_DENOMS
-    /// - Transfers SPL tokens from user → pool vault
-    /// - Emits a NoteDeposited event with `note_commitment`
-    ///
-    /// The commitment itself (hash(secret || poolId || amount || …)) is **created off-chain**
-    /// and just passed as a `[u8; 32]`.
-    pub fn deposit_fixed(
-        ctx: Context<DepositFixed>,
-        amount: u64,
-        note_commitment: [u8; 32],
-    ) -> Result<()> {
-        require!(is_allowed_denom(amount), PrivacyError::InvalidDenomination);
-
-        // Transfer tokens from user → pool vault
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.user_token_account.to_account_info(),
-            to: ctx.accounts.pool_vault.to_account_info(),
-            authority: ctx.accounts.user.to_account_info(),
-        };
-        let cpi_ctx =
-            CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, amount)?;
-
-        // Emit event so an off-chain indexer can update the Merkle tree & compute new root
-        emit!(NoteDeposited {
-            pool: ctx.accounts.pool_state.key(),
-            owner: ctx.accounts.user.key(),
-            amount,
-            note_commitment,
-        });
-
+    /// Admin can pause/unpause the pool.
+    pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        cfg.paused = paused;
         Ok(())
     }
 
-    /// Append a new Merkle root into the ring buffer.
-    ///
-    /// This is meant to be called by an off-chain relayer / indexer after it recomputes
-    /// the Merkle tree over all commitments.
+    /// Admin can rotate relayer.
+    pub fn set_relayer(ctx: Context<SetRelayer>, new_relayer: Pubkey) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        cfg.relayer = new_relayer;
+        Ok(())
+    }
+
+    /// Append a new Merkle root (off-chain builds tree; we only store rotating roots).
     pub fn append_root(ctx: Context<AppendRoot>, new_root: [u8; 32]) -> Result<()> {
-        let pool = &ctx.accounts.pool_state;
+        let cfg = &ctx.accounts.config;
+        require!(!cfg.paused, PrivacyError::PoolPaused);
         require_keys_eq!(
+            cfg.admin,
             ctx.accounts.authority.key(),
-            pool.admin,
-            PrivacyError::Unauthorized
+            PrivacyError::UnauthorizedAdmin
         );
 
         let tree = &mut ctx.accounts.note_tree;
-
-        let idx = (tree.current_root_index as usize) % ROOT_HISTORY;
+        let idx = (tree.current_root_index as usize + 1) % MAX_ROOTS;
         tree.roots[idx] = new_root;
-
-        tree.current_root_index = tree.current_root_index.wrapping_add(1);
-        if tree.num_roots < ROOT_HISTORY as u32 {
-            tree.num_roots += 1;
-        }
+        tree.current_root_index = idx as u32;
 
         emit!(RootAppended {
-            pool: pool.key(),
             root: new_root,
+            index: tree.current_root_index,
         });
 
         Ok(())
     }
 
-    /// Directly register a nullifier without proof (useful for migration/backfill).
+    /// User deposits a fixed SOL denomination into the vault.
+    /// Off-chain you generate a note commitment for this deposit.
+    pub fn deposit_fixed(
+        ctx: Context<DepositFixed>,
+        denom_index: u8,
+        commitment: [u8; 32],
+    ) -> Result<()> {
+        let cfg = &ctx.accounts.config;
+        require!(!cfg.paused, PrivacyError::PoolPaused);
+
+        let i = denom_index as usize;
+        require!(i < ALLOWED_DENOMS.len(), PrivacyError::InvalidDenomination);
+        let amount = ALLOWED_DENOMS[i];
+
+        // Transfer SOL from depositor → vault PDA account.
+        let ix = system_instruction::transfer(
+            &ctx.accounts.depositor.key(),
+            &ctx.accounts.vault.key(),
+            amount,
+        );
+        invoke(
+            &ix,
+            &[
+                ctx.accounts.depositor.to_account_info(),
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        emit!(NotePublished {
+            commitment,
+            denom_index,
+        });
+
+        Ok(())
+    }
+
+    /// Optional explicit nullifier registration. Only relayer is allowed.
     pub fn register_nullifier(
         ctx: Context<RegisterNullifier>,
         nullifier: [u8; 32],
     ) -> Result<()> {
-        let pool = &ctx.accounts.pool_state;
+        let cfg = &ctx.accounts.config;
+        require!(!cfg.paused, PrivacyError::PoolPaused);
         require_keys_eq!(
+            cfg.relayer,
             ctx.accounts.authority.key(),
-            pool.admin,
-            PrivacyError::Unauthorized
+            PrivacyError::UnauthorizedRelayer
         );
 
         let nulls = &mut ctx.accounts.nullifiers;
-        let count = nulls.count as usize;
-
-        // Ensure not already used
-        for i in 0..count {
-            require!(
-                nulls.values[i] != nullifier,
-                PrivacyError::NullifierAlreadyUsed
-            );
-        }
         require!(
-            count < NULLIFIER_CAPACITY,
-            PrivacyError::NullifierSetFull
+            !nulls.contains(&nullifier),
+            PrivacyError::NullifierAlreadyUsed
         );
+        nulls.push(nullifier)?;
 
-        nulls.values[count] = nullifier;
-        nulls.count = (count + 1) as u32;
-
-        emit!(NullifierUsed {
-            pool: pool.key(),
-            nullifier,
-        });
-
+        emit!(NullifierRegistered { nullifier });
         Ok(())
     }
 
-    /// Shielded → public withdraw with note.
-    ///
-    /// This is the **zk entry point** (for now `_proof` is ignored):
-    ///
-    /// Inputs:
-    /// - `root`: Merkle root the note belongs to
-    /// - `nullifier`: derived from secret; must be unused
-    /// - `amount`: must be in ALLOWED_DENOMS
-    /// - `_proof`: zk proof bytes (Groth16/Plonk etc, TODO)
-    ///
-    /// Checks:
-    /// - `root` is in NoteTree recent history
-    /// - `nullifier` not already in Nullifiers
-    /// - `amount` is allowed
-    ///
-    /// Effects:
-    /// - writes `nullifier` into Nullifiers (no double spend)
-    /// - transfers `amount` tokens from pool vault → recipient's token account
-    pub fn withdraw_with_note(
-        ctx: Context<WithdrawWithNote>,
+    /// Relayer-based withdrawal:
+    /// - checks root membership
+    /// - enforces one-time nullifier
+    /// - pays a fixed SOL denom from vault → recipient
+    /// ZK proof is still a placeholder (`_proof`).
+    pub fn verify_and_nullify(
+        ctx: Context<VerifyAndNullify>,
         root: [u8; 32],
         nullifier: [u8; 32],
-        amount: u64,
+        denom_index: u8,
         _proof: Vec<u8>,
     ) -> Result<()> {
-        require!(is_allowed_denom(amount), PrivacyError::InvalidDenomination);
+        let cfg = &ctx.accounts.config;
+        require!(!cfg.paused, PrivacyError::PoolPaused);
+        require_keys_eq!(
+            cfg.relayer,
+            ctx.accounts.relayer.key(),
+            PrivacyError::UnauthorizedRelayer
+        );
 
-        // ----- 1) Check root in history -----
         let tree = &ctx.accounts.note_tree;
-        let max = tree.num_roots.min(ROOT_HISTORY as u32) as usize;
-        let mut found = false;
-        for i in 0..max {
-            if tree.roots[i] == root {
-                found = true;
-                break;
-            }
-        }
-        require!(found, PrivacyError::UnknownRoot);
+        require!(tree.contains_root(&root), PrivacyError::UnknownRoot);
 
-        // ----- 2) Check + mark nullifier -----
         let nulls = &mut ctx.accounts.nullifiers;
-        let count = nulls.count as usize;
-
-        for i in 0..count {
-            require!(
-                nulls.values[i] != nullifier,
-                PrivacyError::NullifierAlreadyUsed
-            );
-        }
         require!(
-            count < NULLIFIER_CAPACITY,
-            PrivacyError::NullifierSetFull
+            !nulls.contains(&nullifier),
+            PrivacyError::NullifierAlreadyUsed
+        );
+        nulls.push(nullifier)?;
+
+        let i = denom_index as usize;
+        require!(i < ALLOWED_DENOMS.len(), PrivacyError::InvalidDenomination);
+        let amount = ALLOWED_DENOMS[i];
+
+        let vault_info = ctx.accounts.vault.to_account_info();
+        let recipient_info = ctx.accounts.recipient.to_account_info();
+
+        require!(
+            vault_info.lamports() >= amount,
+            PrivacyError::VaultInsufficientBalance
         );
 
-        nulls.values[count] = nullifier;
-        nulls.count = (count + 1) as u32;
+        // Move SOL from vault → recipient by mutating lamports directly
+        **vault_info.try_borrow_mut_lamports()? -= amount;
+        **recipient_info.try_borrow_mut_lamports()? += amount;
 
-        emit!(NullifierUsed {
-            pool: ctx.accounts.pool_state.key(),
+        emit!(NoteSpent {
+            root,
             nullifier,
+            denom_index,
+            recipient: recipient_info.key(),
         });
-
-        // ----- 3) Move tokens from vault → recipient ATA -----
-        let pool = &ctx.accounts.pool_state;
-
-        let seeds: &[&[u8]] = &[
-            b"pool_state",
-            pool.mint.as_ref(),
-            &[pool.bump],
-        ];
-        let signer_seeds = &[seeds];
-
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.pool_vault.to_account_info(),
-            to: ctx.accounts.user_token_account.to_account_info(),
-            authority: ctx.accounts.pool_state.to_account_info(),
-        };
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            cpi_accounts,
-            signer_seeds,
-        );
-        token::transfer(cpi_ctx, amount)?;
 
         Ok(())
     }
 }
 
-// ================== ACCOUNTS ==================
+// =======================
+// Accounts
+// =======================
 
 #[derive(Accounts)]
-pub struct InitializePool<'info> {
-    /// Pool state PDA: binds mint + admin + bump
+pub struct Initialize<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + PoolState::SIZE,
-        seeds = [b"pool_state", mint.key().as_ref()],
-        bump
+        seeds = [b"config"],
+        bump,
+        space = 8 + PrivacyConfig::SIZE
     )]
-    pub pool_state: Account<'info, PoolState>,
+    pub config: Account<'info, PrivacyConfig>,
 
-    pub mint: Account<'info, Mint>,
-
-    /// SPL token vault owned by pool_state
     #[account(
         init,
         payer = payer,
-        token::mint = mint,
-        token::authority = pool_state,
-    )]
-    pub pool_vault: Account<'info, TokenAccount>,
-
-    /// Note tree PDA (per pool_state)
-    #[account(
-        init,
-        payer = payer,
-        space = 8 + NoteTree::SIZE,
-        seeds = [b"note_tree", pool_state.key().as_ref()],
-        bump
+        seeds = [b"note_tree"],
+        bump,
+        space = 8 + NoteTree::SIZE
     )]
     pub note_tree: Account<'info, NoteTree>,
 
-    /// Nullifiers PDA (per pool_state)
     #[account(
         init,
         payer = payer,
-        space = 8 + Nullifiers::SIZE,
-        seeds = [b"nullifiers", pool_state.key().as_ref()],
-        bump
+        seeds = [b"nullifiers"],
+        bump,
+        space = 8 + Nullifiers::SIZE
     )]
     pub nullifiers: Account<'info, Nullifiers>,
+
+    #[account(
+        init,
+        payer = payer,
+        seeds = [b"vault"],
+        bump,
+        space = 8 + Vault::SIZE
+    )]
+    pub vault: Account<'info, Vault>,
 
     #[account(mut)]
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
-    pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 #[derive(Accounts)]
-pub struct DepositFixed<'info> {
-    #[account(
-        mut,
-        has_one = mint,
-        seeds = [b"pool_state", mint.key().as_ref()],
-        bump = pool_state.bump,
-    )]
-    pub pool_state: Account<'info, PoolState>,
+pub struct SetPaused<'info> {
+    #[account(mut, has_one = admin)]
+    pub config: Account<'info, PrivacyConfig>,
+    pub admin: Signer<'info>,
+}
 
-    pub mint: Account<'info, Mint>,
-
-    #[account(
-        mut,
-        constraint = pool_vault.mint == mint.key(),
-        constraint = pool_vault.owner == pool_state.key(),
-    )]
-    pub pool_vault: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        constraint = user_token_account.mint == mint.key(),
-        constraint = user_token_account.owner == user.key(),
-    )]
-    pub user_token_account: Account<'info, TokenAccount>,
-
-    #[account(mut)]
-    pub user: Signer<'info>,
-
-    pub token_program: Program<'info, Token>,
+#[derive(Accounts)]
+pub struct SetRelayer<'info> {
+    #[account(mut, has_one = admin)]
+    pub config: Account<'info, PrivacyConfig>,
+    pub admin: Signer<'info>,
 }
 
 #[derive(Accounts)]
 pub struct AppendRoot<'info> {
     #[account(
-        mut,
-        has_one = mint,
-        seeds = [b"pool_state", mint.key().as_ref()],
-        bump = pool_state.bump,
+        seeds = [b"config"],
+        bump = config.bump
     )]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
+    pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"note_tree", pool_state.key().as_ref()],
-        bump = note_tree.bump,
+        seeds = [b"note_tree"],
+        bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
 
     pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct DepositFixed<'info> {
+    #[account(
+        seeds = [b"config"],
+        bump = config.bump
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump = config.vault_bump
+    )]
+    pub vault: Account<'info, Vault>,
+
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct RegisterNullifier<'info> {
     #[account(
-        mut,
-        has_one = mint,
-        seeds = [b"pool_state", mint.key().as_ref()],
-        bump = pool_state.bump,
+        seeds = [b"config"],
+        bump = config.bump
     )]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
+    pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"nullifiers", pool_state.key().as_ref()],
-        bump = nullifiers.bump,
+        seeds = [b"nullifiers"],
+        bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, Nullifiers>,
 
@@ -367,129 +316,162 @@ pub struct RegisterNullifier<'info> {
 }
 
 #[derive(Accounts)]
-pub struct WithdrawWithNote<'info> {
+pub struct VerifyAndNullify<'info> {
     #[account(
-        has_one = mint,
-        seeds = [b"pool_state", mint.key().as_ref()],
-        bump = pool_state.bump,
+        seeds = [b"config"],
+        bump = config.bump
     )]
-    pub pool_state: Account<'info, PoolState>,
-
-    pub mint: Account<'info, Mint>,
+    pub config: Account<'info, PrivacyConfig>,
 
     #[account(
-        seeds = [b"note_tree", pool_state.key().as_ref()],
-        bump = note_tree.bump,
+        seeds = [b"note_tree"],
+        bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
 
     #[account(
         mut,
-        seeds = [b"nullifiers", pool_state.key().as_ref()],
-        bump = nullifiers.bump,
+        seeds = [b"nullifiers"],
+        bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, Nullifiers>,
 
     #[account(
         mut,
-        constraint = pool_vault.mint == mint.key(),
-        constraint = pool_vault.owner == pool_state.key(),
+        seeds = [b"vault"],
+        bump = config.vault_bump
     )]
-    pub pool_vault: Account<'info, TokenAccount>,
+    pub vault: Account<'info, Vault>,
 
-    #[account(
-        mut,
-        constraint = user_token_account.mint == mint.key(),
-        constraint = user_token_account.owner == recipient.key(),
-    )]
-    pub user_token_account: Account<'info, TokenAccount>,
-
-    /// Recipient of withdrawn funds; zk proof “decides” this off-chain.
-    #[account()]
-    pub recipient: SystemAccount<'info>,
-
-    /// Relayer / tx sender (for fee logic later).
+    /// CHECK: any SOL recipient
     #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+
+    /// Relayer that submits withdrawals; must match config.relayer
     pub relayer: Signer<'info>,
 
-    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
-// ================== STATE ==================
+// =======================
+// State
+// =======================
 
 #[account]
-pub struct PoolState {
+pub struct PrivacyConfig {
+    pub bump: u8,
+    pub vault_bump: u8,
     pub admin: Pubkey,
-    pub mint: Pubkey,
+    pub relayer: Pubkey,
+    pub paused: bool,
+}
+
+impl PrivacyConfig {
+    pub const SIZE: usize = 1 + 1 + 32 + 32 + 1;
+}
+
+#[account]
+pub struct Vault {
     pub bump: u8,
 }
 
-impl PoolState {
-    pub const SIZE: usize = 32 + 32 + 1;
+impl Vault {
+    pub const SIZE: usize = 1;
 }
 
 #[account]
 pub struct NoteTree {
-    pub depth: u8,
-    pub current_root_index: u32,
-    pub num_roots: u32,
     pub bump: u8,
-    pub roots: [[u8; 32]; ROOT_HISTORY],
+    pub current_root_index: u32,
+    pub roots: [[u8; 32]; MAX_ROOTS],
 }
 
 impl NoteTree {
-    pub const SIZE: usize = 1 + 4 + 4 + 1 + (32 * ROOT_HISTORY);
+    pub const SIZE: usize = 1 + 4 + (32 * MAX_ROOTS);
+
+    pub fn contains_root(&self, target: &[u8; 32]) -> bool {
+        self.roots.iter().any(|r| r == target)
+    }
 }
 
 #[account]
 pub struct Nullifiers {
-    pub count: u32,
     pub bump: u8,
-    pub values: [[u8; 32]; NULLIFIER_CAPACITY],
+    pub count: u32,
+    pub values: [[u8; 32]; MAX_NULLIFIERS],
 }
 
 impl Nullifiers {
-    pub const SIZE: usize = 4 + 1 + (32 * NULLIFIER_CAPACITY);
+    pub const SIZE: usize = 1 + 4 + (32 * MAX_NULLIFIERS);
+
+    pub fn contains(&self, target: &[u8; 32]) -> bool {
+        let count = self.count as usize;
+        for i in 0..count {
+            if &self.values[i] == target {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn push(&mut self, n: [u8; 32]) -> Result<()> {
+        let idx = self.count as usize;
+        require!(idx < MAX_NULLIFIERS, PrivacyError::NullifiersFull);
+        self.values[idx] = n;
+        self.count += 1;
+        Ok(())
+    }
 }
 
-// ================== EVENTS ==================
-
-#[event]
-pub struct NoteDeposited {
-    #[index]
-    pub pool: Pubkey,
-    #[index]
-    pub owner: Pubkey,
-    pub amount: u64,
-    pub note_commitment: [u8; 32],
-}
+// =======================
+// Events
+// =======================
 
 #[event]
 pub struct RootAppended {
-    #[index]
-    pub pool: Pubkey,
     pub root: [u8; 32],
+    pub index: u32,
 }
 
 #[event]
-pub struct NullifierUsed {
-    #[index]
-    pub pool: Pubkey,
+pub struct NotePublished {
+    pub commitment: [u8; 32],
+    pub denom_index: u8,
+}
+
+#[event]
+pub struct NullifierRegistered {
     pub nullifier: [u8; 32],
 }
 
-// ================== ERRORS ==================
+#[event]
+pub struct NoteSpent {
+    pub root: [u8; 32],
+    pub nullifier: [u8; 32],
+    pub denom_index: u8,
+    pub recipient: Pubkey,
+}
+
+// =======================
+// Errors
+// =======================
 
 #[error_code]
 pub enum PrivacyError {
-    #[msg("Merkle root not found in recent history")]
+    #[msg("Pool is paused")]
+    PoolPaused,
+    #[msg("Unauthorized admin call")]
+    UnauthorizedAdmin,
+    #[msg("Unauthorized relayer")]
+    UnauthorizedRelayer,
+    #[msg("Unknown Merkle root")]
     UnknownRoot,
     #[msg("Nullifier already used")]
     NullifierAlreadyUsed,
-    #[msg("Nullifier set full")]
-    NullifierSetFull,
-    #[msg("Amount not in allowed fixed denominations")]
+    #[msg("Nullifier storage is full")]
+    NullifiersFull,
+    #[msg("Invalid denomination index")]
     InvalidDenomination,
-    #[msg("Not authorized")]
-    Unauthorized,
+    #[msg("Vault has insufficient balance")]
+    VaultInsufficientBalance,
 }
