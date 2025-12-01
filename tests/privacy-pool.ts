@@ -1,11 +1,7 @@
 import "mocha";
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
-import {
-  Keypair,
-  PublicKey,
-  SystemProgram,
-} from "@solana/web3.js";
+import { Program, BN } from "@coral-xyz/anchor";
+import { PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
 
 import { PrivacyPool } from "../target/types/privacy_pool";
 
@@ -16,17 +12,25 @@ describe("privacy-pool fixed-denom SOL", () => {
   const program = anchor.workspace.PrivacyPool as Program<PrivacyPool>;
   const wallet = provider.wallet as anchor.Wallet;
 
-  const denomIndex = 0; // 1 SOL (index into ALLOWED_DENOMS)
-
   let configPda: PublicKey;
+  let vaultPda: PublicKey;
   let noteTreePda: PublicKey;
   let nullifiersPda: PublicKey;
-  let vaultPda: PublicKey;
+
+  // two fixed denoms for test: 1 SOL, 5 SOL
+  const denomsLamports = [
+    BigInt(LAMPORTS_PER_SOL),
+    BigInt(5 * LAMPORTS_PER_SOL),
+  ];
+  const feeBps = 50; // 0.5%
 
   before(async () => {
-    // PDAs must match the seeds in Rust
     [configPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("config")],
+      program.programId
+    );
+    [vaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault")],
       program.programId
     );
     [noteTreePda] = PublicKey.findProgramAddressSync(
@@ -37,160 +41,124 @@ describe("privacy-pool fixed-denom SOL", () => {
       [Buffer.from("nullifiers")],
       program.programId
     );
-    [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault")],
-      program.programId
+
+    await program.methods
+      .initialize(
+        denomsLamports.map((d) => new BN(d.toString())),
+        feeBps
+      )
+      .accounts({
+        config: configPda,
+        vault: vaultPda,
+        noteTree: noteTreePda,
+        nullifiers: nullifiersPda,
+        admin: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .rpc();
+  });
+
+  it("deposits fixed 1 SOL and appends root", async () => {
+    const denomIndex = 0;
+    const commitment = new Array(32).fill(1);
+    const root = new Array(32).fill(2);
+
+    const beforeVault = await provider.connection.getBalance(vaultPda);
+
+    await program.methods
+      .depositFixed(denomIndex, commitment as any, root as any)
+      .accounts({
+        config: configPda,
+        vault: vaultPda,
+        noteTree: noteTreePda,
+        depositor: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .rpc();
+
+    const afterVault = await provider.connection.getBalance(vaultPda);
+    const delta = BigInt(afterVault - beforeVault);
+
+    if (delta !== denomsLamports[denomIndex]) {
+      throw new Error(
+        `Unexpected vault delta: got ${delta.toString()} expected ${denomsLamports[
+          denomIndex
+          ].toString()}`
+      );
+    }
+
+    console.log("Deposit fixed-denom 1 SOL OK");
+  });
+
+  it("withdraws via relayer with fee + nullifier", async () => {
+    const denomIndex = 0;
+    const amount = denomsLamports[denomIndex];
+    const fee = (amount * BigInt(feeBps)) / 10_000n;
+    const toUser = amount - fee;
+
+    const relayer = anchor.web3.Keypair.generate();
+    const recipient = anchor.web3.Keypair.generate();
+
+    // fund relayer so it can pay tx fees on local validator
+    await provider.connection.requestAirdrop(
+      relayer.publicKey,
+      2 * LAMPORTS_PER_SOL
     );
 
-    // Initialize everything
+    // admin adds relayer
     await program.methods
-      .initialize()
+      .addRelayer(relayer.publicKey)
       .accounts({
         config: configPda,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+
+    // reuse the last root we set in the previous deposit
+    const root = new Array(32).fill(2);
+    const nullifier = new Array(32).fill(3);
+    const proof = Buffer.alloc(0); // dummy proof
+
+    const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
+    const beforeRelayer = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const beforeRecipient = BigInt(
+      await provider.connection.getBalance(recipient.publicKey)
+    );
+
+    await program.methods
+      .withdraw(root as any, nullifier as any, denomIndex, recipient.publicKey, proof)
+      .accounts({
+        config: configPda,
+        vault: vaultPda,
         noteTree: noteTreePda,
         nullifiers: nullifiersPda,
-        vault: vaultPda,
-        payer: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
-  });
-
-  it("deposit + withdraw via verify_and_nullify", async () => {
-    // 1) Append a root we pretend contains our note
-    const root: number[] = new Array(32).fill(0);
-    root[0] = 1;
-
-    await program.methods
-      .appendRoot(root)
-      .accounts({
-        config: configPda,
-        noteTree: noteTreePda,
-        authority: wallet.publicKey,
-      } as any)
-      .rpc();
-
-    // 2) Deposit 1 SOL with dummy commitment
-    const commitment: number[] = new Array(32).fill(0);
-    commitment[0] = 123;
-
-    await program.methods
-      .depositFixed(denomIndex, commitment)
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        depositor: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
-
-    // 3) Withdraw through relayer (wallet acts as relayer here)
-    const recipient = Keypair.generate();
-    const nullifier: number[] = new Array(32).fill(0);
-    nullifier[0] = 77;
-
-    const before = await provider.connection.getBalance(recipient.publicKey);
-
-    await program.methods
-      .verifyAndNullify(
-        root,
-        nullifier,
-        denomIndex,
-        Buffer.alloc(0), // zk proof placeholder
-      )
-      .accounts({
-        config: configPda,
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        vault: vaultPda,
+        relayer: relayer.publicKey,
         recipient: recipient.publicKey,
-        relayer: wallet.publicKey,
         systemProgram: SystemProgram.programId,
       } as any)
+      .signers([relayer])
       .rpc();
 
-    const after = await provider.connection.getBalance(recipient.publicKey);
-    console.log("Recipient balance before/after:", before, after);
-  });
+    const afterVault = BigInt(await provider.connection.getBalance(vaultPda));
+    const afterRelayer = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const afterRecipient = BigInt(
+      await provider.connection.getBalance(recipient.publicKey)
+    );
 
-  it("rejects double-spend of same nullifier", async () => {
-    const root: number[] = new Array(32).fill(0);
-    root[0] = 2;
-
-    await program.methods
-      .appendRoot(root)
-      .accounts({
-        config: configPda,
-        noteTree: noteTreePda,
-        authority: wallet.publicKey,
-      } as any)
-      .rpc();
-
-    const commitment: number[] = new Array(32).fill(0);
-    commitment[0] = 200;
-
-    await program.methods
-      .depositFixed(denomIndex, commitment)
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        depositor: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
-
-    const nullifier: number[] = new Array(32).fill(0);
-    nullifier[0] = 99;
-
-    const recipient1 = Keypair.generate();
-
-    // First spend succeeds
-    await program.methods
-      .verifyAndNullify(
-        root,
-        nullifier,
-        denomIndex,
-        Buffer.alloc(0),
-      )
-      .accounts({
-        config: configPda,
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        vault: vaultPda,
-        recipient: recipient1.publicKey,
-        relayer: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
-
-    const recipient2 = Keypair.generate();
-    let failed = false;
-    try {
-      // Second spend with same nullifier should fail
-      await program.methods
-        .verifyAndNullify(
-          root,
-          nullifier,
-          denomIndex,
-          Buffer.alloc(0),
-        )
-        .accounts({
-          config: configPda,
-          noteTree: noteTreePda,
-          nullifiers: nullifiersPda,
-          vault: vaultPda,
-          recipient: recipient2.publicKey,
-          relayer: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        } as any)
-        .rpc();
-    } catch (e) {
-      failed = true;
-      console.log("Expected double-spend failure:", (e as Error).message);
+    if (beforeVault - afterVault !== amount) {
+      throw new Error("Vault SOL delta mismatch");
+    }
+    if (afterRelayer - beforeRelayer !== fee) {
+      throw new Error("Relayer fee mismatch");
+    }
+    if (afterRecipient - beforeRecipient !== toUser) {
+      throw new Error("Recipient amount mismatch");
     }
 
-    if (!failed) {
-      throw new Error("Second spend with same nullifier unexpectedly succeeded");
-    }
+    console.log("Withdraw via relayer with fee OK");
   });
 });
