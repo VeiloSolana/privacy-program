@@ -1,7 +1,12 @@
 import "mocha";
 import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  SendTransactionError,
+} from "@solana/web3.js";
 
 import { PrivacyPool } from "../target/types/privacy_pool";
 
@@ -42,31 +47,49 @@ describe("privacy-pool fixed-denom SOL", () => {
       program.programId
     );
 
-    await program.methods
-      .initialize(
-        denomsLamports.map((d) => new BN(d.toString())),
-        feeBps
-      )
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        admin: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
+    // Try to fetch config; if it exists, assume already initialized.
+    const existing = await provider.connection.getAccountInfo(configPda);
+    if (existing) {
+      console.log(
+        "Initialize skipped: PDAs already exist on this cluster, continuing tests."
+      );
+      return;
+    }
+
+    // initialize once
+    try {
+      await program.methods
+        .initialize(
+          denomsLamports.map((d) => new BN(d.toString())),
+          feeBps
+        )
+        .accounts({
+          config: configPda,
+          vault: vaultPda,
+          noteTree: noteTreePda,
+          nullifiers: nullifiersPda,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .rpc();
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Initialize failed with logs:", logs);
+      }
+      throw e;
+    }
   });
 
   it("deposits fixed 1 SOL and appends root", async () => {
     const denomIndex = 0;
-    const commitment = new Array(32).fill(1);
-    const root = new Array(32).fill(2);
+    const commitment = new Array(32).fill(1); // number[]
+    const root = new Array(32).fill(2);       // number[]
 
     const beforeVault = await provider.connection.getBalance(vaultPda);
 
     await program.methods
-      .depositFixed(denomIndex, commitment as any, root as any)
+      .depositFixed(denomIndex, commitment, root)
       .accounts({
         config: configPda,
         vault: vaultPda,
@@ -114,10 +137,10 @@ describe("privacy-pool fixed-denom SOL", () => {
       } as any)
       .rpc();
 
-    // reuse the last root we set in the previous deposit
-    const root = new Array(32).fill(2);
-    const nullifier = new Array(32).fill(3);
-    const proof = Buffer.alloc(0); // dummy proof
+    // reuse the root from previous test
+    const root = new Array(32).fill(2);       // number[]
+    const nullifier = new Array(32).fill(3);  // number[]
+    const proof = Buffer.alloc(0);            // Buffer for now (dummy)
 
     const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
     const beforeRelayer = BigInt(
@@ -128,7 +151,7 @@ describe("privacy-pool fixed-denom SOL", () => {
     );
 
     await program.methods
-      .withdraw(root as any, nullifier as any, denomIndex, recipient.publicKey, proof)
+      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof)
       .accounts({
         config: configPda,
         vault: vaultPda,

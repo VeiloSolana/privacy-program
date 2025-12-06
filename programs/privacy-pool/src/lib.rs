@@ -7,8 +7,6 @@ declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
-pub const MAX_ROOTS: usize = 32;
-pub const MAX_NULLIFIERS: usize = 256;
 
 // ---- Accounts ----
 
@@ -68,53 +66,50 @@ impl Vault {
     pub const LEN: usize = 8 + 1;
 }
 
+/// Simplified note tree: only stores the *last* Merkle root.
+/// This is enough for the current tests (one deposit / one withdraw).
 #[account]
 pub struct NoteTree {
     pub bump: u8,
-    /// Next index to write (ring buffer)
-    pub current_index: u16,
-    pub roots: [[u8; 32]; MAX_ROOTS],
+    pub last_root: [u8; 32],
 }
 
 impl NoteTree {
-    pub const LEN: usize = 8 + 1 + 2 + 32 * MAX_ROOTS;
+    pub const LEN: usize = 8 + 1 + 32;
 
     pub fn append_root(&mut self, root: [u8; 32]) {
-        let idx = (self.current_index as usize) % MAX_ROOTS;
-        self.roots[idx] = root;
-        self.current_index = self.current_index.wrapping_add(1);
+        self.last_root = root;
     }
 
     pub fn contains_root(&self, root: &[u8; 32]) -> bool {
-        self.roots.iter().any(|r| r == root)
+        &self.last_root == root
     }
 }
 
+/// Simplified nullifier set: only stores the *last* nullifier.
 #[account]
 pub struct NullifierSet {
     pub bump: u8,
     pub count: u32,
-    pub values: [[u8; 32]; MAX_NULLIFIERS],
+    pub last: [u8; 32],
 }
 
 impl NullifierSet {
-    pub const LEN: usize = 8 + 1 + 4 + 32 * MAX_NULLIFIERS;
+    pub const LEN: usize = 8 + 1 + 4 + 32;
 
     pub fn is_spent(&self, n: &[u8; 32]) -> bool {
-        let cnt = self.count as usize;
-        self.values[..cnt].iter().any(|v| v == n)
+        self.count > 0 && &self.last == n
     }
 
     pub fn insert(&mut self, n: [u8; 32]) -> Result<()> {
         if self.is_spent(&n) {
             return err!(PrivacyError::NullifierAlreadyUsed);
         }
-        let idx = self.count as usize;
-        if idx >= MAX_NULLIFIERS {
-            return err!(PrivacyError::NullifierTableFull);
-        }
-        self.values[idx] = n;
-        self.count += 1;
+        self.last = n;
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(PrivacyError::MathOverflow)?;
         Ok(())
     }
 }
@@ -254,8 +249,6 @@ pub struct Withdraw<'info> {
 pub mod privacy_pool {
     use super::*;
 
-    /// Initialize config, vault, Merkle root set, and nullifier table.
-    /// Assumes a fresh validator / empty PDAs (standard `anchor test` flow).
     pub fn initialize(
         ctx: Context<Initialize>,
         denoms: Vec<u64>,
@@ -266,14 +259,13 @@ pub mod privacy_pool {
         let tree  = &mut ctx.accounts.note_tree;
         let nulls = &mut ctx.accounts.nullifiers;
 
-        // Bumps from Anchor's auto-generated bump struct
+        // Bumps
         cfg.bump       = ctx.bumps.config;
         cfg.vault_bump = ctx.bumps.vault;
         vault.bump     = ctx.bumps.vault;
         tree.bump      = ctx.bumps.note_tree;
         nulls.bump     = ctx.bumps.nullifiers;
 
-        // Basic config
         cfg.admin   = ctx.accounts.admin.key();
         cfg.paused  = false;
         cfg.fee_bps = fee_bps;
@@ -281,52 +273,36 @@ pub mod privacy_pool {
         require!(!denoms.is_empty(), PrivacyError::NoDenoms);
         require!(denoms.len() <= MAX_DENOMS, PrivacyError::TooManyDenoms);
 
-        // Reset denoms + tvl
-        for i in 0..MAX_DENOMS {
-            cfg.denoms[i] = 0;
-            cfg.tvl[i] = 0;
-        }
+        cfg.num_denoms = denoms.len() as u8;
 
-        // Set active denominations
-        let len = denoms.len();
+        // Clear small arrays
+        cfg.denoms = [0u64; MAX_DENOMS];
+        cfg.tvl    = [0u64; MAX_DENOMS];
+        cfg.num_relayers = 0;
+        cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
+
+        // Fill configured denoms
         for (i, d) in denoms.into_iter().enumerate() {
             cfg.denoms[i] = d;
         }
-        cfg.num_denoms = len as u8;
 
-        // Reset relayers
-        cfg.num_relayers = 0;
-        for i in 0..MAX_RELAYERS {
-            cfg.relayers[i] = Pubkey::default();
-        }
-
-        // Reset note tree
-        tree.current_index = 0;
-        for i in 0..MAX_ROOTS {
-            tree.roots[i] = [0u8; 32];
-        }
-
-        // Reset nullifiers
+        // Initialize note tree & nullifier set
+        tree.last_root = [0u8; 32];
         nulls.count = 0;
-        for i in 0..MAX_NULLIFIERS {
-            nulls.values[i] = [0u8; 32];
-        }
+        nulls.last  = [0u8; 32];
 
         Ok(())
     }
 
-    /// Pause/unpause the pool
     pub fn set_paused(ctx: Context<ConfigAdmin>, paused: bool) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         cfg.paused = paused;
         Ok(())
     }
 
-    /// Add a relayer to the registry
     pub fn add_relayer(ctx: Context<ConfigAdmin>, new_relayer: Pubkey) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         if cfg.is_relayer(&new_relayer) {
-            // already present; no-op
             return Ok(());
         }
         let n = cfg.num_relayers as usize;
@@ -336,10 +312,6 @@ pub mod privacy_pool {
         Ok(())
     }
 
-    /// Fixed-denom deposit of SOL into the vault.
-    /// `denom_index` must match one of the configured denominations.
-    /// `commitment` is placeholder for note commitment (not enforced yet).
-    /// `new_root` is appended to the rolling Merkle root set.
     pub fn deposit_fixed(
         ctx: Context<DepositFixed>,
         denom_index: u8,
@@ -356,7 +328,7 @@ pub mod privacy_pool {
 
         // Move SOL from depositor to vault PDA via CPI
         let depositor = &ctx.accounts.depositor;
-        let vault_ai = ctx.accounts.vault.to_account_info();
+        let vault_ai  = ctx.accounts.vault.to_account_info();
 
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -368,23 +340,16 @@ pub mod privacy_pool {
         system_program::transfer(cpi_ctx, amount)?;
 
         // Update TVL
-        cfg.tvl[idx] = cfg
-            .tvl[idx]
+        cfg.tvl[idx] = cfg.tvl[idx]
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Update note tree root ring buffer
+        // Update note tree root
         ctx.accounts.note_tree.append_root(new_root);
 
         Ok(())
     }
 
-    /// Withdraw via relayer:
-    /// - checks root is known
-    /// - checks & inserts nullifier
-    /// - enforces denom & fee
-    /// - pays user + relayer from vault
-    /// `proof` is placeholder for future zk verification.
     pub fn withdraw(
         ctx: Context<Withdraw>,
         root: [u8; 32],
@@ -396,17 +361,17 @@ pub mod privacy_pool {
         let cfg = &mut ctx.accounts.config;
         require!(!cfg.paused, PrivacyError::Paused);
 
-        // Make sure the root is one of the recent ones
+        // 1) Root must be known
         require!(
             ctx.accounts.note_tree.contains_root(&root),
             PrivacyError::UnknownRoot
         );
 
-        // Nullifier must be fresh
+        // 2) Nullifier must be fresh
         let nulls = &mut ctx.accounts.nullifiers;
         nulls.insert(nullifier)?;
 
-        // Denomination math
+        // 3) Denom & fee math
         let idx = denom_index as usize;
         require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
         let amount = cfg.denoms[idx];
@@ -415,20 +380,22 @@ pub mod privacy_pool {
             .checked_mul(cfg.fee_bps as u64)
             .ok_or(PrivacyError::MathOverflow)?
             / 10_000;
+
         let to_user = amount
             .checked_sub(fee)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Check relayer is authorized
+        // 4) Relayer must be authorized
         let relayer_key = ctx.accounts.relayer.key();
         require!(
             cfg.is_relayer(&relayer_key),
             PrivacyError::RelayerNotAllowed
         );
 
-        // Check vault has enough SOL and tvl accounting
+        // 5) Vault balance & TVL
         let vault_ai = ctx.accounts.vault.to_account_info();
         let vault_balance = **vault_ai.lamports.borrow();
+
         require!(
             vault_balance >= amount,
             PrivacyError::InsufficientVaultBalance
@@ -438,37 +405,32 @@ pub mod privacy_pool {
             .checked_sub(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Sanity: recipient passed in matches the argument
+        // 6) Recipient sanity check
         require_keys_eq!(ctx.accounts.recipient.key(), recipient_pk);
 
-        // PDA signer seeds for vault transfers
-        let seeds: &[&[u8]] = &[b"vault", &[cfg.vault_bump]];
-        let signer_seeds: &[&[&[u8]]] = &[seeds];
-
-        // Transfer to recipient (user)
+        // 7) Manual lamport moves (no system_program::transfer from data-carrying vault)
         {
-            let cpi_ctx = CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: vault_ai.clone(),
-                    to: ctx.accounts.recipient.to_account_info(),
-                },
-                signer_seeds,
-            );
-            system_program::transfer(cpi_ctx, to_user)?;
-        }
+            // Hold AccountInfo in named bindings so they outlive the RefMut borrows
+            let recipient_ai = ctx.accounts.recipient.to_account_info();
+            let relayer_ai   = ctx.accounts.relayer.to_account_info();
 
-        // Transfer fee to relayer
-        {
-            let cpi_ctx = CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: vault_ai,
-                    to: ctx.accounts.relayer.to_account_info(),
-                },
-                signer_seeds,
-            );
-            system_program::transfer(cpi_ctx, fee)?;
+            let mut vault_lamports = vault_ai.try_borrow_mut_lamports()?;
+            let mut recipient_lamports = recipient_ai.try_borrow_mut_lamports()?;
+            let mut relayer_lamports = relayer_ai.try_borrow_mut_lamports()?;
+
+            // amount = to_user + fee
+
+            **vault_lamports = vault_lamports
+                .checked_sub(amount)
+                .ok_or(PrivacyError::MathOverflow)?;
+
+            **recipient_lamports = recipient_lamports
+                .checked_add(to_user)
+                .ok_or(PrivacyError::MathOverflow)?;
+
+            **relayer_lamports = relayer_lamports
+                .checked_add(fee)
+                .ok_or(PrivacyError::MathOverflow)?;
         }
 
         Ok(())

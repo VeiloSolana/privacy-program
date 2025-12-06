@@ -9,6 +9,7 @@ yarn.lock
 pnpm-lock.yaml
 
 # Rust / Cargo
+test-ledger
 target/
 Cargo.lock
 
