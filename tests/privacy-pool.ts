@@ -3,15 +3,37 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
 import {
   PublicKey,
+  Keypair,
   SystemProgram,
   LAMPORTS_PER_SOL,
   SendTransactionError,
 } from "@solana/web3.js";
+import fs from "fs";
+import os from "os";
+import path from "path";
+
+function makeProvider(): anchor.AnchorProvider {
+  const url = process.env.ANCHOR_PROVIDER_URL ?? "http://127.0.0.1:8899";
+  const connection = new anchor.web3.Connection(url, "confirmed");
+
+  const keypairPath =
+    process.env.ANCHOR_WALLET ??
+    path.join(os.homedir(), ".config", "solana", "id.json");
+
+  const secret = JSON.parse(fs.readFileSync(keypairPath, "utf8"));
+  const kp = Keypair.fromSecretKey(Uint8Array.from(secret));
+  const wallet = new anchor.Wallet(kp);
+
+  return new anchor.AnchorProvider(connection, wallet, {
+    commitment: "confirmed",
+    preflightCommitment: "confirmed",
+  });
+}
 
 import { PrivacyPool } from "../target/types/privacy_pool";
 
 describe("privacy-pool fixed-denom SOL", () => {
-  const provider = anchor.AnchorProvider.env();
+  const provider = makeProvider();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.PrivacyPool as Program<PrivacyPool>;
