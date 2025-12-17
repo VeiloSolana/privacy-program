@@ -5,7 +5,8 @@
         "test": "mocha -r ts-node/register -t 1000000 tests/**/*.ts"
     },
     "dependencies": {
-        "@coral-xyz/anchor": "^0.32.1"
+        "@coral-xyz/anchor": "^0.32.1",
+        "snarkjs": "^0.7.5"
     },
     "devDependencies": {
         "@solana/spl-token": "^0.4.14",

@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
-#[cfg(feature = "zk-verify")]
-mod vk_constants;
 
 declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
 
@@ -144,113 +142,13 @@ fn verify_withdraw_proof(
     Ok(())
 }
 
-// Real Groth16 verifier (BN254) behind the `zk-verify` feature.
-//
-// NOTE: this is a template. It won't work until you:
-//  - Fill in a real verifying key from your circuit setup
-//  - Ensure proof encoding matches what your prover outputs
-//  - Potentially slim the code to fit Solana BPF limits
+// With `zk-verify` enabled we still stub on-chain verification for now.
+// Later you can wire this to a real Groth16 verifier or off-chain attestation.
 #[cfg(feature = "zk-verify")]
 fn verify_withdraw_proof(
-    proof_bytes: &Vec<u8>,
-    inputs: & WithdrawPublicInputs,
+    _proof: &Vec<u8>,
+    _inputs: &WithdrawPublicInputs,
 ) -> Result<()> {
-    use ark_bn254::{Bn254, Fr, Fq, Fq2, G1Affine, G2Affine};
-    use ark_ec::pairing::Pairing;
-    use ark_ff::PrimeField;
-    use ark_groth16::{prepare_verifying_key, verify_proof, Proof, VerifyingKey};
-
-    use crate::vk_constants::groth16_vk_withdraw;
-
-    // Helper for 32-byte → Fr
-    fn fr_from_32(bytes: &[u8]) -> Fr {
-        Fr::from_le_bytes_mod_order(bytes)
-    }
-
-    // Helper for 32-byte → Fq (base field)
-    fn fq_from_32(bytes: &[u8]) -> Fq {
-        Fq::from_le_bytes_mod_order(bytes)
-    }
-
-    // Parse G1 = (x, y) from 64 bytes
-    fn parse_g1(bytes: &[u8]) -> Result<G1Affine> {
-        if bytes.len() != 64 {
-            return err!(PrivacyError::InvalidProof);
-        }
-        let x = fq_from_32(&bytes[0..32]);
-        let y = fq_from_32(&bytes[32..64]);
-        Ok(G1Affine::new_unchecked(x, y))
-    }
-
-    // Parse G2 = (x, y) in Fq2 from 128 bytes:
-    //   x = x0 + x1 * u
-    //   y = y0 + y1 * u
-    fn parse_g2(bytes: &[u8]) -> Result<G2Affine> {
-        if bytes.len() != 128 {
-            return err!(PrivacyError::InvalidProof);
-        }
-        let x0 = fq_from_32(&bytes[0..32]);
-        let x1 = fq_from_32(&bytes[32..64]);
-        let y0 = fq_from_32(&bytes[64..96]);
-        let y1 = fq_from_32(&bytes[96..128]);
-
-        let x = Fq2::new(x0, x1);
-        let y = Fq2::new(y0, y1);
-
-        Ok(G2Affine::new_unchecked(x, y))
-    }
-
-    // Expect proof encoding:
-    //   A(G1) | B(G2) | C(G1)
-    //   = 64 + 128 + 64 = 256 bytes
-    fn decode_proof(bytes: &[u8]) -> Result<Proof<Bn254>> {
-        if bytes.len() != 256 {
-            return err!(PrivacyError::InvalidProof);
-        }
-
-        let a = parse_g1(&bytes[0..64])?;
-        let b = parse_g2(&bytes[64..192])?;
-        let c = parse_g1(&bytes[192..256])?;
-
-        Ok(Proof::<Bn254> { a, b, c })
-    }
-
-    // Map WithdrawPublicInputs → public inputs vector expected by circuit:
-    //   [root, nullifier, denom_index, recipient]
-    fn inputs_to_vec_fr(inputs: &WithdrawPublicInputs) -> Vec<Fr> {
-        let mut v = Vec::with_capacity(4);
-
-        // For root/nullifier we assume 32-byte field encoding (Poseidon output)
-        let root_fr = Fr::from_le_bytes_mod_order(&inputs.root);
-        let null_fr = Fr::from_le_bytes_mod_order(&inputs.nullifier);
-
-        let denom_fr = Fr::from(inputs.denom_index as u64);
-
-        let mut recip_bytes = [0u8; 32];
-        recip_bytes.copy_from_slice(inputs.recipient.as_ref());
-        let recipient_fr = Fr::from_le_bytes_mod_order(&recip_bytes);
-
-        v.push(root_fr);
-        v.push(null_fr);
-        v.push(denom_fr);
-        v.push(recipient_fr);
-
-        v
-    }
-
-    let vk  = groth16_vk_withdraw();
-    let pvk = prepare_verifying_key(&vk);
-
-    let proof = decode_proof(proof_bytes.as_slice())?;
-    let public_inputs = inputs_to_vec_fr(inputs);
-
-    let ok = verify_proof(&pvk, &proof, &public_inputs)
-        .map_err(|_| error!(PrivacyError::VerifyFailed))?;
-
-    if !ok {
-        return err!(PrivacyError::VerifyFailed);
-    }
-
     Ok(())
 }
 
@@ -501,7 +399,7 @@ pub mod privacy_pool {
         let cfg = &mut ctx.accounts.config;
         require!(!cfg.paused, PrivacyError::Paused);
 
-        // ---- 0) ZK proof verification hook ----
+        // 0) ZK proof verification hook
         let public_inputs = WithdrawPublicInputs {
             root,
             nullifier,

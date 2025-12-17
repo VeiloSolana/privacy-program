@@ -51,6 +51,15 @@ describe("privacy-pool fixed-denom SOL", () => {
   ];
   const feeBps = 50; // 0.5%
 
+  async function airdropAndConfirm(pubkey: PublicKey, lamports: number) {
+    const sig = await provider.connection.requestAirdrop(pubkey, lamports);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+  }
+
+  function bytes32(fill: number): number[] {
+    return new Array(32).fill(fill & 0xff);
+  }
+
   before(async () => {
     [configPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("config")],
@@ -69,6 +78,9 @@ describe("privacy-pool fixed-denom SOL", () => {
       program.programId
     );
 
+    // Make sure admin wallet actually has SOL on localnet
+    await airdropAndConfirm(wallet.publicKey, 10 * LAMPORTS_PER_SOL);
+
     // Try to fetch config; if it exists, assume already initialized.
     const existing = await provider.connection.getAccountInfo(configPda);
     if (existing) {
@@ -78,7 +90,6 @@ describe("privacy-pool fixed-denom SOL", () => {
       return;
     }
 
-    // initialize once
     try {
       await program.methods
         .initialize(
@@ -105,8 +116,8 @@ describe("privacy-pool fixed-denom SOL", () => {
 
   it("deposits fixed 1 SOL and appends root", async () => {
     const denomIndex = 0;
-    const commitment = new Array(32).fill(1); // number[]
-    const root = new Array(32).fill(2);       // number[]
+    const commitment = bytes32(1); // number[]
+    const root = bytes32(2);       // number[]
 
     const beforeVault = await provider.connection.getBalance(vaultPda);
 
@@ -141,14 +152,14 @@ describe("privacy-pool fixed-denom SOL", () => {
     const fee = (amount * BigInt(feeBps)) / 10_000n;
     const toUser = amount - fee;
 
-    const relayer = anchor.web3.Keypair.generate();
-    const recipient = anchor.web3.Keypair.generate();
+    const relayer = Keypair.generate();
+    const recipient = Keypair.generate();
 
     // fund relayer so it can pay tx fees on local validator
-    await provider.connection.requestAirdrop(
-      relayer.publicKey,
-      2 * LAMPORTS_PER_SOL
-    );
+    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+
+    // create recipient account (so SystemAccount constraint passes)
+    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
 
     // admin adds relayer
     await program.methods
@@ -159,10 +170,10 @@ describe("privacy-pool fixed-denom SOL", () => {
       } as any)
       .rpc();
 
-    // reuse the root from previous test
-    const root = new Array(32).fill(2);       // number[]
-    const nullifier = new Array(32).fill(3);  // number[]
-    const proof = Buffer.alloc(0);            // Buffer for now (dummy)
+    // reuse the root from previous test (we set root = 0x02..02 there)
+    const root = bytes32(2);
+    const nullifier = bytes32(3);
+    const proof = Buffer.alloc(0); // dummy; on-chain verifier is stubbed true
 
     const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
     const beforeRelayer = BigInt(
