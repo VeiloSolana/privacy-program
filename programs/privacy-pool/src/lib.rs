@@ -248,7 +248,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_config_v1"],
+        seeds = [b"privacy_config_v2"],
         bump,
         space = PrivacyConfig::LEN
     )]
@@ -257,7 +257,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v1"],
+        seeds = [b"privacy_vault_v2"],
         bump,
         space = Vault::LEN
     )]
@@ -266,7 +266,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v1"],
+        seeds = [b"privacy_note_tree_v2"],
         bump,
         space = NoteTree::LEN
     )]
@@ -275,7 +275,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_nullifiers_v1"],
+        seeds = [b"privacy_nullifiers_v2"],
         bump,
         space = NullifierSet::LEN
     )]
@@ -291,7 +291,7 @@ pub struct Initialize<'info> {
 pub struct ConfigAdmin<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v1"],
+        seeds = [b"privacy_config_v2"],
         bump = config.bump,
         has_one = admin
     )]
@@ -305,21 +305,21 @@ pub struct ConfigAdmin<'info> {
 pub struct DepositFixed<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v1"],
+        seeds = [b"privacy_config_v2"],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v1"],
+        seeds = [b"privacy_vault_v2"],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v1"],
+        seeds = [b"privacy_note_tree_v2"],
         bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
@@ -334,28 +334,28 @@ pub struct DepositFixed<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v1"],
+        seeds = [b"privacy_config_v2"],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v1"],
+        seeds = [b"privacy_vault_v2"],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v1"],
+        seeds = [b"privacy_note_tree_v2"],
         bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v1"],
+        seeds = [b"privacy_nullifiers_v2"],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
