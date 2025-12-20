@@ -12,6 +12,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { PrivacyPool } from "../target/types/privacy_pool";
+
+// ---- Provider helper ----
+
 function makeProvider(): anchor.AnchorProvider {
   const url = process.env.ANCHOR_PROVIDER_URL ?? "http://127.0.0.1:8899";
   const connection = new anchor.web3.Connection(url, "confirmed");
@@ -30,9 +34,7 @@ function makeProvider(): anchor.AnchorProvider {
   });
 }
 
-import { PrivacyPool } from "../target/types/privacy_pool";
-
-describe("privacy-pool fixed-denom SOL", () => {
+describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
 
@@ -60,21 +62,30 @@ describe("privacy-pool fixed-denom SOL", () => {
     return new Array(32).fill(fill & 0xff);
   }
 
+  async function getCurrentRootFromChain(): Promise<number[]> {
+    const noteTreeAcc: any = await (program.account as any).noteTree.fetch(
+      noteTreePda
+    );
+    // With the new NoteTree layout we just have `currentRoot: [u8;32]`
+    const root: number[] = noteTreeAcc.currentRoot;
+    return root;
+  }
+
   before(async () => {
     [configPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("config")],
+      [Buffer.from("privacy_config_v3")],
       program.programId
     );
     [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault")],
+      [Buffer.from("privacy_vault_v3")],
       program.programId
     );
     [noteTreePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("note_tree")],
+      [Buffer.from("privacy_note_tree_v3")],
       program.programId
     );
     [nullifiersPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifiers")],
+      [Buffer.from("privacy_nullifiers_v3")],
       program.programId
     );
 
@@ -114,23 +125,30 @@ describe("privacy-pool fixed-denom SOL", () => {
     }
   });
 
-  it("deposits fixed 1 SOL and appends root", async () => {
+  it("deposits fixed 1 SOL and updates root", async () => {
     const denomIndex = 0;
-    const commitment = bytes32(1); // number[]
-    const root = bytes32(2);       // number[]
+    const commitment = bytes32(1); // toy commitment
 
     const beforeVault = await provider.connection.getBalance(vaultPda);
 
-    await program.methods
-      .depositFixed(denomIndex, commitment, root)
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        noteTree: noteTreePda,
-        depositor: wallet.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .rpc();
+    try {
+      await program.methods
+        .depositFixed(denomIndex, commitment)
+        .accounts({
+          config: configPda,
+          vault: vaultPda,
+          noteTree: noteTreePda,
+          depositor: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .rpc();
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("depositFixed failed with logs:", logs);
+      }
+      throw e;
+    }
 
     const afterVault = await provider.connection.getBalance(vaultPda);
     const delta = BigInt(afterVault - beforeVault);
@@ -142,6 +160,9 @@ describe("privacy-pool fixed-denom SOL", () => {
           ].toString()}`
       );
     }
+
+    const root = await getCurrentRootFromChain();
+    console.log("Current on-chain root after deposit:", root);
 
     console.log("Deposit fixed-denom 1 SOL OK");
   });
@@ -170,10 +191,10 @@ describe("privacy-pool fixed-denom SOL", () => {
       } as any)
       .rpc();
 
-    // reuse the root from previous test (we set root = 0x02..02 there)
-    const root = bytes32(2);
+    // Root must match what the contract currently has
+    const root = await getCurrentRootFromChain();
     const nullifier = bytes32(3);
-    const proof = Buffer.alloc(0); // dummy; on-chain verifier is stubbed true
+    const proof = Buffer.alloc(0); // still stubbed; verify_withdraw_proof is no-op
 
     const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
     const beforeRelayer = BigInt(

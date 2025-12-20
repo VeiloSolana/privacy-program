@@ -8,8 +8,11 @@ declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
 
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
+
+/// Logical capacity for the note tree (max leaves = 2^TREE_DEPTH).
+/// We don't store the full Merkle tree on-chain anymore, only a rolling root,
+/// but we still keep this as a bound on how many notes we "conceptually" support.
 pub const TREE_DEPTH: usize = 32;
-pub const ROOT_HISTORY_SIZE: usize = 16;
 
 // ---- Helpers ----
 
@@ -22,6 +25,12 @@ fn hash_two(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 
 // ---- Accounts ----
 
+/// Minimal on-chain Merkle state:
+/// - we track the next leaf index
+/// - we track a single "current root"
+///
+/// The full Merkle tree (leaves + paths) lives off-chain in your relayer / SDK.
+/// On-chain we only check that a provided root matches this current_root.
 #[account]
 pub struct NoteTree {
     pub bump: u8,
@@ -29,48 +38,29 @@ pub struct NoteTree {
     /// Next leaf index to insert (0-based)
     pub next_index: u32,
 
-    /// The last ROOT_HISTORY_SIZE roots (circular buffer)
-    pub roots: [[u8; 32]; ROOT_HISTORY_SIZE],
-    pub current_root_index: u8,
-
-    /// Filled subtrees for each level
-    pub filled_subtrees: [[u8; 32]; TREE_DEPTH],
-
-    /// Zero nodes (default hashes) per level
-    pub zeros: [[u8; 32]; TREE_DEPTH],
+    /// Current Merkle root (or a placeholder until first deposit)
+    pub current_root: [u8; 32],
 }
 
 impl NoteTree {
     pub const LEN: usize =
-        8 + // discriminator
-        1 + // bump
-        4 + // next_index
-        (32 * ROOT_HISTORY_SIZE) + // roots
-        1 + // current_root_index
-        (32 * TREE_DEPTH) + // filled_subtrees
-        (32 * TREE_DEPTH); // zeros
+        8 +  // discriminator
+        1 +  // bump
+        4 +  // next_index
+        32;  // current_root
 
     pub fn init(&mut self) {
         self.next_index = 0;
-        self.current_root_index = 0;
-
-        // level 0 zero = all-zero
-        let mut zero = [0u8; 32];
-        self.zeros[0] = zero;
-        self.filled_subtrees[0] = zero;
-
-        // derive zeros for higher levels: zero_{i+1} = H(zero_i, zero_i)
-        for level in 1..TREE_DEPTH {
-            zero = hash_two(&zero, &zero);
-            self.zeros[level] = zero;
-            self.filled_subtrees[level] = zero;
-        }
-
-        // initial root is the top zero
-        self.roots[0] = zero;
+        self.current_root = [0u8; 32]; // all-zero "empty tree" root
     }
 
-    /// Append a leaf commitment, update subtrees + root history, return new root.
+    /// Append a leaf commitment and roll the root forward.
+    ///
+    /// This is a *toy* update rule:
+    ///   new_root = H(old_root || commitment)
+    ///
+    /// In a real system you'd ensure this matches your off-chain Merkle
+    /// function, but for now it's just "some deterministic 32-byte hash".
     pub fn append_leaf(&mut self, leaf_commitment: [u8; 32]) -> Result<[u8; 32]> {
         let index = self.next_index as u64;
         require!(
@@ -78,45 +68,23 @@ impl NoteTree {
             PrivacyError::NullifierTableFull
         );
 
-        let mut current = leaf_commitment;
-        let mut idx = index;
-
-        for level in 0..TREE_DEPTH {
-            if idx % 2 == 0 {
-                // left child at this level
-                let left = current;
-                let right = self.zeros[level];
-                self.filled_subtrees[level] = current;
-                current = hash_two(&left, &right);
-            } else {
-                // right child at this level
-                let left = self.filled_subtrees[level];
-                let right = current;
-                current = hash_two(&left, &right);
-            }
-            idx >>= 1;
-        }
-
-        // rotate root history
-        let next_root_pos =
-            (u16::from(self.current_root_index) + 1) % (ROOT_HISTORY_SIZE as u16);
-        self.current_root_index = next_root_pos as u8;
-        self.roots[self.current_root_index as usize] = current;
+        let new_root = hash_two(&self.current_root, &leaf_commitment);
+        self.current_root = new_root;
 
         self.next_index = self
             .next_index
             .checked_add(1)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        Ok(current)
+        Ok(new_root)
     }
 
     pub fn current_root(&self) -> [u8; 32] {
-        self.roots[self.current_root_index as usize]
+        self.current_root
     }
 
     pub fn contains_root(&self, root: &[u8; 32]) -> bool {
-        self.roots.iter().any(|r| r == root)
+        &self.current_root == root
     }
 }
 
@@ -177,6 +145,7 @@ impl Vault {
 }
 
 /// Simplified nullifier set: only stores the *last* nullifier.
+/// This is intentionally tiny & demo-only. Real-world would need a full set.
 #[account]
 pub struct NullifierSet {
     pub bump: u8,
@@ -248,7 +217,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_config_v2"],
+        seeds = [b"privacy_config_v3"],
         bump,
         space = PrivacyConfig::LEN
     )]
@@ -257,7 +226,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v2"],
+        seeds = [b"privacy_vault_v3"],
         bump,
         space = Vault::LEN
     )]
@@ -266,7 +235,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v2"],
+        seeds = [b"privacy_note_tree_v3"],
         bump,
         space = NoteTree::LEN
     )]
@@ -275,7 +244,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_nullifiers_v2"],
+        seeds = [b"privacy_nullifiers_v3"],
         bump,
         space = NullifierSet::LEN
     )]
@@ -291,7 +260,7 @@ pub struct Initialize<'info> {
 pub struct ConfigAdmin<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v2"],
+        seeds = [b"privacy_config_v3"],
         bump = config.bump,
         has_one = admin
     )]
@@ -305,21 +274,21 @@ pub struct ConfigAdmin<'info> {
 pub struct DepositFixed<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v2"],
+        seeds = [b"privacy_config_v3"],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v2"],
+        seeds = [b"privacy_vault_v3"],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v2"],
+        seeds = [b"privacy_note_tree_v3"],
         bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
@@ -334,28 +303,28 @@ pub struct DepositFixed<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v2"],
+        seeds = [b"privacy_config_v3"],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v2"],
+        seeds = [b"privacy_vault_v3"],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v2"],
+        seeds = [b"privacy_note_tree_v3"],
         bump = note_tree.bump
     )]
     pub note_tree: Account<'info, NoteTree>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v2"],
+        seeds = [b"privacy_nullifiers_v3"],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -472,7 +441,7 @@ pub mod privacy_pool {
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Append leaf to Merkle tree (commitment as leaf)
+        // Append leaf to Merkle-ish rolling root
         let _new_root = tree.append_leaf(commitment)?;
 
         Ok(())
@@ -498,7 +467,7 @@ pub mod privacy_pool {
         };
         verify_withdraw_proof(&proof, &public_inputs)?;
 
-        // 1) Root must be known
+        // 1) Root must be known (in this toy model: equal to current_root)
         require!(
             ctx.accounts.note_tree.contains_root(&public_inputs.root),
             PrivacyError::UnknownRoot
