@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
+use solana_program::hash::hash;
 
 declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
 
@@ -7,8 +8,117 @@ declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
 
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
+pub const TREE_DEPTH: usize = 32;
+pub const ROOT_HISTORY_SIZE: usize = 16;
+
+// ---- Helpers ----
+
+fn hash_two(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    let mut data = [0u8; 64];
+    data[..32].copy_from_slice(a);
+    data[32..].copy_from_slice(b);
+    hash(&data).to_bytes()
+}
 
 // ---- Accounts ----
+
+#[account]
+pub struct NoteTree {
+    pub bump: u8,
+
+    /// Next leaf index to insert (0-based)
+    pub next_index: u32,
+
+    /// The last ROOT_HISTORY_SIZE roots (circular buffer)
+    pub roots: [[u8; 32]; ROOT_HISTORY_SIZE],
+    pub current_root_index: u8,
+
+    /// Filled subtrees for each level
+    pub filled_subtrees: [[u8; 32]; TREE_DEPTH],
+
+    /// Zero nodes (default hashes) per level
+    pub zeros: [[u8; 32]; TREE_DEPTH],
+}
+
+impl NoteTree {
+    pub const LEN: usize =
+        8 + // discriminator
+        1 + // bump
+        4 + // next_index
+        (32 * ROOT_HISTORY_SIZE) + // roots
+        1 + // current_root_index
+        (32 * TREE_DEPTH) + // filled_subtrees
+        (32 * TREE_DEPTH); // zeros
+
+    pub fn init(&mut self) {
+        self.next_index = 0;
+        self.current_root_index = 0;
+
+        // level 0 zero = all-zero
+        let mut zero = [0u8; 32];
+        self.zeros[0] = zero;
+        self.filled_subtrees[0] = zero;
+
+        // derive zeros for higher levels: zero_{i+1} = H(zero_i, zero_i)
+        for level in 1..TREE_DEPTH {
+            zero = hash_two(&zero, &zero);
+            self.zeros[level] = zero;
+            self.filled_subtrees[level] = zero;
+        }
+
+        // initial root is the top zero
+        self.roots[0] = zero;
+    }
+
+    /// Append a leaf commitment, update subtrees + root history, return new root.
+    pub fn append_leaf(&mut self, leaf_commitment: [u8; 32]) -> Result<[u8; 32]> {
+        let index = self.next_index as u64;
+        require!(
+            index < (1u64 << TREE_DEPTH),
+            PrivacyError::NullifierTableFull
+        );
+
+        let mut current = leaf_commitment;
+        let mut idx = index;
+
+        for level in 0..TREE_DEPTH {
+            if idx % 2 == 0 {
+                // left child at this level
+                let left = current;
+                let right = self.zeros[level];
+                self.filled_subtrees[level] = current;
+                current = hash_two(&left, &right);
+            } else {
+                // right child at this level
+                let left = self.filled_subtrees[level];
+                let right = current;
+                current = hash_two(&left, &right);
+            }
+            idx >>= 1;
+        }
+
+        // rotate root history
+        let next_root_pos =
+            (u16::from(self.current_root_index) + 1) % (ROOT_HISTORY_SIZE as u16);
+        self.current_root_index = next_root_pos as u8;
+        self.roots[self.current_root_index as usize] = current;
+
+        self.next_index = self
+            .next_index
+            .checked_add(1)
+            .ok_or(PrivacyError::MathOverflow)?;
+
+        Ok(current)
+    }
+
+    pub fn current_root(&self) -> [u8; 32] {
+        self.roots[self.current_root_index as usize]
+    }
+
+    pub fn contains_root(&self, root: &[u8; 32]) -> bool {
+        self.roots.iter().any(|r| r == root)
+    }
+}
 
 #[account]
 pub struct PrivacyConfig {
@@ -64,26 +174,6 @@ pub struct Vault {
 
 impl Vault {
     pub const LEN: usize = 8 + 1;
-}
-
-/// Simplified note tree: only stores the *last* Merkle root.
-/// This is enough for the current tests (one deposit / one withdraw).
-#[account]
-pub struct NoteTree {
-    pub bump: u8,
-    pub last_root: [u8; 32],
-}
-
-impl NoteTree {
-    pub const LEN: usize = 8 + 1 + 32;
-
-    pub fn append_root(&mut self, root: [u8; 32]) {
-        self.last_root = root;
-    }
-
-    pub fn contains_root(&self, root: &[u8; 32]) -> bool {
-        &self.last_root == root
-    }
 }
 
 /// Simplified nullifier set: only stores the *last* nullifier.
@@ -143,7 +233,6 @@ fn verify_withdraw_proof(
 }
 
 // With `zk-verify` enabled we still stub on-chain verification for now.
-// Later you can wire this to a real Groth16 verifier or off-chain attestation.
 #[cfg(feature = "zk-verify")]
 fn verify_withdraw_proof(
     _proof: &Vec<u8>,
@@ -325,7 +414,7 @@ pub mod privacy_pool {
         }
 
         // Initialize note tree & nullifier set
-        tree.last_root = [0u8; 32];
+        tree.init();
         nulls.count = 0;
         nulls.last  = [0u8; 32];
 
@@ -353,10 +442,11 @@ pub mod privacy_pool {
     pub fn deposit_fixed(
         ctx: Context<DepositFixed>,
         denom_index: u8,
-        _commitment: [u8; 32],
-        new_root: [u8; 32],
+        commitment: [u8; 32],
     ) -> Result<()> {
-        let cfg = &mut ctx.accounts.config;
+        let cfg  = &mut ctx.accounts.config;
+        let tree = &mut ctx.accounts.note_tree;
+
         require!(!cfg.paused, PrivacyError::Paused);
 
         let idx = denom_index as usize;
@@ -382,8 +472,8 @@ pub mod privacy_pool {
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Update note tree root
-        ctx.accounts.note_tree.append_root(new_root);
+        // Append leaf to Merkle tree (commitment as leaf)
+        let _new_root = tree.append_leaf(commitment)?;
 
         Ok(())
     }
