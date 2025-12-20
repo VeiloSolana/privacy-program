@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
-declare_id!("G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32");
+declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
 
 // ---- Constants ----
 
@@ -177,7 +177,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v1"],
+        seeds = [b"privacy_note_tree_v1"],
         bump,
         space = NoteTree::LEN
     )]
@@ -186,7 +186,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v1"],
+        seeds = [b"privacy_nullifiers_v1"],
         bump,
         space = NullifierSet::LEN
     )]

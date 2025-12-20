@@ -5,13 +5,13 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+privacy_pool = "62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo"
 
 [programs.devnet]
-privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+privacy_pool = "62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo"
 
 [programs.mainnet]
-privacy_pool = "G7m7QCf2m6VsaDs7GJC9wMmxCiWxmAjKN6BhakkWYi32"
+privacy_pool = "62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo"
 
 [registry]
 url = "https://api.apr.dev"
