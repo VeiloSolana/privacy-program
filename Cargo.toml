@@ -6,7 +6,7 @@ members = [
 ]
 
 [programs.localnet]
-privacy_pool = "62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo"
+privacy_pool = "Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q"
 
 [profile.release]
 overflow-checks = true

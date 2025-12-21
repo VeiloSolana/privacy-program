@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use solana_program::hash::hash;
 
-declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
+declare_id!("Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q");
 
 // ---- Constants ----
 
@@ -43,11 +43,10 @@ pub struct NoteTree {
 }
 
 impl NoteTree {
-    pub const LEN: usize =
-        8 +  // discriminator
+    pub const LEN: usize = 8 +  // discriminator
         1 +  // bump
         4 +  // next_index
-        32;  // current_root
+        32; // current_root
 
     pub fn init(&mut self) {
         self.next_index = 0;
@@ -115,8 +114,7 @@ pub struct PrivacyConfig {
 }
 
 impl PrivacyConfig {
-    pub const LEN: usize =
-        8 +   // discriminator
+    pub const LEN: usize = 8 +   // discriminator
         1 +   // bump
         1 +   // vault_bump
         32 +  // admin
@@ -194,19 +192,13 @@ pub struct WithdrawPublicInputs {
 
 // Default: no-op, tests run fast, no heavy crypto.
 #[cfg(not(feature = "zk-verify"))]
-fn verify_withdraw_proof(
-    _proof: &Vec<u8>,
-    _inputs: &WithdrawPublicInputs,
-) -> Result<()> {
+fn verify_withdraw_proof(_proof: &Vec<u8>, _inputs: &WithdrawPublicInputs) -> Result<()> {
     Ok(())
 }
 
 // With `zk-verify` enabled we still stub on-chain verification for now.
 #[cfg(feature = "zk-verify")]
-fn verify_withdraw_proof(
-    _proof: &Vec<u8>,
-    _inputs: &WithdrawPublicInputs,
-) -> Result<()> {
+fn verify_withdraw_proof(_proof: &Vec<u8>, _inputs: &WithdrawPublicInputs) -> Result<()> {
     Ok(())
 }
 
@@ -345,25 +337,21 @@ pub struct Withdraw<'info> {
 pub mod privacy_pool {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        denoms: Vec<u64>,
-        fee_bps: u16,
-    ) -> Result<()> {
-        let cfg   = &mut ctx.accounts.config;
+    pub fn initialize(ctx: Context<Initialize>, denoms: Vec<u64>, fee_bps: u16) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
-        let tree  = &mut ctx.accounts.note_tree;
+        let tree = &mut ctx.accounts.note_tree;
         let nulls = &mut ctx.accounts.nullifiers;
 
         // Bumps
-        cfg.bump       = ctx.bumps.config;
+        cfg.bump = ctx.bumps.config;
         cfg.vault_bump = ctx.bumps.vault;
-        vault.bump     = ctx.bumps.vault;
-        tree.bump      = ctx.bumps.note_tree;
-        nulls.bump     = ctx.bumps.nullifiers;
+        vault.bump = ctx.bumps.vault;
+        tree.bump = ctx.bumps.note_tree;
+        nulls.bump = ctx.bumps.nullifiers;
 
-        cfg.admin   = ctx.accounts.admin.key();
-        cfg.paused  = false;
+        cfg.admin = ctx.accounts.admin.key();
+        cfg.paused = false;
         cfg.fee_bps = fee_bps;
 
         require!(!denoms.is_empty(), PrivacyError::NoDenoms);
@@ -373,7 +361,7 @@ pub mod privacy_pool {
 
         // Clear small arrays
         cfg.denoms = [0u64; MAX_DENOMS];
-        cfg.tvl    = [0u64; MAX_DENOMS];
+        cfg.tvl = [0u64; MAX_DENOMS];
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
 
@@ -385,7 +373,7 @@ pub mod privacy_pool {
         // Initialize note tree & nullifier set
         tree.init();
         nulls.count = 0;
-        nulls.last  = [0u8; 32];
+        nulls.last = [0u8; 32];
 
         Ok(())
     }
@@ -413,7 +401,7 @@ pub mod privacy_pool {
         denom_index: u8,
         commitment: [u8; 32],
     ) -> Result<()> {
-        let cfg  = &mut ctx.accounts.config;
+        let cfg = &mut ctx.accounts.config;
         let tree = &mut ctx.accounts.note_tree;
 
         require!(!cfg.paused, PrivacyError::Paused);
@@ -425,7 +413,7 @@ pub mod privacy_pool {
 
         // Move SOL from depositor to vault PDA via CPI
         let depositor = &ctx.accounts.depositor;
-        let vault_ai  = ctx.accounts.vault.to_account_info();
+        let vault_ai = ctx.accounts.vault.to_account_info();
 
         let cpi_ctx = CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -487,9 +475,7 @@ pub mod privacy_pool {
             .ok_or(PrivacyError::MathOverflow)?
             / 10_000;
 
-        let to_user = amount
-            .checked_sub(fee)
-            .ok_or(PrivacyError::MathOverflow)?;
+        let to_user = amount.checked_sub(fee).ok_or(PrivacyError::MathOverflow)?;
 
         // 4) Relayer must be authorized
         let relayer_key = ctx.accounts.relayer.key();
@@ -517,7 +503,7 @@ pub mod privacy_pool {
         // 7) Manual lamport moves
         {
             let recipient_ai = ctx.accounts.recipient.to_account_info();
-            let relayer_ai   = ctx.accounts.relayer.to_account_info();
+            let relayer_ai = ctx.accounts.relayer.to_account_info();
 
             let mut vault_lamports = vault_ai.try_borrow_mut_lamports()?;
             let mut recipient_lamports = recipient_ai.try_borrow_mut_lamports()?;
