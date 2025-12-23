@@ -1,20 +1,28 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::hash::hash;
 use anchor_lang::system_program;
-use solana_program::hash::hash;
+use light_hasher::Poseidon;
+
+pub mod groth16;
+pub mod merkle_tree;
+pub mod vk_constants;
+pub mod zk;
+
+use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT};
+use zk::{verify_withdraw_groth16, WithdrawProof};
 
 declare_id!("Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q");
 
 // ---- Constants ----
 
+pub type PoseidonHasher = Poseidon;
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
 
-/// Logical capacity for the note tree (max leaves = 2^TREE_DEPTH).
-/// We don't store the full Merkle tree on-chain anymore, only a rolling root,
-/// but we still keep this as a bound on how many notes we "conceptually" support.
+/// Only kept as a conceptual cap on leaves in the old design.
 pub const TREE_DEPTH: usize = 32;
 
-// ---- Helpers ----
+// ---- Helpers (still used for some SHA256-style hashes, if needed) ----
 
 fn hash_two(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     let mut data = [0u8; 64];
@@ -24,68 +32,6 @@ fn hash_two(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 }
 
 // ---- Accounts ----
-
-/// Minimal on-chain Merkle state:
-/// - we track the next leaf index
-/// - we track a single "current root"
-///
-/// The full Merkle tree (leaves + paths) lives off-chain in your relayer / SDK.
-/// On-chain we only check that a provided root matches this current_root.
-#[account]
-pub struct NoteTree {
-    pub bump: u8,
-
-    /// Next leaf index to insert (0-based)
-    pub next_index: u32,
-
-    /// Current Merkle root (or a placeholder until first deposit)
-    pub current_root: [u8; 32],
-}
-
-impl NoteTree {
-    pub const LEN: usize = 8 +  // discriminator
-        1 +  // bump
-        4 +  // next_index
-        32; // current_root
-
-    pub fn init(&mut self) {
-        self.next_index = 0;
-        self.current_root = [0u8; 32]; // all-zero "empty tree" root
-    }
-
-    /// Append a leaf commitment and roll the root forward.
-    ///
-    /// This is a *toy* update rule:
-    ///   new_root = H(old_root || commitment)
-    ///
-    /// In a real system you'd ensure this matches your off-chain Merkle
-    /// function, but for now it's just "some deterministic 32-byte hash".
-    pub fn append_leaf(&mut self, leaf_commitment: [u8; 32]) -> Result<[u8; 32]> {
-        let index = self.next_index as u64;
-        require!(
-            index < (1u64 << TREE_DEPTH),
-            PrivacyError::NullifierTableFull
-        );
-
-        let new_root = hash_two(&self.current_root, &leaf_commitment);
-        self.current_root = new_root;
-
-        self.next_index = self
-            .next_index
-            .checked_add(1)
-            .ok_or(PrivacyError::MathOverflow)?;
-
-        Ok(new_root)
-    }
-
-    pub fn current_root(&self) -> [u8; 32] {
-        self.current_root
-    }
-
-    pub fn contains_root(&self, root: &[u8; 32]) -> bool {
-        &self.current_root == root
-    }
-}
 
 #[account]
 pub struct PrivacyConfig {
@@ -142,8 +88,7 @@ impl Vault {
     pub const LEN: usize = 8 + 1;
 }
 
-/// Simplified nullifier set: only stores the *last* nullifier.
-/// This is intentionally tiny & demo-only. Real-world would need a full set.
+/// Tiny nullifier set (demo only).
 #[account]
 pub struct NullifierSet {
     pub bump: u8,
@@ -171,11 +116,11 @@ impl NullifierSet {
     }
 }
 
-// ---- ZK public inputs ----
+// ---- ZK public inputs (for withdraw circuit) ----
 
 /// Public inputs passed to the zk circuit for a withdraw.
 ///
-/// Your Groth16 circuit MUST use exactly these as public inputs:
+/// Circom `WithdrawCircuit(DEPTH)` must use:
 ///   0: Merkle root
 ///   1: nullifier
 ///   2: denom index
@@ -186,20 +131,6 @@ pub struct WithdrawPublicInputs {
     pub nullifier: [u8; 32],
     pub denom_index: u8,
     pub recipient: Pubkey,
-}
-
-// ---- ZK verification hook ----
-
-// Default: no-op, tests run fast, no heavy crypto.
-#[cfg(not(feature = "zk-verify"))]
-fn verify_withdraw_proof(_proof: &Vec<u8>, _inputs: &WithdrawPublicInputs) -> Result<()> {
-    Ok(())
-}
-
-// With `zk-verify` enabled we still stub on-chain verification for now.
-#[cfg(feature = "zk-verify")]
-fn verify_withdraw_proof(_proof: &Vec<u8>, _inputs: &WithdrawPublicInputs) -> Result<()> {
-    Ok(())
 }
 
 // ---- Instruction contexts ----
@@ -229,9 +160,10 @@ pub struct Initialize<'info> {
         payer = admin,
         seeds = [b"privacy_note_tree_v3"],
         bump,
-        space = NoteTree::LEN
+        // 8 (disc) + size_of::<MerkleTreeAccount>()
+        space = 8 + core::mem::size_of::<MerkleTreeAccount>(),
     )]
-    pub note_tree: Account<'info, NoteTree>,
+    pub note_tree: Account<'info, MerkleTreeAccount>,
 
     #[account(
         init,
@@ -281,9 +213,9 @@ pub struct DepositFixed<'info> {
     #[account(
         mut,
         seeds = [b"privacy_note_tree_v3"],
-        bump = note_tree.bump
+        bump,
     )]
-    pub note_tree: Account<'info, NoteTree>,
+    pub note_tree: Account<'info, MerkleTreeAccount>,
 
     #[account(mut)]
     pub depositor: Signer<'info>,
@@ -310,9 +242,9 @@ pub struct Withdraw<'info> {
     #[account(
         mut,
         seeds = [b"privacy_note_tree_v3"],
-        bump = note_tree.bump
+        bump,
     )]
-    pub note_tree: Account<'info, NoteTree>,
+    pub note_tree: Account<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
@@ -347,7 +279,6 @@ pub mod privacy_pool {
         cfg.bump = ctx.bumps.config;
         cfg.vault_bump = ctx.bumps.vault;
         vault.bump = ctx.bumps.vault;
-        tree.bump = ctx.bumps.note_tree;
         nulls.bump = ctx.bumps.nullifiers;
 
         cfg.admin = ctx.accounts.admin.key();
@@ -359,19 +290,28 @@ pub mod privacy_pool {
 
         cfg.num_denoms = denoms.len() as u8;
 
-        // Clear small arrays
+        // Clear arrays
         cfg.denoms = [0u64; MAX_DENOMS];
         cfg.tvl = [0u64; MAX_DENOMS];
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
 
-        // Fill configured denoms
         for (i, d) in denoms.into_iter().enumerate() {
             cfg.denoms[i] = d;
         }
 
-        // Initialize note tree & nullifier set
-        tree.init();
+        // Init Merkle tree
+        tree.authority = ctx.accounts.admin.key();
+        tree.next_index = 0;
+        tree.root_index = 0;
+        tree.height = MERKLE_TREE_HEIGHT as u8;
+        tree.root_history_size = 100;
+        tree.root = [0u8; 32];
+        tree.root_history = [[0u8; 32]; merkle_tree::ROOT_HISTORY_SIZE];
+
+        MerkleTree::initialize::<PoseidonHasher>(tree)?;
+
+        // Init nullifier set
         nulls.count = 0;
         nulls.last = [0u8; 32];
 
@@ -402,8 +342,6 @@ pub mod privacy_pool {
         commitment: [u8; 32],
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
-        let tree = &mut ctx.accounts.note_tree;
-
         require!(!cfg.paused, PrivacyError::Paused);
 
         let idx = denom_index as usize;
@@ -411,7 +349,7 @@ pub mod privacy_pool {
 
         let amount = cfg.denoms[idx];
 
-        // Move SOL from depositor to vault PDA via CPI
+        // 1) Move SOL from depositor to vault PDA via CPI
         let depositor = &ctx.accounts.depositor;
         let vault_ai = ctx.accounts.vault.to_account_info();
 
@@ -424,13 +362,14 @@ pub mod privacy_pool {
         );
         system_program::transfer(cpi_ctx, amount)?;
 
-        // Update TVL
+        // 2) Update TVL
         cfg.tvl[idx] = cfg.tvl[idx]
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // Append leaf to Merkle-ish rolling root
-        let _new_root = tree.append_leaf(commitment)?;
+        // 3) Append commitment to Merkle tree
+        let tree = &mut ctx.accounts.note_tree;
+        MerkleTree::append::<PoseidonHasher>(commitment, tree)?;
 
         Ok(())
     }
@@ -441,31 +380,32 @@ pub mod privacy_pool {
         nullifier: [u8; 32],
         denom_index: u8,
         recipient_pk: Pubkey,
-        proof: Vec<u8>,
+        proof: WithdrawProof,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         require!(!cfg.paused, PrivacyError::Paused);
 
-        // 0) ZK proof verification hook
+        // ---- 0) Verify Groth16 proof (stub or real, depending on groth16.rs) ----
         let public_inputs = WithdrawPublicInputs {
             root,
             nullifier,
             denom_index,
             recipient: recipient_pk,
         };
-        verify_withdraw_proof(&proof, &public_inputs)?;
+        verify_withdraw_groth16(proof, &public_inputs)?;
 
-        // 1) Root must be known (in this toy model: equal to current_root)
+        // ---- 1) Check that root is known in Merkle tree ----
+        let tree = &ctx.accounts.note_tree;
         require!(
-            ctx.accounts.note_tree.contains_root(&public_inputs.root),
+            MerkleTree::is_known_root(tree, public_inputs.root),
             PrivacyError::UnknownRoot
         );
 
-        // 2) Nullifier must be fresh
+        // ---- 2) Nullifier must be fresh ----
         let nulls = &mut ctx.accounts.nullifiers;
         nulls.insert(public_inputs.nullifier)?;
 
-        // 3) Denom & fee math
+        // ---- 3) Denom & fee math ----
         let idx = public_inputs.denom_index as usize;
         require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
         let amount = cfg.denoms[idx];
@@ -477,14 +417,14 @@ pub mod privacy_pool {
 
         let to_user = amount.checked_sub(fee).ok_or(PrivacyError::MathOverflow)?;
 
-        // 4) Relayer must be authorized
+        // ---- 4) Relayer must be authorized ----
         let relayer_key = ctx.accounts.relayer.key();
         require!(
             cfg.is_relayer(&relayer_key),
             PrivacyError::RelayerNotAllowed
         );
 
-        // 5) Vault balance & TVL
+        // ---- 5) Vault balance & TVL ----
         let vault_ai = ctx.accounts.vault.to_account_info();
         let vault_balance = **vault_ai.lamports.borrow();
 
@@ -497,10 +437,10 @@ pub mod privacy_pool {
             .checked_sub(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // 6) Recipient sanity check
+        // ---- 6) Recipient sanity check ----
         require_keys_eq!(ctx.accounts.recipient.key(), public_inputs.recipient);
 
-        // 7) Manual lamport moves
+        // ---- 7) Manual lamport moves from vault -> user + relayer ----
         {
             let recipient_ai = ctx.accounts.recipient.to_account_info();
             let relayer_ai = ctx.accounts.relayer.to_account_info();
