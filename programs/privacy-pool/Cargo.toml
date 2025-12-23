@@ -23,5 +23,22 @@ zk-verify = []
 idl-build = ["anchor-lang/idl-build"]
 
 [dependencies]
-anchor-lang = "0.32.1"
-solana-program = "1.18.0"
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+
+# Poseidon hasher used by the Merkle tree
+light-hasher = { version = "5", default-features = false }
+bytemuck     = { version = "1.15", features = ["derive"] }
+
+# Arkworks / BN254 field + serialization
+ark-bn254     = { version = "0.5", default-features = false, features = ["curve"] }
+ark-ff        = { version = "0.5", default-features = false }
+ark-serialize = { version = "0.5", default-features = false }
+
+# Groth16 verifying key type
+ark-groth16   = { version = "0.5", default-features = false }
+
+# Big integers for any bounds checks you might add later
+num-bigint = "0.4"
+
+# On-chain BN254 precompiles (not used yet, but fine to keep)
+solana-bn254 = { version = "2", default-features = false }
