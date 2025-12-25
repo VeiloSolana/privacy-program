@@ -1,17 +1,17 @@
 {
     "scripts": {
-        "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
-        "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+        "build:anchor": "anchor build",
         "test": "mocha -r ts-node/register -t 1000000 tests/**/*.ts"
     },
     "dependencies": {
-        "@coral-xyz/anchor": "^0.32.1",
         "snarkjs": "^0.7.5"
     },
     "devDependencies": {
+        "@coral-xyz/anchor": "^0.32.1",
         "@solana/spl-token": "^0.4.14",
         "@types/mocha": "^10.0.10",
         "@types/node": "^24.10.1",
+        "anchor-client-gen": "^0.28.1",
         "chai": "^4.3.4",
         "mocha": "^9.2.2",
         "prettier": "^2.6.2",

@@ -31,7 +31,7 @@ pub fn verify_withdraw_groth16(
     inputs: &WithdrawPublicInputs,
 ) -> Result<()> {
     // ----- 1. Build public input array -----
-    // We know nPublic == 4 from the JSON, but keep it generic over.
+    // We know nPublic == 4 from the JSON, but keep it generic.
     let mut public_inputs: [[u8; 32]; 4] = [[0u8; 32]; 4];
 
     // root, nullifier already 32-byte BE

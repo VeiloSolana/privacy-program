@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
-use anchor_lang::solana_program::hash::hash;
 use light_hasher::Poseidon;
 
 pub mod merkle_tree;
@@ -8,7 +7,7 @@ pub mod groth16;
 pub mod zk;
 pub mod vk_constants;
 
-use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT};
+use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 use zk::{WithdrawProof, verify_withdraw_groth16};
 
 declare_id!("62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo");
@@ -21,15 +20,6 @@ pub const MAX_RELAYERS: usize = 16;
 
 /// Only kept as a conceptual cap on leaves in the old design.
 pub const TREE_DEPTH: usize = 32;
-
-// ---- Helpers (still used for some SHA256-style hashes, if needed) ----
-
-fn hash_two(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut data = [0u8; 64];
-    data[..32].copy_from_slice(a);
-    data[32..].copy_from_slice(b);
-    hash(&data).to_bytes()
-}
 
 // ---- Accounts ----
 
@@ -161,10 +151,9 @@ pub struct Initialize<'info> {
         payer = admin,
         seeds = [b"privacy_note_tree_v3"],
         bump,
-        // 8 (disc) + size_of::<MerkleTreeAccount>()
-        space = 8 + core::mem::size_of::<MerkleTreeAccount>(),
+        space = MerkleTreeAccount::LEN,
     )]
-    pub note_tree: Account<'info, MerkleTreeAccount>,
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         init,
@@ -216,7 +205,7 @@ pub struct DepositFixed<'info> {
         seeds = [b"privacy_note_tree_v3"],
         bump,
     )]
-    pub note_tree: Account<'info, MerkleTreeAccount>,
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(mut)]
     pub depositor: Signer<'info>,
@@ -245,7 +234,7 @@ pub struct Withdraw<'info> {
         seeds = [b"privacy_note_tree_v3"],
         bump,
     )]
-    pub note_tree: Account<'info, MerkleTreeAccount>,
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
@@ -277,8 +266,16 @@ pub mod privacy_pool {
     ) -> Result<()> {
         let cfg   = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
-        let tree  = &mut ctx.accounts.note_tree;
         let nulls = &mut ctx.accounts.nullifiers;
+
+        let mut tree = ctx.accounts.note_tree.load_init()?;
+        tree.authority         = ctx.accounts.admin.key();
+        tree.height            = MERKLE_TREE_HEIGHT as u8;
+        tree.root_history_size = ROOT_HISTORY_SIZE as u16;
+        tree.next_index        = 0;
+        tree.root_index = 0;
+
+        MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
         // Bumps
         cfg.bump       = ctx.bumps.config;
@@ -295,28 +292,16 @@ pub mod privacy_pool {
 
         cfg.num_denoms = denoms.len() as u8;
 
-        // Clear arrays
-        cfg.denoms = [0u64; MAX_DENOMS];
-        cfg.tvl    = [0u64; MAX_DENOMS];
+        cfg.denoms       = [0u64; MAX_DENOMS];
+        cfg.tvl          = [0u64; MAX_DENOMS];
         cfg.num_relayers = 0;
-        cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
+        cfg.relayers     = [Pubkey::default(); MAX_RELAYERS];
 
         for (i, d) in denoms.into_iter().enumerate() {
             cfg.denoms[i] = d;
         }
 
-        // Init Merkle tree
-        tree.authority = ctx.accounts.admin.key();
-        tree.next_index = 0;
-        tree.root_index = 0;
-        tree.height = MERKLE_TREE_HEIGHT as u8;
-        tree.root_history_size = 100;
-        tree.root = [0u8; 32];
-        tree.root_history = [[0u8; 32]; merkle_tree::ROOT_HISTORY_SIZE];
-
-        MerkleTree::initialize::<PoseidonHasher>(tree)?;
-
-        // Init nullifier set
+        // ---- Nullifier set init ----
         nulls.count = 0;
         nulls.last  = [0u8; 32];
 
@@ -346,6 +331,9 @@ pub mod privacy_pool {
         denom_index: u8,
         commitment: [u8; 32],
     ) -> Result<()> {
+        let mut tree = ctx.accounts.note_tree.load_mut()?;
+        MerkleTree::append::<PoseidonHasher>(commitment, &mut *tree)?;
+
         let cfg  = &mut ctx.accounts.config;
         require!(!cfg.paused, PrivacyError::Paused);
 
@@ -372,10 +360,6 @@ pub mod privacy_pool {
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
 
-        // 3) Append commitment to Merkle tree
-        let tree = &mut ctx.accounts.note_tree;
-        MerkleTree::append::<PoseidonHasher>(commitment, tree)?;
-
         Ok(())
     }
 
@@ -388,6 +372,7 @@ pub mod privacy_pool {
         proof: WithdrawProof,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
+        let tree = ctx.accounts.note_tree.load_mut()?;
         require!(!cfg.paused, PrivacyError::Paused);
 
         // ---- 0) Verify Groth16 proof (stub or real, depending on groth16.rs) ----
@@ -400,11 +385,10 @@ pub mod privacy_pool {
         verify_withdraw_groth16(proof, &public_inputs)?;
 
         // ---- 1) Check that root is known in Merkle tree ----
-        let tree = &ctx.accounts.note_tree;
-        require!(
-            MerkleTree::is_known_root(tree, public_inputs.root),
-            PrivacyError::UnknownRoot
-        );
+       require!(
+           MerkleTree::is_known_root(&*tree, public_inputs.root),
+           PrivacyError::UnknownRoot
+       );
 
         // ---- 2) Nullifier must be fresh ----
         let nulls = &mut ctx.accounts.nullifiers;
@@ -503,4 +487,6 @@ pub enum PrivacyError {
     InvalidProof,
     #[msg("Groth16 verification failed")]
     VerifyFailed,
+    #[msg("Merkle tree is full")]
+    MerkleTreeFull,
 }

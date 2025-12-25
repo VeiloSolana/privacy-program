@@ -5,13 +5,14 @@ members = [
     "programs/*",
 ]
 
-[programs.localnet]
-privacy_pool = "62trUGD4Th5AooSDfkowYMQ7QqjoAYATbJQ4QY3UpPDo"
+[workspace.dependencies]
+indexmap = "=2.2.6"
 
 [profile.release]
 overflow-checks = true
 lto = "fat"
 codegen-units = 1
+
 [profile.release.build-override]
 opt-level = 3
 incremental = false
