@@ -1,8 +1,11 @@
 [toolchain]
+anchor_version = "0.32.1"
+solana_version = "2.2.0"
 
 [features]
 seeds = false
 skip-lint = false
+privacy_pool = ["zk-verify"]
 
 [programs.localnet]
 privacy_pool = "Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q"
@@ -15,6 +18,10 @@ privacy_pool = "Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q"
 
 [registry]
 url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "/Users/pintu/.config/solana/id.json"
 
 #[provider]
 #cluster = "Localnet"

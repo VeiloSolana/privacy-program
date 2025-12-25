@@ -1,3 +1,5 @@
+// tests/privacy_pool.fixed-denom.ts
+
 import "mocha";
 import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
@@ -34,6 +36,23 @@ function makeProvider(): anchor.AnchorProvider {
   });
 }
 
+// 32-byte helper
+function bytes32(fill: number): number[] {
+  return new Array(32).fill(fill & 0xff);
+}
+
+// Dummy WithdrawProof struct for now.
+// IMPORTANT: this only works while on-chain Groth16 verify is stubbed
+// (e.g. feature `zk-verify` disabled). Once real zk verification is
+// enforced, replace this with a proof from snarkjs.
+function makeDummyProof() {
+  return {
+    proofA: new Array(64).fill(0),
+    proofB: new Array(128).fill(0),
+    proofC: new Array(64).fill(0),
+  };
+}
+
 describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
@@ -58,16 +77,13 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     await provider.connection.confirmTransaction(sig, "confirmed");
   }
 
-  function bytes32(fill: number): number[] {
-    return new Array(32).fill(fill & 0xff);
-  }
-
   async function getCurrentRootFromChain(): Promise<number[]> {
-    const noteTreeAcc: any = await (program.account as any).noteTree.fetch(
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
       noteTreePda
     );
-    // With the new NoteTree layout we just have `currentRoot: [u8;32]`
-    const root: number[] = noteTreeAcc.currentRoot;
+    // With the Rust layout:
+    //   pub struct MerkleTreeAccount { pub root: [u8; 32], ... }
+    const root: number[] = noteTreeAcc.root;
     return root;
   }
 
@@ -167,7 +183,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     console.log("Deposit fixed-denom 1 SOL OK");
   });
 
-  it("withdraws via relayer with fee + nullifier", async () => {
+  it("withdraws via relayer with fee + nullifier (dummy proof)", async () => {
     const denomIndex = 0;
     const amount = denomsLamports[denomIndex];
     const fee = (amount * BigInt(feeBps)) / 10_000n;
@@ -194,7 +210,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     // Root must match what the contract currently has
     const root = await getCurrentRootFromChain();
     const nullifier = bytes32(3);
-    const proof = Buffer.alloc(0); // still stubbed; verify_withdraw_proof is no-op
+
+    const proof = makeDummyProof(); // **stub** proof while zk verify disabled
 
     const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
     const beforeRelayer = BigInt(
@@ -205,7 +222,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     );
 
     await program.methods
-      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof)
+      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
       .accounts({
         config: configPda,
         vault: vaultPda,
@@ -237,5 +254,143 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     }
 
     console.log("Withdraw via relayer with fee OK");
+  });
+
+  it("rejects double-spend with same nullifier", async () => {
+    const denomIndex = 0;
+
+    const relayer = Keypair.generate();
+    const recipient = Keypair.generate();
+
+    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+
+    // Make sure relayer is registered
+    await program.methods
+      .addRelayer(relayer.publicKey)
+      .accounts({
+        config: configPda,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+
+    const root = await getCurrentRootFromChain();
+    const nullifier = bytes32(7);
+    const proof = makeDummyProof();
+
+    // First withdraw should succeed
+    await program.methods
+      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
+      .accounts({
+        config: configPda,
+        vault: vaultPda,
+        noteTree: noteTreePda,
+        nullifiers: nullifiersPda,
+        relayer: relayer.publicKey,
+        recipient: recipient.publicKey,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([relayer])
+      .rpc();
+
+    // Second withdraw with the same nullifier must fail
+    let failed = false;
+    try {
+      await program.methods
+        .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
+        .accounts({
+          config: configPda,
+          vault: vaultPda,
+          noteTree: noteTreePda,
+          nullifiers: nullifiersPda,
+          relayer: relayer.publicKey,
+          recipient: recipient.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([relayer])
+        .rpc();
+    } catch (e: any) {
+      failed = true;
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.log("Double-spend attempt logs:", logs);
+      }
+    }
+
+    if (!failed) {
+      throw new Error("Double-spend with same nullifier unexpectedly succeeded");
+    }
+
+    console.log("Nullifier double-spend correctly rejected");
+  });
+
+  it("respects paused flag (withdraw fails when paused)", async () => {
+    const denomIndex = 0;
+
+    const relayer = Keypair.generate();
+    const recipient = Keypair.generate();
+
+    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+
+    // Add relayer again (idempotent is_ok)
+    await program.methods
+      .addRelayer(relayer.publicKey)
+      .accounts({
+        config: configPda,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+
+    // Pause the pool
+    await program.methods
+      .setPaused(true)
+      .accounts({
+        config: configPda,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+
+    const root = await getCurrentRootFromChain();
+    const nullifier = bytes32(9);
+    const proof = makeDummyProof();
+
+    let failed = false;
+    try {
+      await program.methods
+        .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
+        .accounts({
+          config: configPda,
+          vault: vaultPda,
+          noteTree: noteTreePda,
+          nullifiers: nullifiersPda,
+          relayer: relayer.publicKey,
+          recipient: recipient.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([relayer])
+        .rpc();
+    } catch (e: any) {
+      failed = true;
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.log("Withdraw while paused logs:", logs);
+      }
+    }
+
+    if (!failed) {
+      throw new Error("Withdraw succeeded while pool is paused");
+    }
+
+    // Unpause to not poison other tests
+    await program.methods
+      .setPaused(false)
+      .accounts({
+        config: configPda,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+
+    console.log("Paused flag enforced for withdraw");
   });
 });

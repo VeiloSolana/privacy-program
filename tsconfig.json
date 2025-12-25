@@ -7,7 +7,11 @@
     "resolveJsonModule": true,
     "strict": true,
     "types": ["mocha", "node"],
-    "outDir": "dist"
+    "outDir": "dist",
+    "rootDir": "."
   },
-  "include": ["tests/**/*.ts"]
+  "include": [
+    "target/**/*.ts",
+    "tests/**/*.ts"
+  ]
 }
