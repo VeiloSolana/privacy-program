@@ -1,8 +1,7 @@
-// tests/privacy_pool.fixed-denom.ts
+// tests/privacy-pool.test.ts
 
 import "mocha";
 import * as anchor from "@coral-xyz/anchor";
-import { Program, BN } from "@coral-xyz/anchor";
 import {
   PublicKey,
   Keypair,
@@ -14,9 +13,22 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { PrivacyPool } from "../target/types/privacy_pool";
+// ---- sdk-core imports ----
+import {
+  getPoolPdas,
+  initializePool,
+  MerkleTree,
+  createNoteDepositWithMerkle,
+  deriveNullifier,
+  withdrawViaRelayerWithProof,
+} from "@zkprivacysol/sdk-core";
 
-// ---- Provider helper ----
+// Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
+import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
+
+// -----------------------------------------------------------------------------
+// Provider helper
+// -----------------------------------------------------------------------------
 
 function makeProvider(): anchor.AnchorProvider {
   const url = process.env.ANCHOR_PROVIDER_URL ?? "http://127.0.0.1:8899";
@@ -36,154 +48,162 @@ function makeProvider(): anchor.AnchorProvider {
   });
 }
 
-// 32-byte helper
-function bytes32(fill: number): number[] {
-  return new Array(32).fill(fill & 0xff);
+async function airdropAndConfirm(
+  provider: anchor.AnchorProvider,
+  pubkey: PublicKey,
+  lamports: number,
+) {
+  const sig = await provider.connection.requestAirdrop(pubkey, lamports);
+  await provider.connection.confirmTransaction(sig, "confirmed");
 }
 
-// Dummy WithdrawProof struct for now.
-// IMPORTANT: this only works while on-chain Groth16 verify is stubbed
-// (e.g. feature `zk-verify` disabled). Once real zk verification is
-// enforced, replace this with a proof from snarkjs.
-function makeDummyProof() {
-  return {
-    proofA: new Array(64).fill(0),
-    proofB: new Array(128).fill(0),
-    proofC: new Array(64).fill(0),
-  };
+// Helper: extract root from MerkleTreeAccount regardless of field name churn
+function extractRootFromAccount(noteTreeAcc: any): Uint8Array {
+  const arr: number[] =
+    noteTreeAcc.root ??
+    noteTreeAcc.currentRoot ??
+    noteTreeAcc.current_root;
+
+  if (!arr) {
+    throw new Error("MerkleTreeAccount has no root/currentRoot/current_root");
+  }
+  return new Uint8Array(arr);
 }
 
-describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
+// -----------------------------------------------------------------------------
+// Test suite
+// -----------------------------------------------------------------------------
+
+describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace.PrivacyPool as Program<PrivacyPool>;
+  // Don’t fight TS over multiple anchor versions: treat program as any.
+  const program: any = anchor.workspace.PrivacyPool as any as {
+    programId: PublicKey;
+    // we only use .methods and .account in this test
+  };
   const wallet = provider.wallet as anchor.Wallet;
 
-  let configPda: PublicKey;
-  let vaultPda: PublicKey;
-  let noteTreePda: PublicKey;
-  let nullifiersPda: PublicKey;
+  // Use the same PDA derivation as sdk-core & relayer
+  const { config, vault, noteTree, nullifiers } = getPoolPdas(program.programId);
 
-  // two fixed denoms for test: 1 SOL, 5 SOL
-  const denomsLamports = [
+  // Two fixed denoms for the pool: 1 SOL, 5 SOL
+  const denomsLamports: bigint[] = [
     BigInt(LAMPORTS_PER_SOL),
     BigInt(5 * LAMPORTS_PER_SOL),
   ];
   const feeBps = 50; // 0.5%
 
-  async function airdropAndConfirm(pubkey: PublicKey, lamports: number) {
-    const sig = await provider.connection.requestAirdrop(pubkey, lamports);
-    await provider.connection.confirmTransaction(sig, "confirmed");
-  }
+  // Off-chain Merkle tree used for zk circuit inputs
+  // IMPORTANT: in production this hash must match your circuit’s hash (Poseidon/etc)
+  const offchainTree = new MerkleTree(16);
 
-  async function getCurrentRootFromChain(): Promise<number[]> {
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
-      noteTreePda
-    );
-    // With the Rust layout:
-    //   pub struct MerkleTreeAccount { pub root: [u8; 32], ... }
-    const root: number[] = noteTreeAcc.root;
-    return root;
-  }
+  // We keep around one note + path for withdraw tests
+  let depositNote: any;
+  let depositRoot: Uint8Array;
+  let depositMerklePath: any;
+  let depositNullifier: Uint8Array;
+
+  // use your real Groth16 builder
+  const proofBuilder = buildWithdrawProof;
+
+  // ---------------------------------------------------------------------------
+  // Global setup: ensure pool initialized
+  // ---------------------------------------------------------------------------
 
   before(async () => {
-    [configPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("privacy_config_v3")],
-      program.programId
-    );
-    [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("privacy_vault_v3")],
-      program.programId
-    );
-    [noteTreePda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("privacy_note_tree_v3")],
-      program.programId
-    );
-    [nullifiersPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("privacy_nullifiers_v3")],
-      program.programId
-    );
+    // airdrop admin wallet on localnet
+    await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
 
-    // Make sure admin wallet actually has SOL on localnet
-    await airdropAndConfirm(wallet.publicKey, 10 * LAMPORTS_PER_SOL);
-
-    // Try to fetch config; if it exists, assume already initialized.
-    const existing = await provider.connection.getAccountInfo(configPda);
+    // If config PDA already exists, assume pool already initialized
+    const existing = await provider.connection.getAccountInfo(config as PublicKey);
     if (existing) {
       console.log(
-        "Initialize skipped: PDAs already exist on this cluster, continuing tests."
+        "Initialize skipped: PDAs already exist on this cluster, continuing tests.",
       );
       return;
     }
 
     try {
-      await program.methods
-        .initialize(
-          denomsLamports.map((d) => new BN(d.toString())),
-          feeBps
-        )
-        .accounts({
-          config: configPda,
-          vault: vaultPda,
-          noteTree: noteTreePda,
-          nullifiers: nullifiersPda,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        } as any)
-        .rpc();
+      // cast program as any to satisfy sdk-core’s Program<T> without TS whining
+      await initializePool({
+        program: program as any,
+        admin: wallet,
+        denomsLamports,
+        feeBps,
+      });
     } catch (e: any) {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
-        console.error("Initialize failed with logs:", logs);
+        console.error("initializePool failed with logs:", logs);
       }
       throw e;
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // Deposit test
+  // ---------------------------------------------------------------------------
+
   it("deposits fixed 1 SOL and updates root", async () => {
     const denomIndex = 0;
-    const commitment = bytes32(1); // toy commitment
+    const beforeVault = await provider.connection.getBalance(vault as PublicKey);
 
-    const beforeVault = await provider.connection.getBalance(vaultPda);
+    // High-level deposit helper from sdk-core:
+    const result = await createNoteDepositWithMerkle({
+      program: program as any,
+      depositor: wallet,
+      denomIndex,
+      valueLamports: denomsLamports[denomIndex],
+      tree: offchainTree,
+    });
 
-    try {
-      await program.methods
-        .depositFixed(denomIndex, commitment)
-        .accounts({
-          config: configPda,
-          vault: vaultPda,
-          noteTree: noteTreePda,
-          depositor: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        } as any)
-        .rpc();
-    } catch (e: any) {
-      if (e instanceof SendTransactionError) {
-        const logs = await e.getLogs(provider.connection);
-        console.error("depositFixed failed with logs:", logs);
-      }
-      throw e;
+    console.log("Result", result)
+
+    if (!result) {
+      throw new Error("depositResult is undefined – deposit test must run first and succeed");
     }
 
-    const afterVault = await provider.connection.getBalance(vaultPda);
+    depositNote = result.note;
+    depositRoot = result.root;
+    depositMerklePath = result.merklePath;
+    depositNullifier = deriveNullifier(depositNote);
+
+    const afterVault = await provider.connection.getBalance(vault as PublicKey);
     const delta = BigInt(afterVault - beforeVault);
 
     if (delta !== denomsLamports[denomIndex]) {
       throw new Error(
         `Unexpected vault delta: got ${delta.toString()} expected ${denomsLamports[
           denomIndex
-          ].toString()}`
+          ].toString()}`,
       );
     }
 
-    const root = await getCurrentRootFromChain();
-    console.log("Current on-chain root after deposit:", root);
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree,
+    );
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    console.log("Off-chain Mirrored Root   :", Array.from(depositRoot));
+    console.log("On-chain NoteTree Root    :", Array.from(onchainRoot));
+
+    if (Buffer.compare(Buffer.from(depositRoot), Buffer.from(onchainRoot)) !== 0) {
+      console.warn(
+        "WARNING: off-chain Merkle root != on-chain root. " +
+        "Fix this before trusting zk proofs in production.",
+      );
+    }
 
     console.log("Deposit fixed-denom 1 SOL OK");
   });
 
-  it("withdraws via relayer with fee + nullifier (dummy proof)", async () => {
+  // ---------------------------------------------------------------------------
+  // Withdraw with real proof (via sdk-core)
+  // ---------------------------------------------------------------------------
+
+  it("withdraws via relayer with fee + nullifier (real zk proof)", async () => {
     const denomIndex = 0;
     const amount = denomsLamports[denomIndex];
     const fee = (amount * BigInt(feeBps)) / 10_000n;
@@ -192,55 +212,65 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     const relayer = Keypair.generate();
     const recipient = Keypair.generate();
 
-    // fund relayer so it can pay tx fees on local validator
-    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    // fund relayer so it can pay tx fees
+    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    // ensure recipient exists as a system account
+    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
 
-    // create recipient account (so SystemAccount constraint passes)
-    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
-
-    // admin adds relayer
-    await program.methods
+    // Register relayer on-chain (sdk-core doesn’t wrap this yet, so call directly)
+    await (program.methods as any)
       .addRelayer(relayer.publicKey)
       .accounts({
-        config: configPda,
+        config,
         admin: wallet.publicKey,
       } as any)
       .rpc();
 
-    // Root must match what the contract currently has
-    const root = await getCurrentRootFromChain();
-    const nullifier = bytes32(3);
+    // Always use the authoritative on-chain root for the proof public input
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree,
+    );
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    const proof = makeDummyProof(); // **stub** proof while zk verify disabled
-
-    const beforeVault = BigInt(await provider.connection.getBalance(vaultPda));
+    const beforeVault = BigInt(
+      await provider.connection.getBalance(vault as PublicKey),
+    );
     const beforeRelayer = BigInt(
-      await provider.connection.getBalance(relayer.publicKey)
+      await provider.connection.getBalance(relayer.publicKey),
     );
     const beforeRecipient = BigInt(
-      await provider.connection.getBalance(recipient.publicKey)
+      await provider.connection.getBalance(recipient.publicKey),
     );
 
-    await program.methods
-      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        relayer: relayer.publicKey,
+    try {
+      await withdrawViaRelayerWithProof({
+        program: program as any,
+        relayer,
         recipient: recipient.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .signers([relayer])
-      .rpc();
+        denomIndex,
+        feeBps,
+        root: onchainRoot,
+        nullifier: depositNullifier,
+        noteData: depositNote,
+        merklePath: depositMerklePath,
+        builder: proofBuilder,
+      });
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("withdrawViaRelayerWithProof failed logs:", logs);
+      }
+      throw e;
+    }
 
-    const afterVault = BigInt(await provider.connection.getBalance(vaultPda));
+    const afterVault = BigInt(
+      await provider.connection.getBalance(vault as PublicKey),
+    );
     const afterRelayer = BigInt(
-      await provider.connection.getBalance(relayer.publicKey)
+      await provider.connection.getBalance(relayer.publicKey),
     );
     const afterRecipient = BigInt(
-      await provider.connection.getBalance(recipient.publicKey)
+      await provider.connection.getBalance(recipient.publicKey),
     );
 
     if (beforeVault - afterVault !== amount) {
@@ -253,8 +283,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
       throw new Error("Recipient amount mismatch");
     }
 
-    console.log("Withdraw via relayer with fee OK");
+    console.log("Withdraw via relayer with real proof OK");
   });
+
+  // ---------------------------------------------------------------------------
+  // Double-spend protection (nullifier)
+  // ---------------------------------------------------------------------------
 
   it("rejects double-spend with same nullifier", async () => {
     const denomIndex = 0;
@@ -262,53 +296,51 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     const relayer = Keypair.generate();
     const recipient = Keypair.generate();
 
-    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
-    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
 
-    // Make sure relayer is registered
-    await program.methods
+    await (program.methods as any)
       .addRelayer(relayer.publicKey)
       .accounts({
-        config: configPda,
+        config,
         admin: wallet.publicKey,
       } as any)
       .rpc();
 
-    const root = await getCurrentRootFromChain();
-    const nullifier = bytes32(7);
-    const proof = makeDummyProof();
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree,
+    );
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    // First withdraw should succeed
-    await program.methods
-      .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
-      .accounts({
-        config: configPda,
-        vault: vaultPda,
-        noteTree: noteTreePda,
-        nullifiers: nullifiersPda,
-        relayer: relayer.publicKey,
-        recipient: recipient.publicKey,
-        systemProgram: SystemProgram.programId,
-      } as any)
-      .signers([relayer])
-      .rpc();
+    // First withdraw (should succeed)
+    await withdrawViaRelayerWithProof({
+      program: program as any,
+      relayer,
+      recipient: recipient.publicKey,
+      denomIndex,
+      feeBps,
+      root: onchainRoot,
+      nullifier: depositNullifier,
+      noteData: depositNote,
+      merklePath: depositMerklePath,
+      builder: proofBuilder,
+    });
 
-    // Second withdraw with the same nullifier must fail
+    // Second withdraw with same nullifier must fail
     let failed = false;
     try {
-      await program.methods
-        .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
-        .accounts({
-          config: configPda,
-          vault: vaultPda,
-          noteTree: noteTreePda,
-          nullifiers: nullifiersPda,
-          relayer: relayer.publicKey,
-          recipient: recipient.publicKey,
-          systemProgram: SystemProgram.programId,
-        } as any)
-        .signers([relayer])
-        .rpc();
+      await withdrawViaRelayerWithProof({
+        program: program as any,
+        relayer,
+        recipient: recipient.publicKey,
+        denomIndex,
+        feeBps,
+        root: onchainRoot,
+        nullifier: depositNullifier,
+        noteData: depositNote,
+        merklePath: depositMerklePath,
+        builder: proofBuilder,
+      });
     } catch (e: any) {
       failed = true;
       if (e instanceof SendTransactionError) {
@@ -324,52 +356,55 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
     console.log("Nullifier double-spend correctly rejected");
   });
 
+  // ---------------------------------------------------------------------------
+  // Paused flag behaviour
+  // ---------------------------------------------------------------------------
+
   it("respects paused flag (withdraw fails when paused)", async () => {
     const denomIndex = 0;
 
     const relayer = Keypair.generate();
     const recipient = Keypair.generate();
 
-    await airdropAndConfirm(relayer.publicKey, 2 * LAMPORTS_PER_SOL);
-    await airdropAndConfirm(recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
 
-    // Add relayer again (idempotent is_ok)
-    await program.methods
+    await (program.methods as any)
       .addRelayer(relayer.publicKey)
       .accounts({
-        config: configPda,
+        config,
         admin: wallet.publicKey,
       } as any)
       .rpc();
 
     // Pause the pool
-    await program.methods
+    await (program.methods as any)
       .setPaused(true)
       .accounts({
-        config: configPda,
+        config,
         admin: wallet.publicKey,
       } as any)
       .rpc();
 
-    const root = await getCurrentRootFromChain();
-    const nullifier = bytes32(9);
-    const proof = makeDummyProof();
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree,
+    );
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     let failed = false;
     try {
-      await program.methods
-        .withdraw(root, nullifier, denomIndex, recipient.publicKey, proof as any)
-        .accounts({
-          config: configPda,
-          vault: vaultPda,
-          noteTree: noteTreePda,
-          nullifiers: nullifiersPda,
-          relayer: relayer.publicKey,
-          recipient: recipient.publicKey,
-          systemProgram: SystemProgram.programId,
-        } as any)
-        .signers([relayer])
-        .rpc();
+      await withdrawViaRelayerWithProof({
+        program: program as any,
+        relayer,
+        recipient: recipient.publicKey,
+        denomIndex,
+        feeBps,
+        root: onchainRoot,
+        nullifier: depositNullifier,
+        noteData: depositNote,
+        merklePath: depositMerklePath,
+        builder: proofBuilder,
+      });
     } catch (e: any) {
       failed = true;
       if (e instanceof SendTransactionError) {
@@ -382,11 +417,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3)", () => {
       throw new Error("Withdraw succeeded while pool is paused");
     }
 
-    // Unpause to not poison other tests
-    await program.methods
+    // Unpause to not poison other tests / future runs
+    await (program.methods as any)
       .setPaused(false)
       .accounts({
-        config: configPda,
+        config,
         admin: wallet.publicKey,
       } as any)
       .rpc();
