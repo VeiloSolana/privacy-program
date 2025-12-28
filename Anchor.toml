@@ -19,13 +19,6 @@ privacy_pool = "Bo2en1LKZL7JFXsag7KAb5ZQiqFg5j22dJYCLZmoek1Q"
 [registry]
 url = "https://api.apr.dev"
 
-[provider]
-cluster = "localnet"
-wallet = "/Users/pintu/.config/solana/id.json"
-
-#[provider]
-#cluster = "Localnet"
-#wallet = "/Users/admin/.config/solana/id.json"
 
 [provider]
 cluster = "devnet"
