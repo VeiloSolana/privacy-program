@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use light_hasher::Hasher;
 use crate::PrivacyError;
 
-pub const MERKLE_TREE_HEIGHT: usize = 20;
+pub const MERKLE_TREE_HEIGHT: usize = 16;
 pub const ROOT_HISTORY_SIZE: usize = 32;
 
 #[account(zero_copy(unsafe))]
@@ -35,8 +35,14 @@ pub struct MerkleTree;
 impl MerkleTree {
     pub fn initialize<H: Hasher>(tree: &mut MerkleTreeAccount) -> Result<()> {
         let height = tree.height as usize;
-
         let zeros = H::zero_bytes(); // usually length = height+1
+
+        // Defensive: Poseidon::zero_bytes must give us at least height+1 entries
+        require!(
+            height < zeros.len(),
+            PrivacyError::MerkleHashFailed
+        );
+
         // fill subtrees
         for i in 0..height {
             tree.subtrees[i] = zeros[i];
@@ -70,6 +76,12 @@ impl MerkleTree {
         let mut current = leaf;
         let zeros = H::zero_bytes();
 
+        // same sanity check here
+        require!(
+            height <= zeros.len(),
+            PrivacyError::MerkleHashFailed
+        );
+
         for level in 0..height {
             let subtree = &mut tree.subtrees[level];
             let zero = zeros[level];
@@ -81,7 +93,10 @@ impl MerkleTree {
                 (*subtree, current)
             };
 
-            current = H::hashv(&[&left, &right]).unwrap();
+            // ✅ new: map Poseidon error into an Anchor error
+            current = H::hashv(&[&left, &right])
+                .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+
             current_index /= 2;
         }
 
@@ -94,7 +109,9 @@ impl MerkleTree {
         let new_root_index = tree
             .root_index
             .checked_add(1)
-            .ok_or(PrivacyError::MathOverflow)? as usize % root_history_size;
+            .ok_or(PrivacyError::MathOverflow)? as usize
+            % root_history_size;
+
         tree.root_index = new_root_index as u64;
         tree.root_history[new_root_index] = current;
 

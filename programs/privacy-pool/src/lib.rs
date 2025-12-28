@@ -482,4 +482,6 @@ pub enum PrivacyError {
     VerifyFailed,
     #[msg("Merkle tree is full")]
     MerkleTreeFull,
+    #[msg("Merkle hash failed")]
+    MerkleHashFailed,
 }
