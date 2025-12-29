@@ -21,6 +21,7 @@ import {
   createNoteDepositWithMerkle,
   deriveNullifier,
   withdrawViaRelayerWithProof,
+  initPoseidon,
 } from "@zkprivacysol/sdk-core";
 
 // Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
@@ -51,7 +52,7 @@ function makeProvider(): anchor.AnchorProvider {
 async function airdropAndConfirm(
   provider: anchor.AnchorProvider,
   pubkey: PublicKey,
-  lamports: number,
+  lamports: number
 ) {
   const sig = await provider.connection.requestAirdrop(pubkey, lamports);
   await provider.connection.confirmTransaction(sig, "confirmed");
@@ -60,9 +61,7 @@ async function airdropAndConfirm(
 // Helper: extract root from MerkleTreeAccount regardless of field name churn
 function extractRootFromAccount(noteTreeAcc: any): Uint8Array {
   const arr: number[] =
-    noteTreeAcc.root ??
-    noteTreeAcc.currentRoot ??
-    noteTreeAcc.current_root;
+    noteTreeAcc.root ?? noteTreeAcc.currentRoot ?? noteTreeAcc.current_root;
 
   if (!arr) {
     throw new Error("MerkleTreeAccount has no root/currentRoot/current_root");
@@ -86,7 +85,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   const wallet = provider.wallet as anchor.Wallet;
 
   // Use the same PDA derivation as sdk-core & relayer
-  const { config, vault, noteTree, nullifiers } = getPoolPdas(program.programId);
+  const { config, vault, noteTree, nullifiers } = getPoolPdas(
+    program.programId
+  );
 
   // Two fixed denoms for the pool: 1 SOL, 5 SOL
   const denomsLamports: bigint[] = [
@@ -97,7 +98,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
   // Off-chain Merkle tree used for zk circuit inputs
   // IMPORTANT: in production this hash must match your circuit’s hash (Poseidon/etc)
-  const offchainTree = new MerkleTree(16);
+  let offchainTree: MerkleTree;
 
   // We keep around one note + path for withdraw tests
   let depositNote: any;
@@ -113,14 +114,22 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // ---------------------------------------------------------------------------
 
   before(async () => {
+    // Initialize Poseidon hash function FIRST
+    await initPoseidon();
+
+    // Now we can create the MerkleTree
+    offchainTree = new MerkleTree(16);
+
     // airdrop admin wallet on localnet
     await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // If config PDA already exists, assume pool already initialized
-    const existing = await provider.connection.getAccountInfo(config as PublicKey);
+    const existing = await provider.connection.getAccountInfo(
+      config as PublicKey
+    );
     if (existing) {
       console.log(
-        "Initialize skipped: PDAs already exist on this cluster, continuing tests.",
+        "Initialize skipped: PDAs already exist on this cluster, continuing tests."
       );
       return;
     }
@@ -148,7 +157,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
   it("deposits fixed 1 SOL and updates root", async () => {
     const denomIndex = 0;
-    const beforeVault = await provider.connection.getBalance(vault as PublicKey);
+    const beforeVault = await provider.connection.getBalance(
+      vault as PublicKey
+    );
 
     // High-level deposit helper from sdk-core:
     const result = await createNoteDepositWithMerkle({
@@ -159,10 +170,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       tree: offchainTree,
     });
 
-    console.log("Result", result)
+    console.log("Result", result);
 
     if (!result) {
-      throw new Error("depositResult is undefined – deposit test must run first and succeed");
+      throw new Error(
+        "depositResult is undefined – deposit test must run first and succeed"
+      );
     }
 
     depositNote = result.note;
@@ -177,22 +190,24 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       throw new Error(
         `Unexpected vault delta: got ${delta.toString()} expected ${denomsLamports[
           denomIndex
-          ].toString()}`,
+        ].toString()}`
       );
     }
 
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree,
-    );
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     console.log("Off-chain Mirrored Root   :", Array.from(depositRoot));
     console.log("On-chain NoteTree Root    :", Array.from(onchainRoot));
 
-    if (Buffer.compare(Buffer.from(depositRoot), Buffer.from(onchainRoot)) !== 0) {
+    if (
+      Buffer.compare(Buffer.from(depositRoot), Buffer.from(onchainRoot)) !== 0
+    ) {
       console.warn(
         "WARNING: off-chain Merkle root != on-chain root. " +
-        "Fix this before trusting zk proofs in production.",
+          "Fix this before trusting zk proofs in production."
       );
     }
 
@@ -215,7 +230,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     // fund relayer so it can pay tx fees
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
     // ensure recipient exists as a system account
-    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(
+      provider,
+      recipient.publicKey,
+      0.2 * LAMPORTS_PER_SOL
+    );
 
     // Register relayer on-chain (sdk-core doesn’t wrap this yet, so call directly)
     await (program.methods as any)
@@ -227,19 +246,19 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       .rpc();
 
     // Always use the authoritative on-chain root for the proof public input
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree,
-    );
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const beforeVault = BigInt(
-      await provider.connection.getBalance(vault as PublicKey),
+      await provider.connection.getBalance(vault as PublicKey)
     );
     const beforeRelayer = BigInt(
-      await provider.connection.getBalance(relayer.publicKey),
+      await provider.connection.getBalance(relayer.publicKey)
     );
     const beforeRecipient = BigInt(
-      await provider.connection.getBalance(recipient.publicKey),
+      await provider.connection.getBalance(recipient.publicKey)
     );
 
     try {
@@ -264,13 +283,13 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     }
 
     const afterVault = BigInt(
-      await provider.connection.getBalance(vault as PublicKey),
+      await provider.connection.getBalance(vault as PublicKey)
     );
     const afterRelayer = BigInt(
-      await provider.connection.getBalance(relayer.publicKey),
+      await provider.connection.getBalance(relayer.publicKey)
     );
     const afterRecipient = BigInt(
-      await provider.connection.getBalance(recipient.publicKey),
+      await provider.connection.getBalance(recipient.publicKey)
     );
 
     if (beforeVault - afterVault !== amount) {
@@ -297,7 +316,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const recipient = Keypair.generate();
 
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
-    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(
+      provider,
+      recipient.publicKey,
+      0.2 * LAMPORTS_PER_SOL
+    );
 
     await (program.methods as any)
       .addRelayer(relayer.publicKey)
@@ -307,9 +330,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       } as any)
       .rpc();
 
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree,
-    );
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     // First withdraw (should succeed)
@@ -350,7 +373,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     }
 
     if (!failed) {
-      throw new Error("Double-spend with same nullifier unexpectedly succeeded");
+      throw new Error(
+        "Double-spend with same nullifier unexpectedly succeeded"
+      );
     }
 
     console.log("Nullifier double-spend correctly rejected");
@@ -367,7 +392,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const recipient = Keypair.generate();
 
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
-    await airdropAndConfirm(provider, recipient.publicKey, 0.2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(
+      provider,
+      recipient.publicKey,
+      0.2 * LAMPORTS_PER_SOL
+    );
 
     await (program.methods as any)
       .addRelayer(relayer.publicKey)
@@ -386,9 +415,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       } as any)
       .rpc();
 
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree,
-    );
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     let failed = false;
