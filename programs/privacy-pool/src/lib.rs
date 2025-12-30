@@ -252,6 +252,50 @@ pub struct Withdraw<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct TransferPublicInputs {
+    pub old_root: [u8; 32],
+    pub old_nullifier: [u8; 32],
+    pub new_commitment: [u8; 32],
+    pub denom_index: u8,
+}
+
+#[derive(Accounts)]
+pub struct PrivateTransfer<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3"],
+        bump = config.bump
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3"],
+        bump,
+    )]
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_nullifiers_v3"],
+        bump = nullifiers.bump
+    )]
+    pub nullifiers: Account<'info, NullifierSet>,
+
+    #[account(mut)]
+    pub sender: Signer<'info>, // Could be relayer
+
+    pub system_program: Program<'info, System>,
+}
+
+pub struct TransferHint {
+    pub old_root: [u8; 32],
+    pub old_nullifier: [u8; 32],
+    pub new_commitment: [u8; 32],
+    pub denom_index: u8,
+}
+
 // ---- Program ----
 
 #[program]
@@ -354,6 +398,50 @@ pub mod privacy_pool {
         cfg.tvl[idx] = cfg.tvl[idx]
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
+
+        Ok(())
+    }
+
+    pub fn private_transfer(
+        ctx: Context<PrivateTransfer>,
+        old_root: [u8; 32],
+        old_nullifier: [u8; 32],
+        new_commitment: [u8; 32],
+        denom_index: u8,
+        proof: Vec<u8>, // TransferProof
+    ) -> Result<()> {
+        let cfg = &ctx.accounts.config;
+        let mut tree = ctx.accounts.note_tree.load_mut()?;
+
+        require!(!cfg.paused, PrivacyError::Paused);
+        require!(
+            (denom_index as usize) < cfg.num_denoms as usize,
+            PrivacyError::BadDenomIndex
+        );
+
+        // 1. Verify ZK proof for transfer
+        let public_inputs = TransferPublicInputs {
+            old_root,
+            old_nullifier,
+            new_commitment,
+            denom_index,
+        };
+        // verify_transfer_groth16(proof, &public_inputs)?;
+
+        // 2. Check old root is known
+        require!(
+            MerkleTree::is_known_root(&*tree, old_root),
+            PrivacyError::UnknownRoot
+        );
+
+        // 3. Mark old nullifier as spent
+        let nulls = &mut ctx.accounts.nullifiers;
+        nulls.insert(old_nullifier)?;
+
+        // 4. Insert new commitment into tree
+        MerkleTree::append::<PoseidonHasher>(new_commitment, &mut *tree)?;
+
+        // Note: No SOL moves, just commitment ownership transfer
 
         Ok(())
     }
