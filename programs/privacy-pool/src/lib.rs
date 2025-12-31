@@ -296,6 +296,12 @@ pub struct TransferHint {
     pub denom_index: u8,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct DepositHint {
+    pub commitment: [u8; 32],
+    pub denom_index: u8,
+}
+
 // ---- Program ----
 
 #[program]
