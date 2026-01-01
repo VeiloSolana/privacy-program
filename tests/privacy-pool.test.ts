@@ -130,9 +130,26 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       config as PublicKey
     );
     if (existing) {
-      console.log(
-        "Initialize skipped: PDAs already exist on this cluster, continuing tests."
-      );
+      console.log("Initialize skipped: PDAs already exist on this cluster.");
+
+      // Check if the tree is dirty (has leaves from previous runs)
+      // The test assumes a fresh off-chain tree, so we must ensure on-chain tree is also empty.
+      const noteTreeAcc: any = await (
+        program.account as any
+      ).merkleTreeAccount.fetch(noteTree);
+      // Check nextIndex (or next_index depending on type generation)
+      const nextIndex = noteTreeAcc.nextIndex ?? noteTreeAcc.next_index;
+
+      // if (nextIndex && nextIndex.gt(new anchor.BN(0))) {
+      //   throw new Error(
+      //     `\n\nFATAL: The on-chain Merkle tree is not empty (nextIndex = ${nextIndex.toString()}).\n` +
+      //       "This test suite requires a fresh environment because it maintains a parallel off-chain tree.\n" +
+      //       "Please reset your local validator:\n" +
+      //       "  pkill -f solana-test-validator\n" +
+      //       "  solana-test-validator --reset --quiet &\n\n"
+      //   );
+      // }
+
       return;
     }
 

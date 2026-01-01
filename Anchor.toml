@@ -8,20 +8,20 @@ skip-lint = false
 privacy_pool = ["zk-verify"]
 
 [programs.localnet]
-privacy_pool = "8FyzcCmwR4317KEYsm1gF7t8dHpk83ZdzcbgqsuUMyu4"
+privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
 
 [programs.devnet]
-privacy_pool = "8FyzcCmwR4317KEYsm1gF7t8dHpk83ZdzcbgqsuUMyu4"
+privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
 
 [programs.mainnet]
-privacy_pool = "8FyzcCmwR4317KEYsm1gF7t8dHpk83ZdzcbgqsuUMyu4"
+privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
 
 [registry]
 url = "https://api.apr.dev"
 
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "/Users/admin/.config/solana/id.json"
 
 [test]
