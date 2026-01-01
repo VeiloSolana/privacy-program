@@ -10,7 +10,7 @@ pub mod zk;
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 use zk::{verify_withdraw_groth16, WithdrawProof};
 
-declare_id!("AAiFgdAYeo8UXtZkZrN2frmRsS6hDrkstsTmeiPddLA8");
+declare_id!("8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP");
 
 // ---- Constants ----
 

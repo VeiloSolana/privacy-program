@@ -22,10 +22,12 @@ import {
   deriveNullifier,
   withdrawViaRelayerWithProof,
   initPoseidon,
-} from "veilo-sdk-core";
+  bytesToBigIntBE,
+} from "@zkprivacysol/sdk-core";
 
 // Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
 import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
+import { groth16 } from "snarkjs";
 
 // -----------------------------------------------------------------------------
 // Provider helper
@@ -86,8 +88,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
   // Use the same PDA derivation as sdk-core & relayer
   const { config, vault, noteTree, nullifiers } = getPoolPdas(
-    program.programId,
-    new Uint8Array(2)
+    program.programId
   );
 
   // Two fixed denoms for the pool: 1 SOL, 5 SOL
@@ -129,9 +130,26 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       config as PublicKey
     );
     if (existing) {
-      console.log(
-        "Initialize skipped: PDAs already exist on this cluster, continuing tests."
-      );
+      console.log("Initialize skipped: PDAs already exist on this cluster.");
+
+      // Check if the tree is dirty (has leaves from previous runs)
+      // The test assumes a fresh off-chain tree, so we must ensure on-chain tree is also empty.
+      const noteTreeAcc: any = await (
+        program.account as any
+      ).merkleTreeAccount.fetch(noteTree);
+      // Check nextIndex (or next_index depending on type generation)
+      const nextIndex = noteTreeAcc.nextIndex ?? noteTreeAcc.next_index;
+
+      // if (nextIndex && nextIndex.gt(new anchor.BN(0))) {
+      //   throw new Error(
+      //     `\n\nFATAL: The on-chain Merkle tree is not empty (nextIndex = ${nextIndex.toString()}).\n` +
+      //       "This test suite requires a fresh environment because it maintains a parallel off-chain tree.\n" +
+      //       "Please reset your local validator:\n" +
+      //       "  pkill -f solana-test-validator\n" +
+      //       "  solana-test-validator --reset --quiet &\n\n"
+      //   );
+      // }
+
       return;
     }
 
@@ -170,6 +188,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       valueLamports: denomsLamports[denomIndex],
       tree: offchainTree,
     });
+
     console.log("Result", result);
 
     if (!result) {
@@ -211,6 +230,40 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       );
     }
 
+    console.log("\nVerifying proof off-chain...");
+    const wasmPath = path.join(__dirname, "../zk/circuits/withdraw.wasm");
+    const zkeyPath = path.join(__dirname, "../zk/circuits/withdraw_0001.zkey");
+    const vkPath = path.join(__dirname, "../zk/circuits/verification_key.json");
+    const vKey = require(vkPath);
+    const testInputs = {
+      root: bytesToBigIntBE(depositRoot),
+      nullifier: bytesToBigIntBE(depositNullifier),
+      denomIndex: BigInt(denomIndex),
+      recipient: bytesToBigIntBE(wallet.publicKey.toBytes()),
+
+      // You'd need real values for these private inputs
+      noteValue: depositNote.value,
+      noteOwner: bytesToBigIntBE(depositNote.owner.toBytes()),
+      noteRho: bytesToBigIntBE(depositNote.rho),
+      noteR: bytesToBigIntBE(depositNote.r),
+
+      pathElements: depositMerklePath.path.map((p: Uint8Array) =>
+        bytesToBigIntBE(p)
+      ),
+      pathIndices: depositMerklePath.indices.map((i: number) => BigInt(i)),
+    };
+
+    const { proof, publicSignals } = await groth16.fullProve(
+      testInputs,
+      wasmPath,
+      zkeyPath
+    );
+
+    console.log("✓ Proof generated successfully", proof, publicSignals);
+
+    const valid = await groth16.verify(vKey, publicSignals, proof);
+    console.log("Proof valid?", valid);
+
     console.log("Deposit fixed-denom 1 SOL OK");
   });
 
@@ -225,7 +278,16 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const toUser = amount - fee;
 
     const relayer = Keypair.generate();
-    const recipient = Keypair.generate();
+    const recipient = wallet;
+
+    const recipientBytes = recipient.publicKey.toBytes();
+    const recipientBigInt = bytesToBigIntBE(recipientBytes);
+    const FR_MODULUS =
+      21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+
+    console.log("Recipient BigInt:", recipientBigInt.toString());
+    console.log("Field Modulus:   ", FR_MODULUS.toString());
+    console.log("Exceeds modulus?", recipientBigInt >= FR_MODULUS);
 
     // fund relayer so it can pay tx fees
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
@@ -275,10 +337,18 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
         builder: proofBuilder,
       });
     } catch (e: any) {
+      console.error("\n========== WITHDRAW ERROR ==========");
+      console.error("Error:", e.message);
+      if (e.logs) {
+        console.error("\nTransaction logs:");
+        e.logs.forEach((log: string) => console.error("  ", log));
+      }
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
-        console.error("withdrawViaRelayerWithProof failed logs:", logs);
+        console.error("\nDetailed logs from getLogs:");
+        logs?.forEach((log: string) => console.error("  ", log));
       }
+      console.error("====================================\n");
       throw e;
     }
 
@@ -456,5 +526,198 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       .rpc();
 
     console.log("Paused flag enforced for withdraw");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Direct withdraw call (no SDK wrapper)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Manually convert snarkjs proof to WithdrawProof format
+   * Based on SDK's encodeSnarkjsProofToWithdrawProof but implemented directly
+   */
+  function convertProofToBytes(proof: any): {
+    proofA: number[];
+    proofB: number[];
+    proofC: number[];
+  } {
+    // Helper to convert bigint to 32-byte big-endian array
+    function bigintTo32BytesBE(x: bigint): number[] {
+      const out = new Array(32).fill(0);
+      let v = x;
+      for (let i = 31; i >= 0; i--) {
+        out[i] = Number(v & 0xffn);
+        v >>= 8n;
+      }
+      return out;
+    }
+
+    // Extract proof components
+    const ax = BigInt(proof.pi_a[0]);
+    const ay = BigInt(proof.pi_a[1]);
+
+    const bx0 = BigInt(proof.pi_b[0][0]);
+    const bx1 = BigInt(proof.pi_b[0][1]);
+    const by0 = BigInt(proof.pi_b[1][0]);
+    const by1 = BigInt(proof.pi_b[1][1]);
+
+    const cx = BigInt(proof.pi_c[0]);
+    const cy = BigInt(proof.pi_c[1]);
+
+    // Convert to bytes: each element is 32 bytes
+    // NOTE: G2 points must be encoded as [c1, c0] for EIP-197 compatibility
+    const proofA = [...bigintTo32BytesBE(ax), ...bigintTo32BytesBE(ay)]; // 64 bytes
+    const proofB = [
+      ...bigintTo32BytesBE(bx1), // X imaginary part (c1)
+      ...bigintTo32BytesBE(bx0), // X real part (c0)
+      ...bigintTo32BytesBE(by1), // Y imaginary part (c1)
+      ...bigintTo32BytesBE(by0), // Y real part (c0)
+    ]; // 128 bytes
+    const proofC = [...bigintTo32BytesBE(cx), ...bigintTo32BytesBE(cy)]; // 64 bytes
+
+    return { proofA, proofB, proofC };
+  }
+
+  it("withdraws via direct program call (no SDK wrapper)", async () => {
+    const denomIndex = 0;
+    const amount = denomsLamports[denomIndex];
+    const fee = (amount * BigInt(feeBps)) / 10_000n;
+    const toUser = amount - fee;
+
+    const relayer = Keypair.generate();
+    const recipient = wallet;
+
+    // Fund relayer and recipient
+    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await airdropAndConfirm(
+      provider,
+      recipient.publicKey,
+      0.2 * LAMPORTS_PER_SOL
+    );
+
+    // Register relayer
+    await (program.methods as any)
+      .addRelayer(relayer.publicKey)
+      .accounts({ config, admin: wallet.publicKey } as any)
+      .rpc();
+
+    // Get on-chain root
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    // Prepare circuit inputs
+    const testInputs = {
+      root: bytesToBigIntBE(onchainRoot),
+      nullifier: bytesToBigIntBE(depositNullifier),
+      denomIndex: BigInt(denomIndex),
+      recipient: bytesToBigIntBE(recipient.publicKey.toBytes()),
+
+      // Private inputs
+      noteValue: depositNote.value,
+      noteOwner: bytesToBigIntBE(depositNote.owner.toBytes()),
+      noteRho: bytesToBigIntBE(depositNote.rho),
+      noteR: bytesToBigIntBE(depositNote.r),
+
+      pathElements: depositMerklePath.path.map((p: Uint8Array) =>
+        bytesToBigIntBE(p)
+      ),
+      pathIndices: depositMerklePath.indices.map((i: number) => BigInt(i)),
+    };
+
+    // Generate proof using groth16.fullProve directly
+    const wasmPath = path.join(__dirname, "../zk/circuits/withdraw.wasm");
+    const zkeyPath = path.join(__dirname, "../zk/circuits/withdraw_0001.zkey");
+
+    const { proof, publicSignals } = await groth16.fullProve(
+      testInputs,
+      wasmPath,
+      zkeyPath
+    );
+
+    console.log("✓ Proof generated successfully", proof, publicSignals);
+    // Convert proof manually (no SDK helper)
+    const withdrawProof = convertProofToBytes(proof);
+
+    const vkPath = path.join(__dirname, "../zk/circuits/verification_key.json");
+    const vKey = require(vkPath);
+    const valid = await groth16.verify(vKey, publicSignals, proof);
+    console.log("Proof valid?", valid);
+
+    const beforeVault = BigInt(
+      await provider.connection.getBalance(vault as PublicKey)
+    );
+    const beforeRelayer = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const beforeRecipient = BigInt(
+      await provider.connection.getBalance(recipient.publicKey)
+    );
+
+    try {
+      // Call withdraw directly
+      await (program.methods as any)
+        .withdraw(
+          Array.from(onchainRoot),
+          Array.from(depositNullifier),
+          denomIndex,
+          recipient.publicKey,
+          withdrawProof
+        )
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          relayer: relayer.publicKey,
+          recipient: recipient.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([relayer])
+        .rpc();
+    } catch (e: any) {
+      console.error("\n========== WITHDRAW ERROR ==========");
+      console.error("Error:", e.message);
+      if (e.logs) {
+        console.error("\nTransaction logs:");
+        e.logs.forEach((log: string) => console.error("  ", log));
+      }
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("\nDetailed logs from getLogs:");
+        logs?.forEach((log: string) => console.error("  ", log));
+      }
+      console.error("====================================\n");
+      throw e;
+    }
+    //comment
+    const afterVault = BigInt(
+      await provider.connection.getBalance(vault as PublicKey)
+    );
+    const afterRelayer = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const afterRecipient = BigInt(
+      await provider.connection.getBalance(recipient.publicKey)
+    );
+
+    console.log("Balances:", {
+      beforeVault,
+      afterVault,
+      beforeRelayer,
+      afterRelayer,
+      beforeRecipient,
+      afterRecipient,
+    });
+
+    if (beforeVault - afterVault !== amount) {
+      throw new Error("Vault SOL delta mismatch");
+    }
+    if (afterRelayer - beforeRelayer !== fee) {
+      throw new Error("Relayer fee mismatch");
+    }
+
+    console.log("Direct withdraw (no SDK) OK");
   });
 });
