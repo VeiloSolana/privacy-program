@@ -45,10 +45,18 @@ fn reduce_to_field_be(bytes: [u8; 32]) -> [u8; 32] {
         return bytes;
     }
 
-    // Rare case: need reduction (only ~50% of random 256-bit values)
-    // Perform manual subtraction: bytes - modulus
-    // Since bytes >= modulus and bytes < 2*modulus (256 bits), one subtraction suffices
-    subtract_mod(&bytes, &FR_MODULUS)
+    // Use BigUint for proper modulo reduction
+    let val = BigUint::from_bytes_be(&bytes);
+    let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+    let reduced = val % modulus;
+
+    let mut result = [0u8; 32];
+    let reduced_bytes = reduced.to_bytes_be();
+    // Copy into the end of the array (padding with zeros at start if needed)
+    let start = 32 - reduced_bytes.len();
+    result[start..].copy_from_slice(&reduced_bytes);
+
+    result
 }
 
 /// Compare two 32-byte big-endian values: returns true if a < b
