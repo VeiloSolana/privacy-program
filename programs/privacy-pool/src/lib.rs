@@ -10,7 +10,7 @@ pub mod zk;
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 use zk::{verify_withdraw_groth16, WithdrawProof};
 
-declare_id!("8FyzcCmwR4317KEYsm1gF7t8dHpk83ZdzcbgqsuUMyu4");
+declare_id!("AAiFgdAYeo8UXtZkZrN2frmRsS6hDrkstsTmeiPddLA8");
 
 // ---- Constants ----
 
@@ -184,6 +184,7 @@ pub struct ConfigAdmin<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(denom_index: u8, commitment: [u8; 32])]
 pub struct DepositFixed<'info> {
     #[account(
         mut,
@@ -205,6 +206,15 @@ pub struct DepositFixed<'info> {
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        init,
+        payer = depositor,
+        space = NoteHint::MAX_LEN,
+        seeds = [b"privacy_note_hint_v3", commitment.as_ref()],
+        bump
+    )]
+    pub note_hint: Account<'info, NoteHint>,
 
     #[account(mut)]
     pub depositor: Signer<'info>,
@@ -296,10 +306,17 @@ pub struct TransferHint {
     pub denom_index: u8,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct DepositHint {
+#[account]
+pub struct NoteHint {
+    pub bump: u8,
     pub commitment: [u8; 32],
-    pub denom_index: u8,
+    pub owner_hint: [u8; 32],
+    pub encrypted_note: Vec<u8>,
+    pub leaf_index: u64,
+}
+
+impl NoteHint {
+    pub const MAX_LEN: usize = 8 + 1 + 32 + 32 + (4 + 256) + 4;
 }
 
 // ---- Program ----
@@ -375,6 +392,8 @@ pub mod privacy_pool {
         ctx: Context<DepositFixed>,
         denom_index: u8,
         commitment: [u8; 32],
+        owner_hint: [u8; 32],
+        encrypted_note: Vec<u8>,
     ) -> Result<()> {
         let mut tree = ctx.accounts.note_tree.load_mut()?;
         MerkleTree::append::<PoseidonHasher>(commitment, &mut *tree)?;
@@ -399,6 +418,16 @@ pub mod privacy_pool {
             },
         );
         system_program::transfer(cpi_ctx, amount)?;
+
+        let leaf_index = tree.next_index - 1;
+
+        // Create and store the NoteHint account for tracking user deposits
+        let hint = &mut ctx.accounts.note_hint;
+        hint.bump = ctx.bumps.note_hint;
+        hint.commitment = commitment;
+        hint.owner_hint = owner_hint;
+        hint.encrypted_note = encrypted_note;
+        hint.leaf_index = leaf_index;
 
         // 2) Update TVL
         cfg.tvl[idx] = cfg.tvl[idx]

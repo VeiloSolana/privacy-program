@@ -22,7 +22,7 @@ import {
   deriveNullifier,
   withdrawViaRelayerWithProof,
   initPoseidon,
-} from "@zkprivacysol/sdk-core";
+} from "veilo-sdk-core";
 
 // Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
 import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
@@ -86,7 +86,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
   // Use the same PDA derivation as sdk-core & relayer
   const { config, vault, noteTree, nullifiers } = getPoolPdas(
-    program.programId
+    program.programId,
+    new Uint8Array(2)
   );
 
   // Two fixed denoms for the pool: 1 SOL, 5 SOL
@@ -169,7 +170,6 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       valueLamports: denomsLamports[denomIndex],
       tree: offchainTree,
     });
-
     console.log("Result", result);
 
     if (!result) {
