@@ -674,7 +674,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       console.error("====================================\n");
       throw e;
     }
-    //comment
+
     const afterVault = BigInt(
       await provider.connection.getBalance(vault as PublicKey)
     );
