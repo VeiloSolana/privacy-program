@@ -1,7 +1,8 @@
 {
     "scripts": {
         "build:anchor": "anchor build",
-        "test": "mocha -r ts-node/register -t 1000000 tests/**/*.ts"
+        "test": "mocha -r ts-node/register -t 1000000 tests/**/*.ts",
+        "deploy:local": "cd \"/Users/admin/Projects/veilo program/program\" && solana program-v4 deploy target/deploy/privacy_pool.so --program-keypair target/deploy/privacy_pool-keypair.json --url http://127.0.0.1:8899"
     },
     "dependencies": {
         "@zkprivacysol/sdk-core": "^0.1.12",
