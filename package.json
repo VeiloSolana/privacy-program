@@ -9,7 +9,7 @@
     "@zkprivacysol/sdk-core": "^0.1.12",
     "bs58": "^6.0.0",
     "snarkjs": "^0.7.5",
-    "veilo-sdk-core": "^0.1.36"
+    "veilo-sdk-core": "^0.1.37"
   },
   "devDependencies": {
     "@coral-xyz/anchor": "^0.32.1",

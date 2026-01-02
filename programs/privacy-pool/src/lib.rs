@@ -123,6 +123,19 @@ pub struct WithdrawPublicInputs {
     pub recipient: Pubkey,
 }
 
+#[account]
+pub struct NoteHint {
+    pub bump: u8,
+    pub commitment: [u8; 32],
+    pub owner_hint: [u8; 32],
+    pub encrypted_note: Vec<u8>,
+    pub leaf_index: u64,
+}
+
+impl NoteHint {
+    pub const MAX_LEN: usize = 8 + 1 + 32 + 32 + (4 + 256) + 4;
+}
+
 // ---- Instruction contexts ----
 
 #[derive(Accounts)]
@@ -271,6 +284,7 @@ pub struct TransferPublicInputs {
 }
 
 #[derive(Accounts)]
+#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32])]
 pub struct PrivateTransfer<'info> {
     #[account(
         mut,
@@ -295,28 +309,24 @@ pub struct PrivateTransfer<'info> {
 
     #[account(mut)]
     pub sender: Signer<'info>, // Could be relayer
+    #[account(
+        init,
+        payer = sender,
+        space = NoteHint::MAX_LEN,
+        seeds = [b"transfer_note_hint_v3", new_commitment.as_ref()],
+        bump
+    )]
+    pub transfer_hint: Account<'info, TransferHint>,
 
     pub system_program: Program<'info, System>,
 }
 
+#[account]
 pub struct TransferHint {
     pub old_root: [u8; 32],
     pub old_nullifier: [u8; 32],
     pub new_commitment: [u8; 32],
     pub denom_index: u8,
-}
-
-#[account]
-pub struct NoteHint {
-    pub bump: u8,
-    pub commitment: [u8; 32],
-    pub owner_hint: [u8; 32],
-    pub encrypted_note: Vec<u8>,
-    pub leaf_index: u64,
-}
-
-impl NoteHint {
-    pub const MAX_LEN: usize = 8 + 1 + 32 + 32 + (4 + 256) + 4;
 }
 
 // ---- Program ----
@@ -475,6 +485,19 @@ pub mod privacy_pool {
 
         // 4. Insert new commitment into tree
         MerkleTree::append::<PoseidonHasher>(new_commitment, &mut *tree)?;
+
+        let transferHint = TransferHint {
+            old_root,
+            old_nullifier,
+            new_commitment,
+            denom_index,
+        };
+
+        let transfer_hint_account = &mut ctx.accounts.transfer_hint;
+        transfer_hint_account.old_root = transferHint.old_root;
+        transfer_hint_account.old_nullifier = transferHint.old_nullifier;
+        transfer_hint_account.new_commitment = transferHint.new_commitment;
+        transfer_hint_account.denom_index = transferHint.denom_index;
 
         // Note: No SOL moves, just commitment ownership transfer
 

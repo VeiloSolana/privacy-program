@@ -23,7 +23,8 @@ import {
   withdrawViaRelayerWithProof,
   initPoseidon,
   bytesToBigIntBE,
-} from "@zkprivacysol/sdk-core";
+  createNoteWithCommitment,
+} from "veilo-sdk-core";
 
 // Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
 import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
@@ -88,7 +89,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
   // Use the same PDA derivation as sdk-core & relayer
   const { config, vault, noteTree, nullifiers } = getPoolPdas(
-    program.programId
+    program.programId,
+    new Uint8Array(32)
   );
 
   // Two fixed denoms for the pool: 1 SOL, 5 SOL
@@ -719,5 +721,225 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     }
 
     console.log("Direct withdraw (no SDK) OK");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Private Transfer
+  // ---------------------------------------------------------------------------
+
+  it("performs private transfer", async () => {
+    const denomIndex = 0;
+
+    // 1. Make a fresh deposit to transfer FROM
+    const result = await createNoteDepositWithMerkle({
+      program: program as any,
+      depositor: wallet,
+      denomIndex,
+      valueLamports: denomsLamports[denomIndex],
+      tree: offchainTree,
+    });
+
+    if (!result) {
+      throw new Error("Deposit failed in private transfer test");
+    }
+
+    const { note, root, merklePath } = result;
+    const oldNullifier = deriveNullifier(note);
+
+    // 2. Create a new commitment (the destination of the transfer)
+    // For this test, since we don't verify the proof that links old->new,
+    // we can just generate a random commitment.
+    // Ensure it is a valid field element (smaller than modulus).
+    // Using 31 bytes ensures it fits.
+    const finalRecipient = new PublicKey(
+      "2LicTQcHoiDHvrnxXp3Kuy2iTdeG9CfqEKW1XH9wavZD"
+    );
+    const newNote = createNoteWithCommitment({
+      owner: finalRecipient,
+      value: note.value,
+    });
+
+    const newCommitment = newNote.commitment;
+
+    // 3. Call private_transfer
+    // Since proof verification is commented out in the contract, we can pass a dummy proof.
+    const dummyProof = Buffer.alloc(128); // Arbitrary size
+
+    // Get the current on-chain root to be sure
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    await (program.methods as any)
+      .privateTransfer(
+        Array.from(onchainRoot),
+        Array.from(oldNullifier),
+        Array.from(newCommitment),
+        denomIndex,
+        dummyProof
+      )
+      .accounts({
+        config,
+        noteTree,
+        nullifiers,
+        sender: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .rpc();
+
+    console.log("Private transfer transaction sent");
+
+    // 4. Verify old nullifier is spent
+    // We can try to double-spend it or check the account if we had a helper.
+    // Let's try to use it again in another private_transfer, it should fail.
+    let failed = false;
+    try {
+      await (program.methods as any)
+        .privateTransfer(
+          Array.from(onchainRoot),
+          Array.from(oldNullifier),
+          Array.from(newCommitment),
+          denomIndex,
+          dummyProof
+        )
+        .accounts({
+          config,
+          noteTree,
+          nullifiers,
+          sender: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .rpc();
+    } catch (e: any) {
+      failed = true;
+      // Expected error: NullifierAlreadyUsed
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.log("Double-spend attempt logs (private_transfer):", logs);
+      }
+    }
+
+    if (!failed) {
+      throw new Error(
+        "Double-spend of transferred nullifier should have failed"
+      );
+    }
+
+    // 5. Verify new commitment is in the tree
+    // Update our offchain tree and compare roots.
+    offchainTree.insert(newCommitment);
+    const expectedRoot = offchainTree.root;
+
+    const noteTreeAccAfter: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    const actualRoot = extractRootFromAccount(noteTreeAccAfter);
+
+    if (
+      Buffer.compare(Buffer.from(expectedRoot), Buffer.from(actualRoot)) !== 0
+    ) {
+      throw new Error(
+        "On-chain root did not update as expected after private transfer"
+      );
+    }
+
+    console.log("Private transfer test OK");
+
+    // 6. Withdraw the transferred note
+    console.log("Withdrawing transferred note...");
+
+    // Get the Merkle path for the new commitment
+    // Since we just inserted it, it's at the last index
+    const leafIndex = offchainTree.nextIndex - 1;
+    const withdrawMerklePath = offchainTree.getPath(leafIndex);
+    const newNullifier = deriveNullifier(newNote);
+
+    // Prepare circuit inputs
+    const testInputs = {
+      root: bytesToBigIntBE(offchainTree.root),
+      nullifier: bytesToBigIntBE(newNullifier),
+      denomIndex: BigInt(denomIndex),
+      recipient: bytesToBigIntBE(finalRecipient.toBytes()),
+
+      // Private inputs
+      noteValue: newNote.value,
+      noteOwner: bytesToBigIntBE(newNote.owner.toBytes()),
+      noteRho: bytesToBigIntBE(newNote.rho),
+      noteR: bytesToBigIntBE(newNote.r),
+
+      pathElements: withdrawMerklePath.path.map((p: Uint8Array) =>
+        bytesToBigIntBE(p)
+      ),
+      pathIndices: withdrawMerklePath.indices.map((i: number) => BigInt(i)),
+    };
+
+    // Generate proof using groth16.fullProve directly
+    const wasmPath = path.join(__dirname, "../zk/circuits/withdraw.wasm");
+    const zkeyPath = path.join(__dirname, "../zk/circuits/withdraw_0001.zkey");
+
+    const { proof, publicSignals } = await groth16.fullProve(
+      testInputs,
+      wasmPath,
+      zkeyPath
+    );
+
+    console.log("✓ Proof generated successfully", proof, publicSignals);
+    // Convert proof manually (no SDK helper)
+    const withdrawProof = convertProofToBytes(proof);
+
+    const vkPath = path.join(__dirname, "../zk/circuits/verification_key.json");
+    const vKey = require(vkPath);
+    const valid = await groth16.verify(vKey, publicSignals, proof);
+    console.log("Proof valid?", valid);
+
+    // Use wallet as relayer for simplicity in this test step
+    const relayer = wallet;
+    // Register relayer (wallet)
+    await (program.methods as any)
+      .addRelayer(wallet.publicKey)
+      .accounts({
+        config,
+        admin: wallet.publicKey,
+      } as any)
+      .rpc();
+    try {
+      // Call withdraw directly
+      await (program.methods as any)
+        .withdraw(
+          Array.from(offchainTree.root),
+          Array.from(newNullifier),
+          denomIndex,
+          finalRecipient,
+          withdrawProof
+        )
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          relayer: relayer.publicKey,
+          recipient: finalRecipient, // The recipient must match the one in the proof
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([]) // wallet is already provider signer
+        .rpc();
+    } catch (e: any) {
+      console.error("\n========== WITHDRAW ERROR ==========");
+      console.error("Error:", e.message);
+      if (e.logs) {
+        console.error("\nTransaction logs:");
+        e.logs.forEach((log: string) => console.error("  ", log));
+      }
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("\nDetailed logs from getLogs:");
+        logs?.forEach((log: string) => console.error("  ", log));
+      }
+      console.error("====================================\n");
+      throw e;
+    }
+
+    console.log("Withdrawal of transferred note successful");
   });
 });
