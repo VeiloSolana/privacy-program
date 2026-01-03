@@ -10,7 +10,7 @@ pub mod zk;
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 use zk::{verify_withdraw_groth16, WithdrawProof};
 
-declare_id!("8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP");
+declare_id!("2wnQ73YALm7eFa6EKwdtNVheKpNFWRN8j4VXCPgBiu7R");
 
 // ---- Constants ----
 
@@ -78,32 +78,32 @@ impl Vault {
     pub const LEN: usize = 8 + 1;
 }
 
-/// Tiny nullifier set (demo only).
+/// Nullifier set metadata (actual nullifiers stored as individual PDAs).
 #[account]
 pub struct NullifierSet {
     pub bump: u8,
     pub count: u32,
-    pub last: [u8; 32],
 }
 
 impl NullifierSet {
-    pub const LEN: usize = 8 + 1 + 4 + 32;
+    pub const LEN: usize = 8 + 1 + 4; // 13 bytes
+}
 
-    pub fn is_spent(&self, n: &[u8; 32]) -> bool {
-        self.count > 0 && &self.last == n
-    }
+/// Per-nullifier PDA marker (created when nullifier is spent)
+#[account]
+pub struct NullifierMarker {
+    /// The nullifier that was spent
+    pub nullifier: [u8; 32],
+    /// Unix timestamp when spent
+    pub timestamp: i64,
+    /// Sequential withdrawal index
+    pub withdrawal_index: u32,
+    /// PDA bump
+    pub bump: u8,
+}
 
-    pub fn insert(&mut self, n: [u8; 32]) -> Result<()> {
-        if self.is_spent(&n) {
-            return err!(PrivacyError::NullifierAlreadyUsed);
-        }
-        self.last = n;
-        self.count = self
-            .count
-            .checked_add(1)
-            .ok_or(PrivacyError::MathOverflow)?;
-        Ok(())
-    }
+impl NullifierMarker {
+    pub const LEN: usize = 8 + 32 + 8 + 4 + 1; // 53 bytes
 }
 
 // ---- ZK public inputs (for withdraw circuit) ----
@@ -236,6 +236,7 @@ pub struct DepositFixed<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(root: [u8; 32], nullifier: [u8; 32], denom_index: u8, recipient_pk: Pubkey)]
 pub struct Withdraw<'info> {
     #[account(
         mut,
@@ -265,6 +266,16 @@ pub struct Withdraw<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
+    /// Per-nullifier PDA marker (must not exist - ensures nullifier is fresh)
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"nullifier_v3", nullifier.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker: Account<'info, NullifierMarker>,
+
     #[account(mut)]
     pub relayer: Signer<'info>,
 
@@ -284,7 +295,7 @@ pub struct TransferPublicInputs {
 }
 
 #[derive(Accounts)]
-#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32])]
+#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32], denom_index: u8)]
 pub struct PrivateTransfer<'info> {
     #[account(
         mut,
@@ -306,6 +317,16 @@ pub struct PrivateTransfer<'info> {
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
+
+    /// Per-nullifier PDA marker for old nullifier (must not exist)
+    #[account(
+        init,
+        payer = sender,
+        seeds = [b"nullifier_v3", old_nullifier.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker: Account<'info, NullifierMarker>,
 
     #[account(mut)]
     pub sender: Signer<'info>, // Could be relayer
@@ -375,7 +396,6 @@ pub mod privacy_pool {
 
         // ---- Nullifier set init ----
         nulls.count = 0;
-        nulls.last = [0u8; 32];
 
         Ok(())
     }
@@ -490,8 +510,19 @@ pub mod privacy_pool {
         );
 
         // 3. Mark old nullifier as spent
+        // Note: The 'init' constraint on nullifier_marker already ensures the nullifier is fresh
         let nulls = &mut ctx.accounts.nullifiers;
-        nulls.insert(old_nullifier)?;
+        let marker = &mut ctx.accounts.nullifier_marker;
+
+        marker.nullifier = old_nullifier;
+        marker.timestamp = Clock::get()?.unix_timestamp;
+        marker.withdrawal_index = nulls.count;
+        marker.bump = ctx.bumps.nullifier_marker;
+
+        nulls.count = nulls
+            .count
+            .checked_add(1)
+            .ok_or(PrivacyError::MathOverflow)?;
 
         // 4. Insert new commitment into tree
         MerkleTree::append::<PoseidonHasher>(new_commitment, &mut *tree)?;
@@ -552,9 +583,20 @@ pub mod privacy_pool {
             PrivacyError::UnknownRoot
         );
 
-        // ---- 2) Nullifier must be fresh ----
+        // ---- 2) Mark nullifier as spent ----
+        // Note: The 'init' constraint on nullifier_marker already ensures the nullifier is fresh
         let nulls = &mut ctx.accounts.nullifiers;
-        nulls.insert(public_inputs.nullifier)?;
+        let marker = &mut ctx.accounts.nullifier_marker;
+
+        marker.nullifier = public_inputs.nullifier;
+        marker.timestamp = Clock::get()?.unix_timestamp;
+        marker.withdrawal_index = nulls.count;
+        marker.bump = ctx.bumps.nullifier_marker;
+
+        nulls.count = nulls
+            .count
+            .checked_add(1)
+            .ok_or(PrivacyError::MathOverflow)?;
 
         // ---- 3) Denom & fee math ----
         let idx = public_inputs.denom_index as usize;
