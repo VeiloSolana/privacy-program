@@ -405,9 +405,6 @@ pub mod privacy_pool {
         owner_hint: [u8; 32],
         encrypted_note: Vec<u8>,
     ) -> Result<()> {
-        let mut tree = ctx.accounts.note_tree.load_mut()?;
-        MerkleTree::append::<PoseidonHasher>(commitment, &mut *tree)?;
-
         let cfg = &mut ctx.accounts.config;
         require!(!cfg.paused, PrivacyError::Paused);
 
@@ -429,7 +426,12 @@ pub mod privacy_pool {
         );
         system_program::transfer(cpi_ctx, amount)?;
 
+        // 2) Insert commitment into merkle tree
+        let mut tree = ctx.accounts.note_tree.load_mut()?;
+        MerkleTree::append::<PoseidonHasher>(commitment, &mut *tree)?;
+
         let leaf_index = tree.next_index - 1;
+        let new_root = tree.root;
 
         // Create and store the NoteHint account for tracking user deposits
         let hint = &mut ctx.accounts.note_hint;
@@ -439,10 +441,18 @@ pub mod privacy_pool {
         hint.encrypted_note = encrypted_note;
         hint.leaf_index = leaf_index;
 
-        // 2) Update TVL
+        // 3) Update TVL
         cfg.tvl[idx] = cfg.tvl[idx]
             .checked_add(amount)
             .ok_or(PrivacyError::MathOverflow)?;
+
+        // 4) Emit event for indexers
+        emit!(CommitmentEvent {
+            commitment,
+            leaf_index,
+            denom_index,
+            new_root,
+        });
 
         Ok(())
     }
@@ -486,6 +496,9 @@ pub mod privacy_pool {
         // 4. Insert new commitment into tree
         MerkleTree::append::<PoseidonHasher>(new_commitment, &mut *tree)?;
 
+        let leaf_index = tree.next_index - 1;
+        let new_root = tree.root;
+
         let transferHint = TransferHint {
             old_root,
             old_nullifier,
@@ -500,6 +513,14 @@ pub mod privacy_pool {
         transfer_hint_account.denom_index = transferHint.denom_index;
 
         // Note: No SOL moves, just commitment ownership transfer
+
+        // 5. Emit event for indexers
+        emit!(CommitmentEvent {
+            commitment: new_commitment,
+            leaf_index,
+            denom_index,
+            new_root,
+        });
 
         Ok(())
     }
@@ -594,6 +615,16 @@ pub mod privacy_pool {
 
         Ok(())
     }
+}
+
+// ---- Events ----
+
+#[event]
+pub struct CommitmentEvent {
+    pub commitment: [u8; 32],
+    pub leaf_index: u64,
+    pub denom_index: u8,
+    pub new_root: [u8; 32],
 }
 
 // ---- Errors ----
