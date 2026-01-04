@@ -30,6 +30,7 @@ import {
 // Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
 import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
 import { groth16 } from "snarkjs";
+import { main } from "../scripts/indexer";
 
 // -----------------------------------------------------------------------------
 // Provider helper
@@ -123,8 +124,6 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     await initPoseidon();
 
     // Now we can create the MerkleTree
-    offchainTree = new MerkleTree(16);
-
     // airdrop admin wallet on localnet
     await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
 
@@ -178,6 +177,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // ---------------------------------------------------------------------------
 
   it("deposits fixed 1 SOL and updates root", async () => {
+    offchainTree = await main();
+
     const denomIndex = 0;
     const beforeVault = await provider.connection.getBalance(
       vault as PublicKey
@@ -459,6 +460,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // ---------------------------------------------------------------------------
 
   it("respects paused flag (withdraw fails when paused)", async () => {
+    offchainTree = await main();
+
     const denomIndex = 0;
 
     const relayer = Keypair.generate();
@@ -582,6 +585,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   }
 
   it("withdraws via direct program call (no SDK wrapper)", async () => {
+    // offchainTree = await main();
+
     const denomIndex = 0;
     const amount = denomsLamports[denomIndex];
     const fee = (amount * BigInt(feeBps)) / 10_000n;
@@ -740,6 +745,8 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // ---------------------------------------------------------------------------
 
   it("performs private transfer", async () => {
+    offchainTree = await main();
+
     const denomIndex = 0;
 
     // 1. Make a fresh deposit to transfer FROM
@@ -840,7 +847,9 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
     // 5. Verify new commitment is in the tree
     // Update our offchain tree and compare roots.
-    offchainTree.insert(newCommitment);
+    // offchainTree.insert(newCommitment);
+    offchainTree = await main();
+
     const expectedRoot = offchainTree.root;
 
     const noteTreeAccAfter: any = await (
@@ -915,6 +924,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
         admin: wallet.publicKey,
       } as any)
       .rpc();
+    // Derive nullifier marker PDA
+    const [newNullifierMarker] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), newNullifier],
+      program.programId
+    );
+
     try {
       // Call withdraw directly
       await (program.methods as any)
@@ -930,10 +945,14 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
           vault,
           noteTree,
           nullifiers,
+          nullifierMarker: newNullifierMarker,
           relayer: relayer.publicKey,
           recipient: finalRecipient, // The recipient must match the one in the proof
           systemProgram: SystemProgram.programId,
         } as any)
+        .preInstructions([
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ])
         .signers([]) // wallet is already provider signer
         .rpc();
     } catch (e: any) {
