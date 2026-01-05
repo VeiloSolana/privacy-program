@@ -31,14 +31,20 @@ pub struct PrivacyConfig {
     pub admin: Pubkey,
     /// Is pool paused?
     pub paused: bool,
-    /// Fee in basis points (0–10_000)
+    /// Fee in basis points (0–10_000) for withdrawals
     pub fee_bps: u16,
+
+    /// Minimum fee for withdrawals (in lamports) to ensure relayer compensation
+    pub min_withdrawal_fee: u64,
 
     /// Total value locked (all deposits combined)
     pub total_tvl: u64,
 
     /// Token mint address (for now: SOL, future: multi-token support)
     pub mint_address: Pubkey,
+
+    /// Maximum amount allowed per deposit (in lamports/token units)
+    pub max_deposit_amount: u64,
 
     /// Relayer registry
     pub num_relayers: u8,
@@ -52,8 +58,10 @@ impl PrivacyConfig {
         32 +  // admin
         1 +   // paused
         2 +   // fee_bps
+        8 +   // min_withdrawal_fee
         8 +   // total_tvl
         32 +  // mint_address
+        8 +   // max_deposit_amount
         1 +   // num_relayers
         32 * MAX_RELAYERS; // relayers
 
@@ -154,9 +162,9 @@ impl ExtData {
 
         // BN254 Fr modulus as 32-byte BE
         const FR_MODULUS: [u8; 32] = [
-            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
-            0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
-            0x00, 0x01,
+            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81,
+            0x58, 0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93,
+            0xf0, 0x00, 0x00, 0x01,
         ];
 
         // Quick check: if bytes < modulus, no reduction needed
@@ -206,20 +214,14 @@ impl ExtData {
 
         // Hash in pairs to match binary Merkle tree pattern
         // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
-        let hash1 = PoseidonHasher::hashv(&[
-            &recipient_bytes,
-            &relayer_bytes,
-        ]).map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash1 = PoseidonHasher::hashv(&[&recipient_bytes, &relayer_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
-        let hash2 = PoseidonHasher::hashv(&[
-            &fee_bytes,
-            &refund_bytes,
-        ]).map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash2 = PoseidonHasher::hashv(&[&fee_bytes, &refund_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
-        let final_hash = PoseidonHasher::hashv(&[
-            &hash1,
-            &hash2,
-        ]).map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
         Ok(final_hash)
     }
@@ -512,11 +514,7 @@ pub struct TransferHint {
 pub mod privacy_pool {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        fee_bps: u16,
-        mint_address: Pubkey,
-    ) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, fee_bps: u16, mint_address: Pubkey) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -539,10 +537,12 @@ pub mod privacy_pool {
         cfg.admin = ctx.accounts.admin.key();
         cfg.paused = false;
         cfg.fee_bps = fee_bps;
+        cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
 
         // UTXO model: no fixed denominations
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
+        cfg.max_deposit_amount = 1_000_000_000_000; // Default: 1000 SOL/tokens
 
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
@@ -593,6 +593,18 @@ pub mod privacy_pool {
         let tree = ctx.accounts.note_tree.load()?;
 
         require!(!cfg.paused, PrivacyError::Paused);
+
+        // Validate no duplicate nullifiers (prevents trying to spend same note twice in one tx)
+        require!(
+            input_nullifiers[0] != input_nullifiers[1],
+            PrivacyError::DuplicateNullifiers
+        );
+
+        // Validate no duplicate output commitments (prevents creating identical notes)
+        require!(
+            output_commitments[0] != output_commitments[1],
+            PrivacyError::DuplicateCommitments
+        );
 
         // 1. Verify ext_data_hash matches provided ext_data
         let computed_ext_hash = ext_data.hash()?;
@@ -673,22 +685,13 @@ pub mod privacy_pool {
             &ctx.accounts.vault,
             &ctx.accounts.recipient,
             &ctx.accounts.relayer,
+            &ctx.accounts.system_program,
             public_amount,
             &ext_data,
         )?;
 
         Ok(())
     }
-
-    // Legacy deposit_fixed - DEPRECATED, use transact instead
-    // Keeping for backwards compatibility during migration
-    // pub fn deposit_fixed(...) { ... }
-
-    // Legacy private_transfer - DEPRECATED, use transact with publicAmount=0
-    // pub fn private_transfer(...) { ... }
-
-    // Legacy withdraw - DEPRECATED, use transact with publicAmount>0
-    // pub fn withdraw(...) { ... }
 }
 
 // ---- Helper Functions ----
@@ -705,9 +708,10 @@ fn mark_nullifier_spent(
     marker.withdrawal_index = nullifier_set.count;
     marker.bump = bump;
 
-    nullifier_set.count = nullifier_set.count
+    nullifier_set.count = nullifier_set
+        .count
         .checked_add(1)
-        .ok_or(PrivacyError::MathOverflow)?;
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     Ok(())
 }
@@ -717,89 +721,129 @@ fn mark_nullifier_spent(
 /// public_amount < 0: Deposit (user -> vault)
 /// public_amount > 0: Withdrawal (vault -> recipient + relayer)
 /// public_amount = 0: Private transfer (no SOL movement)
-fn handle_public_amount(
+fn handle_public_amount<'info>(
     config: &mut PrivacyConfig,
-    vault: &Account<Vault>,
-    recipient: &SystemAccount,
-    relayer: &Signer,
+    vault: &Account<'info, Vault>,
+    recipient: &SystemAccount<'info>,
+    relayer: &Signer<'info>,
+    system_program: &Program<'info, System>,
     public_amount: i64,
     ext_data: &ExtData,
 ) -> Result<()> {
+    // Validate ext_data values are non-negative
+    require!(ext_data.fee < i64::MAX as u64, PrivacyError::InvalidFeeAmount);
+    require!(
+        ext_data.refund < i64::MAX as u64,
+        PrivacyError::InvalidPublicAmount
+    );
+
     if public_amount < 0 {
         // DEPOSIT: user deposits |public_amount| lamports
         let deposit_amount = public_amount.abs() as u64;
 
-        // Transfer from relayer to vault
-        // (relayer acts as proxy for user in this model)
-        let vault_ai = vault.to_account_info();
-        let relayer_ai = relayer.to_account_info();
+        // For deposits, fee and refund should be zero
+        require!(
+            ext_data.fee == 0 && ext_data.refund == 0,
+            PrivacyError::InvalidPublicAmount
+        );
 
-        **vault_ai.try_borrow_mut_lamports()? = vault_ai
-            .lamports()
-            .checked_add(deposit_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
+        // Check deposit limit
+        require!(
+            deposit_amount <= config.max_deposit_amount,
+            PrivacyError::DepositLimitExceeded
+        );
 
-        **relayer_ai.try_borrow_mut_lamports()? = relayer_ai
-            .lamports()
-            .checked_sub(deposit_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
+        // Use system_program::transfer for deposits (safer, with built-in validations)
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: relayer.to_account_info(),
+                    to: vault.to_account_info(),
+                },
+            ),
+            deposit_amount,
+        )?;
 
         // Update TVL
-        config.total_tvl = config.total_tvl
+        config.total_tvl = config
+            .total_tvl
             .checked_add(deposit_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
-
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
     } else if public_amount > 0 {
         // WITHDRAWAL: vault pays out public_amount
         let withdrawal_amount = public_amount as u64;
 
-        // Validate vault has sufficient balance
-        let vault_ai = vault.to_account_info();
-        let vault_balance = vault_ai.lamports();
-        require!(
-            vault_balance >= withdrawal_amount,
-            PrivacyError::InsufficientVaultBalance
-        );
-
-        // Calculate splits
+        // Validate that fee + refund doesn't exceed withdrawal amount
         let fee = ext_data.fee;
         let refund = ext_data.refund;
+        let fee_plus_refund = fee
+            .checked_add(refund)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        require!(
+            fee_plus_refund <= withdrawal_amount,
+            PrivacyError::InvalidPublicAmount
+        );
+
+        // Calculate amount to recipient
         let to_recipient = withdrawal_amount
             .checked_sub(fee)
             .and_then(|x| x.checked_sub(refund))
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        // Verify fee doesn't exceed max (prevent malicious relayer)
+        // Verify fee is within acceptable range
+        // 1. Check minimum fee to ensure relayer compensation
+        require!(
+            fee >= config.min_withdrawal_fee,
+            PrivacyError::InsufficientFee
+        );
+
+        // 2. Check maximum fee (prevent malicious relayer from overcharging)
         let max_fee = withdrawal_amount
             .checked_mul(config.fee_bps as u64)
-            .ok_or(PrivacyError::MathOverflow)?
+            .ok_or(PrivacyError::ArithmeticOverflow)?
             / 10_000;
         require!(fee <= max_fee, PrivacyError::ExcessiveFee);
 
-        // Transfer lamports
+        // Ensure vault maintains rent exemption after withdrawal
+        let vault_ai = vault.to_account_info();
+        let rent = Rent::get()?;
+        let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
+
+        let total_required = withdrawal_amount
+            .checked_add(rent_exempt_minimum)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        require!(
+            vault_ai.lamports() >= total_required,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+
+        // Transfer lamports using manual manipulation (vault is a PDA we control)
         let recipient_ai = recipient.to_account_info();
         let relayer_ai = relayer.to_account_info();
 
         **vault_ai.try_borrow_mut_lamports()? = vault_ai
             .lamports()
             .checked_sub(withdrawal_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         **recipient_ai.try_borrow_mut_lamports()? = recipient_ai
             .lamports()
             .checked_add(to_recipient)
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         **relayer_ai.try_borrow_mut_lamports()? = relayer_ai
             .lamports()
             .checked_add(fee)
             .and_then(|x| x.checked_add(refund))
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         // Update TVL
-        config.total_tvl = config.total_tvl
+        config.total_tvl = config
+            .total_tvl
             .checked_sub(withdrawal_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
     }
     // else: public_amount == 0, no lamport movement (pure private transfer)
 
@@ -849,4 +893,22 @@ pub enum PrivacyError {
     InvalidMintAddress,
     #[msg("Excessive fee")]
     ExcessiveFee,
+    #[msg("Fee below minimum required for withdrawal")]
+    InsufficientFee,
+    #[msg("Arithmetic overflow/underflow occurred")]
+    ArithmeticOverflow,
+    #[msg("Insufficient funds for withdrawal (including rent exemption)")]
+    InsufficientFundsForWithdrawal,
+    #[msg("Insufficient funds for fee payment")]
+    InsufficientFundsForFee,
+    #[msg("Deposit limit exceeded")]
+    DepositLimitExceeded,
+    #[msg("Invalid public amount data")]
+    InvalidPublicAmount,
+    #[msg("Invalid fee amount")]
+    InvalidFeeAmount,
+    #[msg("Duplicate nullifiers detected")]
+    DuplicateNullifiers,
+    #[msg("Duplicate output commitments detected")]
+    DuplicateCommitments,
 }
