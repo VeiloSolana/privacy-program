@@ -61,8 +61,8 @@
 // ============================================================================
 
 import "mocha";
-import * as anchor from "@coral-xyz/anchor";
-import { BN } from "@coral-xyz/anchor";
+import anchor from "@coral-xyz/anchor";
+const { BN } = anchor;
 import {
   PublicKey,
   Keypair,
