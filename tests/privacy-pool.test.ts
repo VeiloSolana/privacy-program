@@ -200,6 +200,13 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     return Uint8Array.from(Buffer.from(hashBytes, "hex"));
   }
 
+  // Helper: Reduce value modulo BN254 Fr field
+  function reduceToField(bytes: Uint8Array): bigint {
+    const FR_MODULUS = BigInt("0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001");
+    const value = BigInt("0x" + Buffer.from(bytes).toString("hex"));
+    return value % FR_MODULUS;
+  }
+
   // Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
   // This matches the on-chain hashing scheme which uses binary Poseidon hashes
   function computeExtDataHash(extData: {
@@ -208,8 +215,9 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     fee: BN;
     refund: BN;
   }): Uint8Array {
-    const recipientField = poseidon.F.e("0x" + Buffer.from(extData.recipient.toBytes()).toString("hex"));
-    const relayerField = poseidon.F.e("0x" + Buffer.from(extData.relayer.toBytes()).toString("hex"));
+    // Reduce PublicKeys modulo field first (PublicKeys can exceed BN254 Fr modulus)
+    const recipientField = poseidon.F.e(reduceToField(extData.recipient.toBytes()));
+    const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
     const feeField = poseidon.F.e(extData.fee.toString());
     const refundField = poseidon.F.e(extData.refund.toString());
 
@@ -301,12 +309,12 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     // publicAmount is NEGATIVE for deposits (use BN for Anchor serialization)
     const publicAmount = new BN(-depositAmount.toString());
 
-    // ExtData for deposit (no recipient/fee for deposits)
-    // Note: fee and refund must be BN objects for Anchor serialization
+    // ExtData for deposit (depositor pays their own transaction, no relayer needed)
+    // Use depositor's address for both recipient and relayer fields (no privacy needed for deposits)
     const extData = {
-      recipient: wallet.publicKey,
-      relayer: wallet.publicKey,
-      fee: new BN(0),
+      recipient: wallet.publicKey,  // Depositor
+      relayer: wallet.publicKey,     // No relayer - depositor submits their own tx
+      fee: new BN(0),                // No relayer fee for deposits
       refund: new BN(0),
     };
     const extDataHash = computeExtDataHash(extData);

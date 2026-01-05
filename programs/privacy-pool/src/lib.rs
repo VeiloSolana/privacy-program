@@ -148,24 +148,63 @@ pub struct ExtData {
 }
 
 impl ExtData {
+    /// Reduce 32-byte value modulo BN254 Fr field (copied from zk.rs)
+    fn reduce_to_field(bytes: [u8; 32]) -> [u8; 32] {
+        use num_bigint::BigUint;
+
+        // BN254 Fr modulus as 32-byte BE
+        const FR_MODULUS: [u8; 32] = [
+            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+            0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+            0x00, 0x01,
+        ];
+
+        // Quick check: if bytes < modulus, no reduction needed
+        let mut needs_reduction = false;
+        for i in 0..32 {
+            if bytes[i] < FR_MODULUS[i] {
+                break;
+            }
+            if bytes[i] > FR_MODULUS[i] {
+                needs_reduction = true;
+                break;
+            }
+        }
+
+        if !needs_reduction {
+            return bytes;
+        }
+
+        // Use BigUint for proper modulo reduction
+        let val = BigUint::from_bytes_be(&bytes);
+        let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+        let reduced = val % modulus;
+
+        let mut result = [0u8; 32];
+        let reduced_bytes = reduced.to_bytes_be();
+        let start = 32 - reduced_bytes.len();
+        result[start..].copy_from_slice(&reduced_bytes);
+
+        result
+    }
+
     /// Compute Poseidon hash of external data
     /// Returns 32-byte field element
     pub fn hash(&self) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
 
-        // Convert all fields to 32-byte big-endian field elements
-        let recipient_bytes = self.recipient.to_bytes();
+        // Convert PublicKeys to bytes and reduce modulo field
+        let recipient_bytes = Self::reduce_to_field(self.recipient.to_bytes());
+        let relayer_bytes = Self::reduce_to_field(self.relayer.to_bytes());
 
-        let relayer_bytes = self.relayer.to_bytes();
-
-        // Encode u64 values as 32-byte big-endian
+        // Encode u64 values as 32-byte big-endian (these are already < Fr)
         let mut fee_bytes = [0u8; 32];
         fee_bytes[24..].copy_from_slice(&self.fee.to_be_bytes());
 
         let mut refund_bytes = [0u8; 32];
         refund_bytes[24..].copy_from_slice(&self.refund.to_be_bytes());
 
-        // Hash in pairs to avoid arity issues with light-hasher Poseidon
+        // Hash in pairs to match binary Merkle tree pattern
         // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
         let hash1 = PoseidonHasher::hashv(&[
             &recipient_bytes,
@@ -562,11 +601,14 @@ pub mod privacy_pool {
             PrivacyError::InvalidExtData
         );
 
-        // 2. Verify relayer is authorized
-        require!(
-            cfg.is_relayer(&ctx.accounts.relayer.key()),
-            PrivacyError::RelayerNotAllowed
-        );
+        // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
+        // For deposits (public_amount < 0), anyone can deposit without being a relayer
+        if public_amount >= 0 {
+            require!(
+                cfg.is_relayer(&ctx.accounts.relayer.key()),
+                PrivacyError::RelayerNotAllowed
+            );
+        }
 
         // 3. Verify recipient matches ext_data
         require_keys_eq!(
