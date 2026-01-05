@@ -76,11 +76,7 @@ import os from "os";
 import path from "path";
 
 // ---- sdk-core imports ----
-import {
-  getPoolPdas,
-  MerkleTree,
-  initPoseidon,
-} from "@zkprivacysol/sdk-core";
+import { getPoolPdas, MerkleTree, initPoseidon } from "@zkprivacysol/sdk-core";
 
 import { buildPoseidon } from "circomlibjs";
 
@@ -169,7 +165,11 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
 
   // Helper: Generate random 32-byte value
   function randomBytes32(): Uint8Array {
-    return Uint8Array.from(Array(32).fill(0).map(() => Math.floor(Math.random() * 256)));
+    return Uint8Array.from(
+      Array(32)
+        .fill(0)
+        .map(() => Math.floor(Math.random() * 256))
+    );
   }
 
   // Helper: Compute note commitment = Poseidon(amount, owner, blinding, mintAddress)
@@ -180,9 +180,15 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     mintAddress: PublicKey
   ): Uint8Array {
     const amountField = poseidon.F.e(amount);
-    const ownerField = poseidon.F.e("0x" + Buffer.from(owner.toBytes()).toString("hex"));
-    const blindingField = poseidon.F.e("0x" + Buffer.from(blinding).toString("hex"));
-    const mintField = poseidon.F.e("0x" + Buffer.from(mintAddress.toBytes()).toString("hex"));
+    const ownerField = poseidon.F.e(
+      "0x" + Buffer.from(owner.toBytes()).toString("hex")
+    );
+    const blindingField = poseidon.F.e(
+      "0x" + Buffer.from(blinding).toString("hex")
+    );
+    const mintField = poseidon.F.e(
+      "0x" + Buffer.from(mintAddress.toBytes()).toString("hex")
+    );
 
     const hash = poseidon([amountField, ownerField, blindingField, mintField]);
     const hashBytes = poseidon.F.toString(hash, 16).padStart(64, "0");
@@ -191,8 +197,13 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
 
   // Helper: Compute nullifier = Poseidon(commitment, pathIndex, signature)
   // For testing, we'll use a simplified version
-  function computeNullifier(commitment: Uint8Array, pathIndex: number): Uint8Array {
-    const commitField = poseidon.F.e("0x" + Buffer.from(commitment).toString("hex"));
+  function computeNullifier(
+    commitment: Uint8Array,
+    pathIndex: number
+  ): Uint8Array {
+    const commitField = poseidon.F.e(
+      "0x" + Buffer.from(commitment).toString("hex")
+    );
     const indexField = poseidon.F.e(pathIndex);
     // Simplified: just hash commitment and index (real version would include signature)
     const hash = poseidon([commitField, indexField]);
@@ -208,8 +219,12 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     fee: BN;
     refund: BN;
   }): Uint8Array {
-    const recipientField = poseidon.F.e("0x" + Buffer.from(extData.recipient.toBytes()).toString("hex"));
-    const relayerField = poseidon.F.e("0x" + Buffer.from(extData.relayer.toBytes()).toString("hex"));
+    const recipientField = poseidon.F.e(
+      "0x" + Buffer.from(extData.recipient.toBytes()).toString("hex")
+    );
+    const relayerField = poseidon.F.e(
+      "0x" + Buffer.from(extData.relayer.toBytes()).toString("hex")
+    );
     const feeField = poseidon.F.e(extData.fee.toString());
     const refundField = poseidon.F.e(extData.refund.toString());
 
@@ -251,7 +266,9 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // If config PDA already exists, assume pool already initialized
-    const existing = await provider.connection.getAccountInfo(config as PublicKey);
+    const existing = await provider.connection.getAccountInfo(
+      config as PublicKey
+    );
     if (existing) {
       console.log("Initialize skipped: PDAs already exist on this cluster.");
       return;
@@ -287,11 +304,18 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
 
   it("deposits arbitrary amount (1.5 SOL) using transact instruction", async () => {
     const depositAmount = BigInt(Math.floor(1.5 * LAMPORTS_PER_SOL));
-    const beforeVault = await provider.connection.getBalance(vault as PublicKey);
+    const beforeVault = await provider.connection.getBalance(
+      vault as PublicKey
+    );
 
     // Create note for deposit
     const blinding = randomBytes32();
-    const commitment = computeCommitment(depositAmount, wallet.publicKey, blinding, SOL_MINT);
+    const commitment = computeCommitment(
+      depositAmount,
+      wallet.publicKey,
+      blinding,
+      SOL_MINT
+    );
 
     // For deposit: use dummy inputs, one real output
     const dummyInput0 = createDummyNote();
@@ -312,7 +336,9 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     const extDataHash = computeExtDataHash(extData);
 
     // Get current root
-    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree);
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     // Derive nullifier marker PDAs (must be unique for each input)
@@ -374,7 +400,9 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
         merkleIndex,
       };
 
-      const afterVault = await provider.connection.getBalance(vault as PublicKey);
+      const afterVault = await provider.connection.getBalance(
+        vault as PublicKey
+      );
       const delta = BigInt(afterVault - beforeVault);
 
       if (delta !== depositAmount) {
@@ -802,8 +830,8 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
           publicAmount,
           Array.from(extDataHash),
           SOL_MINT,
-          Array.from(testNote.nullifier),      // Input 1: real note
-          Array.from(dummyInput1.nullifier),   // Input 2: dummy note
+          Array.from(testNote.nullifier), // Input 1: real note
+          Array.from(dummyInput1.nullifier), // Input 2: dummy note
           Array.from(dummyOutput0.commitment), // Output 1: dummy
           Array.from(dummyOutput1.commitment), // Output 2: dummy
           extData,
@@ -866,14 +894,18 @@ describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
     // Verify vault balance decreased by withdrawal amount
     if (beforeVault - afterVault !== testNote.amount) {
       throw new Error(
-        `Vault SOL delta mismatch: expected ${testNote.amount}, got ${beforeVault - afterVault}`
+        `Vault SOL delta mismatch: expected ${testNote.amount}, got ${
+          beforeVault - afterVault
+        }`
       );
     }
 
     // Verify recipient received correct amount (withdrawal - fee)
     if (afterRecipient - beforeRecipient !== toRecipient) {
       throw new Error(
-        `Recipient amount mismatch: expected ${toRecipient}, got ${afterRecipient - beforeRecipient}`
+        `Recipient amount mismatch: expected ${toRecipient}, got ${
+          afterRecipient - beforeRecipient
+        }`
       );
     }
 
