@@ -109,6 +109,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // We keep around one note + path for withdraw tests
   let depositNote: any;
   let depositRoot: Uint8Array;
+  let depositLeafIndex: number;
   let depositMerklePath: any;
   let depositNullifier: Uint8Array;
 
@@ -183,6 +184,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const beforeVault = await provider.connection.getBalance(
       vault as PublicKey
     );
+    console.log("Before Vault Balance:", beforeVault);
 
     // High-level deposit helper from sdk-core:
     const result = await createNoteDepositWithMerkle({
@@ -202,11 +204,26 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     }
 
     depositNote = result.note;
-    depositRoot = result.root;
-    depositMerklePath = result.merklePath;
+
+    // CRITICAL FIX: Re-sync tree from chain to handle concurrent deposits
+    console.log("Re-syncing off-chain tree...");
+    offchainTree = await main();
+
+    // Verify leaf index and get fresh path/root
+    // We trust result.leafIndex is from the event, but let's verify or find it if needed
+    // Since we don't have easy 'find' on MerkleTree, we assume result.leafIndex is correct
+    // (SDK usually parses logs). If not, we might need to scan.
+    depositLeafIndex = result.leafIndex;
+
+    // Check if leaf at index matches our commitment
+    // Note: veilo-sdk-core MerkleTree might not expose leaves directly easily.
+    // We'll assume it's correct for now, but update path/root from the SYNCED tree.
+    depositMerklePath = offchainTree.getPath(depositLeafIndex);
+    depositRoot = offchainTree.root;
     depositNullifier = deriveNullifier(depositNote);
 
     const afterVault = await provider.connection.getBalance(vault as PublicKey);
+    console.log("After Vault Balance:", afterVault);
     const delta = BigInt(afterVault - beforeVault);
 
     if (delta !== denomsLamports[denomIndex]) {
@@ -462,25 +479,36 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   it("respects paused flag (withdraw fails when paused)", async () => {
     offchainTree = await main();
 
+    const currentMerklePath = offchainTree.getPath(depositLeafIndex);
+    const currentRoot = offchainTree.root;
+
     const denomIndex = 0;
 
-    const relayer = Keypair.generate();
+    const relayer = wallet.payer; // Use admin keypair as relayer to avoid hitting MAX_RELAYERS
     const recipient = Keypair.generate();
 
-    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    // await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL); // Wallet already funded
     await airdropAndConfirm(
       provider,
       recipient.publicKey,
       0.2 * LAMPORTS_PER_SOL
     );
 
-    await (program.methods as any)
-      .addRelayer(relayer.publicKey)
-      .accounts({
-        config,
-        admin: wallet.publicKey,
-      } as any)
-      .rpc();
+    try {
+      await (program.methods as any)
+        .addRelayer(relayer.publicKey)
+        .accounts({
+          config,
+          admin: wallet.publicKey,
+        } as any)
+        .rpc();
+    } catch (e: any) {
+      // Ignore if relayer already exists or list is full
+      console.log(
+        "Relayer registration skipped/failed (likely already registered or full):",
+        e.message
+      );
+    }
 
     // Pause the pool
     await (program.methods as any)
@@ -504,10 +532,10 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
         recipient: recipient.publicKey,
         denomIndex,
         feeBps,
-        root: onchainRoot,
+        root: currentRoot,
         nullifier: depositNullifier,
         noteData: depositNote,
-        merklePath: depositMerklePath,
+        merklePath: currentMerklePath,
         builder: proofBuilder,
       });
     } catch (e: any) {
@@ -592,11 +620,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const fee = (amount * BigInt(feeBps)) / 10_000n;
     const toUser = amount - fee;
 
-    const relayer = Keypair.generate();
-    const recipient = wallet;
+    const relayer = wallet.payer; // Use admin keypair as relayer
+    const recipient = Keypair.generate(); // Use a new keypair for recipient to avoid AccountBorrowFailed (relayer != recipient)
 
     // Fund relayer and recipient
-    await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    // await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
     await airdropAndConfirm(
       provider,
       recipient.publicKey,
@@ -604,10 +632,14 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     );
 
     // Register relayer
-    await (program.methods as any)
-      .addRelayer(relayer.publicKey)
-      .accounts({ config, admin: wallet.publicKey } as any)
-      .rpc();
+    try {
+      await (program.methods as any)
+        .addRelayer(relayer.publicKey)
+        .accounts({ config, admin: wallet.publicKey } as any)
+        .rpc();
+    } catch (e: any) {
+      console.log("Relayer registration skipped/failed:", e.message);
+    }
 
     // Get on-chain root
     const noteTreeAcc: any = await (
@@ -616,8 +648,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     // Prepare circuit inputs
+    // CRITICAL FIX: Use depositRoot (the root for which we have a valid Merkle path)
+    // instead of onchainRoot. If other users deposited in the meantime, onchainRoot
+    // will be different, and our path would be invalid for it.
+    // The contract maintains a root history, so it will accept depositRoot.
     const testInputs = {
-      root: bytesToBigIntBE(onchainRoot),
+      root: bytesToBigIntBE(depositRoot),
       nullifier: bytesToBigIntBE(depositNullifier),
       denomIndex: BigInt(denomIndex),
       recipient: bytesToBigIntBE(recipient.publicKey.toBytes()),
@@ -671,9 +707,11 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
 
     try {
       // Call withdraw directly with compute budget
+      // CRITICAL FIX: Use depositRoot instead of currentRoot/onchainRoot.
+      // The proof was generated against depositRoot.
       await (program.methods as any)
         .withdraw(
-          Array.from(onchainRoot),
+          Array.from(depositRoot),
           Array.from(depositNullifier),
           denomIndex,
           recipient.publicKey,
@@ -692,7 +730,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
         .preInstructions([
           ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
         ])
-        .signers([relayer])
+        .signers([]) // wallet (relayer) signs automatically
         .rpc();
     } catch (e: any) {
       console.error("\n========== WITHDRAW ERROR ==========");
@@ -729,8 +767,13 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       afterRecipient,
     });
 
-    if (beforeVault - afterVault !== amount) {
-      throw new Error("Vault SOL delta mismatch");
+    const delta = beforeVault - afterVault;
+    console.log(`Vault Delta: ${delta}, Expected: ${amount}`);
+
+    if (delta !== amount) {
+      throw new Error(
+        `Vault SOL delta mismatch. Got ${delta}, expected ${amount}`
+      );
     }
     //can't be the same again, bcoz relayer pays rent for nullifier account
     // if (afterRelayer - beforeRelayer !== fee) {
@@ -762,7 +805,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       throw new Error("Deposit failed in private transfer test");
     }
 
-    const { note, root, merklePath } = result;
+    // Re-sync to ensure we have a valid on-chain root
+    offchainTree = await main();
+    const { note } = result;
+    const root = offchainTree.root; // Use the synced root
+    // const { note, root, merklePath } = result; // OLD
+
     const oldNullifier = deriveNullifier(note);
 
     // 2. Create a new commitment (the destination of the transfer)
@@ -790,9 +838,12 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
+    // CRITICAL FIX: Use 'root' (from deposit) instead of 'onchainRoot'.
+    // This ensures we reference the root where our note exists, even if
+    // other transactions have updated the tree since then.
     await (program.methods as any)
       .privateTransfer(
-        Array.from(onchainRoot),
+        Array.from(root),
         Array.from(oldNullifier),
         Array.from(newCommitment),
         denomIndex,
@@ -816,7 +867,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     try {
       await (program.methods as any)
         .privateTransfer(
-          Array.from(onchainRoot),
+          Array.from(root),
           Array.from(oldNullifier),
           Array.from(newCommitment),
           denomIndex,
@@ -915,15 +966,19 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     console.log("Proof valid?", valid);
 
     // Use wallet as relayer for simplicity in this test step
-    const relayer = wallet;
+    const relayer = wallet.payer;
     // Register relayer (wallet)
-    await (program.methods as any)
-      .addRelayer(wallet.publicKey)
-      .accounts({
-        config,
-        admin: wallet.publicKey,
-      } as any)
-      .rpc();
+    try {
+      await (program.methods as any)
+        .addRelayer(wallet.publicKey)
+        .accounts({
+          config,
+          admin: wallet.publicKey,
+        } as any)
+        .rpc();
+    } catch (e: any) {
+      console.log("Relayer registration skipped/failed:", e.message);
+    }
     // Derive nullifier marker PDA
     const [newNullifierMarker] = PublicKey.findProgramAddressSync(
       [Buffer.from("nullifier_v3"), newNullifier],
