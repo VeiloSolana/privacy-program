@@ -47,6 +47,15 @@ pub struct PrivacyConfig {
     /// Relayer registry
     pub num_relayers: u8,
     pub relayers: [Pubkey; MAX_RELAYERS],
+
+    /// Minimum deposit amount
+    pub min_deposit: u64,
+    /// Maximum deposit amount
+    pub max_deposit: u64,
+    /// Minimum withdraw amount
+    pub min_withdraw: u64,
+    /// Are relayers enabled?
+    pub relayer_enabled: bool,
 }
 
 impl PrivacyConfig {
@@ -60,7 +69,11 @@ impl PrivacyConfig {
         8 * MAX_DENOMS + // denoms
         8 * MAX_DENOMS + // tvl
         1 +   // num_relayers
-        32 * MAX_RELAYERS; // relayers
+        32 * MAX_RELAYERS + // relayers
+        8 +   // min_deposit
+        8 +   // max_deposit
+        8 +   // min_withdraw
+        1; // relayer_enabled
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
@@ -390,6 +403,11 @@ pub mod privacy_pool {
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
 
+        cfg.min_deposit = 0;
+        cfg.max_deposit = u64::MAX;
+        cfg.min_withdraw = 0;
+        cfg.relayer_enabled = true;
+
         for (i, d) in denoms.into_iter().enumerate() {
             cfg.denoms[i] = d;
         }
@@ -418,6 +436,33 @@ pub mod privacy_pool {
         Ok(())
     }
 
+    pub fn update_config(
+        ctx: Context<ConfigAdmin>,
+        min_deposit: Option<u64>,
+        max_deposit: Option<u64>,
+        min_withdraw: Option<u64>,
+        relayer_enabled: Option<bool>,
+        fee_bps: Option<u16>,
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        if let Some(val) = min_deposit {
+            cfg.min_deposit = val;
+        }
+        if let Some(val) = max_deposit {
+            cfg.max_deposit = val;
+        }
+        if let Some(val) = min_withdraw {
+            cfg.min_withdraw = val;
+        }
+        if let Some(val) = relayer_enabled {
+            cfg.relayer_enabled = val;
+        }
+        if let Some(val) = fee_bps {
+            cfg.fee_bps = val;
+        }
+        Ok(())
+    }
+
     pub fn deposit_fixed(
         ctx: Context<DepositFixed>,
         denom_index: u8,
@@ -432,6 +477,9 @@ pub mod privacy_pool {
         require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
 
         let amount = cfg.denoms[idx];
+
+        require!(amount >= cfg.min_deposit, PrivacyError::DepositTooSmall);
+        require!(amount <= cfg.max_deposit, PrivacyError::DepositTooLarge);
 
         // 1) Move SOL from depositor to vault PDA via CPI
         let depositor = &ctx.accounts.depositor;
@@ -603,6 +651,8 @@ pub mod privacy_pool {
         require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
         let amount = cfg.denoms[idx];
 
+        require!(amount >= cfg.min_withdraw, PrivacyError::WithdrawTooSmall);
+
         let fee = amount
             .checked_mul(cfg.fee_bps as u64)
             .ok_or(PrivacyError::MathOverflow)?
@@ -612,6 +662,8 @@ pub mod privacy_pool {
 
         // ---- 4) Relayer must be authorized ----
         let relayer_key = ctx.accounts.relayer.key();
+
+        require!(cfg.relayer_enabled, PrivacyError::RelayerDisabled);
         require!(
             cfg.is_relayer(&relayer_key),
             PrivacyError::RelayerNotAllowed
@@ -703,4 +755,12 @@ pub enum PrivacyError {
     MerkleTreeFull,
     #[msg("Merkle hash failed")]
     MerkleHashFailed,
+    #[msg("Deposit amount too small")]
+    DepositTooSmall,
+    #[msg("Deposit amount too large")]
+    DepositTooLarge,
+    #[msg("Withdraw amount too small")]
+    WithdrawTooSmall,
+    #[msg("Relayers are disabled")]
+    RelayerDisabled,
 }
