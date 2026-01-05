@@ -4,14 +4,16 @@
         "test": "mocha -r ts-node/register -t 1000000 tests/**/*.ts"
     },
     "dependencies": {
-        "@zkprivacysol/sdk-core": "^0.1.12",
         "@coral-xyz/anchor": "^0.32.1",
+        "@zkprivacysol/sdk-core": "^0.1.12",
         "bs58": "^6.0.0",
+        "circomlibjs": "^0.1.7",
         "snarkjs": "^0.7.5"
     },
     "devDependencies": {
         "@coral-xyz/anchor": "^0.32.1",
         "@solana/spl-token": "^0.4.14",
+        "@types/circomlibjs": "^0.1.6",
         "@types/mocha": "^10.0.10",
         "@types/node": "^24.10.1",
         "@types/snarkjs": "^0.7.9",

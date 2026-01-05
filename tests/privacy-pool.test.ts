@@ -1,7 +1,68 @@
 // tests/privacy-pool.test.ts
+//
+// ============================================================================
+// TODO: Update tests for UTXO/Note-based model (2-in-2-out)
+// ============================================================================
+//
+// The smart contract has been refactored to use a UTXO model with arbitrary
+// amounts instead of fixed denominations. The tests still use the old SDK
+// and circuit structure. Here's what needs updating:
+//
+// 1. SDK Functions:
+//    - Update createNoteDepositWithMerkle to remove denomIndex parameter
+//    - Implement note commitment: Poseidon(amount, owner, blinding, mintAddress)
+//    - Update nullifier derivation to match circuit
+//    - Add extData helper: {recipient, relayer, fee, refund}
+//
+// 2. Circuit Integration:
+//    - Update to Transaction(16, 2, 2) circuit
+//    - New public inputs (8 total):
+//      * root
+//      * publicAmount (i64 - can be negative)
+//      * extDataHash
+//      * mintAddress
+//      * inputNullifiers[2]
+//      * outputCommitments[2]
+//    - Private inputs for 2 input notes and 2 output notes
+//
+// 3. Test Cases to Add:
+//    - Deposit arbitrary amounts (not just fixed denominations)
+//    - Full withdrawal (1 input + 1 dummy → 2 dummies)
+//    - Partial withdrawal with change (1 input → 1 change + 1 dummy)
+//    - Split notes (1 input → 2 outputs)
+//    - Merge notes (2 inputs → 1 output + 1 dummy)
+//    - Private transfer (publicAmount = 0)
+//
+// 4. Transact Instruction Usage:
+//    Replace old deposit_fixed/withdraw calls with:
+//    ```typescript
+//    await program.methods
+//      .transact(
+//        root,
+//        publicAmount,  // Negative for deposit, positive for withdrawal
+//        extDataHash,
+//        mintAddress,
+//        inputNullifier0,
+//        inputNullifier1,
+//        outputCommitment0,
+//        outputCommitment1,
+//        {recipient, relayer, fee, refund},  // extData
+//        proof
+//      )
+//      .accounts({
+//        config, vault, noteTree, nullifiers,
+//        nullifierMarker0, nullifierMarker1,
+//        relayer, recipient, systemProgram
+//      })
+//      .signers([relayer])
+//      .rpc();
+//    ```
+//
+// ============================================================================
 
 import "mocha";
 import * as anchor from "@coral-xyz/anchor";
+import { BN } from "@coral-xyz/anchor";
 import {
   PublicKey,
   Keypair,
@@ -17,18 +78,11 @@ import path from "path";
 // ---- sdk-core imports ----
 import {
   getPoolPdas,
-  initializePool,
   MerkleTree,
-  createNoteDepositWithMerkle,
-  deriveNullifier,
-  withdrawViaRelayerWithProof,
   initPoseidon,
-  bytesToBigIntBE,
 } from "@zkprivacysol/sdk-core";
 
-// Your REAL zk proof builder (you implement this using snarkjs.groth16.prove)
-import { buildWithdrawProof } from "../zk/withdrawProver"; // <- you create this
-import { groth16 } from "snarkjs";
+import { buildPoseidon } from "circomlibjs";
 
 // -----------------------------------------------------------------------------
 // Provider helper
@@ -76,11 +130,11 @@ function extractRootFromAccount(noteTreeAcc: any): Uint8Array {
 // Test suite
 // -----------------------------------------------------------------------------
 
-describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
+describe("privacy-pool UTXO model (2-in-2-out, arbitrary amounts)", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
 
-  // Don’t fight TS over multiple anchor versions: treat program as any.
+  // Don't fight TS over multiple anchor versions: treat program as any.
   const program: any = anchor.workspace.PrivacyPool as any as {
     programId: PublicKey;
     // we only use .methods and .account in this test
@@ -92,76 +146,132 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     program.programId
   );
 
-  // Two fixed denoms for the pool: 1 SOL, 5 SOL
-  const denomsLamports: bigint[] = [
-    BigInt(LAMPORTS_PER_SOL),
-    BigInt(5 * LAMPORTS_PER_SOL),
-  ];
   const feeBps = 50; // 0.5%
+  // For now, use a constant for SOL mint (native SOL doesn't have a mint address)
+  // You can use SystemProgram.programId or a custom constant
+  const SOL_MINT = PublicKey.default; // Placeholder for native SOL
 
   // Off-chain Merkle tree used for zk circuit inputs
-  // IMPORTANT: in production this hash must match your circuit’s hash (Poseidon/etc)
   let offchainTree: MerkleTree;
 
-  // We keep around one note + path for withdraw tests
-  let depositNote: any;
-  let depositRoot: Uint8Array;
-  let depositMerklePath: any;
-  let depositNullifier: Uint8Array;
+  // Poseidon hasher (initialized in before hook)
+  let poseidon: any;
 
-  // use your real Groth16 builder
-  const proofBuilder = buildWithdrawProof;
+  // Test note data
+  let testNote: {
+    amount: bigint;
+    owner: PublicKey;
+    blinding: Uint8Array;
+    commitment: Uint8Array;
+    nullifier: Uint8Array;
+    merkleIndex: number;
+  };
+
+  // Helper: Generate random 32-byte value
+  function randomBytes32(): Uint8Array {
+    return Uint8Array.from(Array(32).fill(0).map(() => Math.floor(Math.random() * 256)));
+  }
+
+  // Helper: Compute note commitment = Poseidon(amount, owner, blinding, mintAddress)
+  function computeCommitment(
+    amount: bigint,
+    owner: PublicKey,
+    blinding: Uint8Array,
+    mintAddress: PublicKey
+  ): Uint8Array {
+    const amountField = poseidon.F.e(amount);
+    const ownerField = poseidon.F.e("0x" + Buffer.from(owner.toBytes()).toString("hex"));
+    const blindingField = poseidon.F.e("0x" + Buffer.from(blinding).toString("hex"));
+    const mintField = poseidon.F.e("0x" + Buffer.from(mintAddress.toBytes()).toString("hex"));
+
+    const hash = poseidon([amountField, ownerField, blindingField, mintField]);
+    const hashBytes = poseidon.F.toString(hash, 16).padStart(64, "0");
+    return Uint8Array.from(Buffer.from(hashBytes, "hex"));
+  }
+
+  // Helper: Compute nullifier = Poseidon(commitment, pathIndex, signature)
+  // For testing, we'll use a simplified version
+  function computeNullifier(commitment: Uint8Array, pathIndex: number): Uint8Array {
+    const commitField = poseidon.F.e("0x" + Buffer.from(commitment).toString("hex"));
+    const indexField = poseidon.F.e(pathIndex);
+    // Simplified: just hash commitment and index (real version would include signature)
+    const hash = poseidon([commitField, indexField]);
+    const hashBytes = poseidon.F.toString(hash, 16).padStart(64, "0");
+    return Uint8Array.from(Buffer.from(hashBytes, "hex"));
+  }
+
+  // Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
+  // This matches the on-chain hashing scheme which uses binary Poseidon hashes
+  function computeExtDataHash(extData: {
+    recipient: PublicKey;
+    relayer: PublicKey;
+    fee: BN;
+    refund: BN;
+  }): Uint8Array {
+    const recipientField = poseidon.F.e("0x" + Buffer.from(extData.recipient.toBytes()).toString("hex"));
+    const relayerField = poseidon.F.e("0x" + Buffer.from(extData.relayer.toBytes()).toString("hex"));
+    const feeField = poseidon.F.e(extData.fee.toString());
+    const refundField = poseidon.F.e(extData.refund.toString());
+
+    // Hash in pairs
+    const hash1 = poseidon([recipientField, relayerField]);
+    const hash2 = poseidon([feeField, refundField]);
+    const finalHash = poseidon([hash1, hash2]);
+
+    const hashBytes = poseidon.F.toString(finalHash, 16).padStart(64, "0");
+    return Uint8Array.from(Buffer.from(hashBytes, "hex"));
+  }
+
+  // Helper: Create dummy note (zero value)
+  function createDummyNote(): {
+    commitment: Uint8Array;
+    nullifier: Uint8Array;
+  } {
+    // Dummy commitment and nullifier (use random values to avoid PDA collisions)
+    // In a real circuit, dummy notes would have amount=0 and skip verification
+    return {
+      commitment: randomBytes32(),
+      nullifier: randomBytes32(),
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // Global setup: ensure pool initialized
   // ---------------------------------------------------------------------------
 
   before(async () => {
-    // Initialize Poseidon hash function FIRST
+    // Initialize Poseidon hash function
     await initPoseidon();
+    poseidon = await buildPoseidon();
 
-    // Now we can create the MerkleTree
+    // Create Merkle tree
     offchainTree = new MerkleTree(16);
 
-    // airdrop admin wallet on localnet
+    // Airdrop admin wallet on localnet
     await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // If config PDA already exists, assume pool already initialized
-    const existing = await provider.connection.getAccountInfo(
-      config as PublicKey
-    );
+    const existing = await provider.connection.getAccountInfo(config as PublicKey);
     if (existing) {
       console.log("Initialize skipped: PDAs already exist on this cluster.");
-
-      // Check if the tree is dirty (has leaves from previous runs)
-      // The test assumes a fresh off-chain tree, so we must ensure on-chain tree is also empty.
-      const noteTreeAcc: any = await (
-        program.account as any
-      ).merkleTreeAccount.fetch(noteTree);
-      // Check nextIndex (or next_index depending on type generation)
-      const nextIndex = noteTreeAcc.nextIndex ?? noteTreeAcc.next_index;
-
-      // if (nextIndex && nextIndex.gt(new anchor.BN(0))) {
-      //   throw new Error(
-      //     `\n\nFATAL: The on-chain Merkle tree is not empty (nextIndex = ${nextIndex.toString()}).\n` +
-      //       "This test suite requires a fresh environment because it maintains a parallel off-chain tree.\n" +
-      //       "Please reset your local validator:\n" +
-      //       "  pkill -f solana-test-validator\n" +
-      //       "  solana-test-validator --reset --quiet &\n\n"
-      //   );
-      // }
-
       return;
     }
 
     try {
-      // cast program as any to satisfy sdk-core’s Program<T> without TS whining
-      await initializePool({
-        program: program as any,
-        admin: wallet,
-        denomsLamports,
-        feeBps,
-      });
+      // Initialize with new UTXO model
+      await (program.methods as any)
+        .initialize(feeBps, SOL_MINT)
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      console.log("Pool initialized with UTXO model");
     } catch (e: any) {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
@@ -175,97 +285,109 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // Deposit test
   // ---------------------------------------------------------------------------
 
-  it("deposits fixed 1 SOL and updates root", async () => {
-    const denomIndex = 0;
-    const beforeVault = await provider.connection.getBalance(
-      vault as PublicKey
-    );
+  it("deposits arbitrary amount (1.5 SOL) using transact instruction", async () => {
+    const depositAmount = BigInt(Math.floor(1.5 * LAMPORTS_PER_SOL));
+    const beforeVault = await provider.connection.getBalance(vault as PublicKey);
 
-    // High-level deposit helper from sdk-core:
-    const result = await createNoteDepositWithMerkle({
-      program: program as any,
-      depositor: wallet,
-      denomIndex,
-      valueLamports: denomsLamports[denomIndex],
-      tree: offchainTree,
-    });
+    // Create note for deposit
+    const blinding = randomBytes32();
+    const commitment = computeCommitment(depositAmount, wallet.publicKey, blinding, SOL_MINT);
 
-    console.log("Result", result);
+    // For deposit: use dummy inputs, one real output
+    const dummyInput0 = createDummyNote();
+    const dummyInput1 = createDummyNote();
+    const dummyOutput = createDummyNote();
 
-    if (!result) {
-      throw new Error(
-        "depositResult is undefined – deposit test must run first and succeed"
-      );
-    }
+    // publicAmount is NEGATIVE for deposits (use BN for Anchor serialization)
+    const publicAmount = new BN(-depositAmount.toString());
 
-    depositNote = result.note;
-    depositRoot = result.root;
-    depositMerklePath = result.merklePath;
-    depositNullifier = deriveNullifier(depositNote);
+    // ExtData for deposit (no recipient/fee for deposits)
+    // Note: fee and refund must be BN objects for Anchor serialization
+    const extData = {
+      recipient: wallet.publicKey,
+      relayer: wallet.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHash = computeExtDataHash(extData);
 
-    const afterVault = await provider.connection.getBalance(vault as PublicKey);
-    const delta = BigInt(afterVault - beforeVault);
-
-    if (delta !== denomsLamports[denomIndex]) {
-      throw new Error(
-        `Unexpected vault delta: got ${delta.toString()} expected ${denomsLamports[
-          denomIndex
-        ].toString()}`
-      );
-    }
-
-    const noteTreeAcc: any = await (
-      program.account as any
-    ).merkleTreeAccount.fetch(noteTree);
+    // Get current root
+    const noteTreeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    console.log("Off-chain Mirrored Root   :", Array.from(depositRoot));
-    console.log("On-chain NoteTree Root    :", Array.from(onchainRoot));
-
-    if (
-      Buffer.compare(Buffer.from(depositRoot), Buffer.from(onchainRoot)) !== 0
-    ) {
-      console.warn(
-        "WARNING: off-chain Merkle root != on-chain root. " +
-          "Fix this before trusting zk proofs in production."
-      );
-    }
-
-    console.log("\nVerifying proof off-chain...");
-    const wasmPath = path.join(__dirname, "../zk/circuits/withdraw.wasm");
-    const zkeyPath = path.join(__dirname, "../zk/circuits/withdraw_0001.zkey");
-    const vkPath = path.join(__dirname, "../zk/circuits/verification_key.json");
-    const vKey = require(vkPath);
-    const testInputs = {
-      root: bytesToBigIntBE(depositRoot),
-      nullifier: bytesToBigIntBE(depositNullifier),
-      denomIndex: BigInt(denomIndex),
-      recipient: bytesToBigIntBE(wallet.publicKey.toBytes()),
-
-      // You'd need real values for these private inputs
-      noteValue: depositNote.value,
-      noteOwner: bytesToBigIntBE(depositNote.owner.toBytes()),
-      noteRho: bytesToBigIntBE(depositNote.rho),
-      noteR: bytesToBigIntBE(depositNote.r),
-
-      pathElements: depositMerklePath.path.map((p: Uint8Array) =>
-        bytesToBigIntBE(p)
-      ),
-      pathIndices: depositMerklePath.indices.map((i: number) => BigInt(i)),
-    };
-
-    const { proof, publicSignals } = await groth16.fullProve(
-      testInputs,
-      wasmPath,
-      zkeyPath
+    // Derive nullifier marker PDAs (must be unique for each input)
+    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput0.nullifier)],
+      program.programId
+    );
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput1.nullifier)],
+      program.programId
     );
 
-    console.log("✓ Proof generated successfully", proof, publicSignals);
+    // Create a dummy proof (all zeros for now - you'll need real proof later)
+    const dummyProof = {
+      proofA: Array(64).fill(0),
+      proofB: Array(128).fill(0),
+      proofC: Array(64).fill(0),
+    };
 
-    const valid = await groth16.verify(vKey, publicSignals, proof);
-    console.log("Proof valid?", valid);
+    try {
+      // Call transact for deposit
+      await (program.methods as any)
+        .transact(
+          Array.from(onchainRoot),
+          publicAmount,
+          Array.from(extDataHash),
+          SOL_MINT,
+          Array.from(dummyInput0.nullifier),
+          Array.from(dummyInput1.nullifier),
+          Array.from(commitment),
+          Array.from(dummyOutput.commitment),
+          extData,
+          dummyProof
+        )
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          nullifierMarker0,
+          nullifierMarker1,
+          relayer: wallet.publicKey,
+          recipient: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .preInstructions([
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ])
+        .rpc();
 
-    console.log("Deposit fixed-denom 1 SOL OK");
+      // Save test note for withdrawal test
+      const merkleIndex = noteTreeAcc.nextIndex ?? noteTreeAcc.next_index;
+      testNote = {
+        amount: depositAmount,
+        owner: wallet.publicKey,
+        blinding,
+        commitment,
+        nullifier: computeNullifier(commitment, merkleIndex),
+        merkleIndex,
+      };
+
+      const afterVault = await provider.connection.getBalance(vault as PublicKey);
+      const delta = BigInt(afterVault - beforeVault);
+
+      if (delta !== depositAmount) {
+        throw new Error(
+          `Unexpected vault delta: got ${delta.toString()} expected ${depositAmount}`
+        );
+      }
+
+      console.log(`✅ Deposited ${depositAmount} lamports successfully`);
+    } catch (e: any) {
+      console.error("Deposit failed:", e);
+      throw e;
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -456,8 +578,10 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
   // Paused flag behaviour
   // ---------------------------------------------------------------------------
 
-  it("respects paused flag (withdraw fails when paused)", async () => {
-    const denomIndex = 0;
+  it("respects paused flag (transact fails when paused)", async () => {
+    if (!testNote) {
+      throw new Error("No test note available - deposit test must run first");
+    }
 
     const relayer = Keypair.generate();
     const recipient = Keypair.generate();
@@ -491,20 +615,78 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
+    // Prepare withdrawal using testNote
+    const withdrawAmount = testNote.amount;
+    const fee = (testNote.amount * BigInt(feeBps)) / 10_000n;
+
+    // Create dummy note for second input
+    const dummyInput1 = createDummyNote();
+
+    // Create dummy outputs (full withdrawal)
+    const dummyOutput0 = createDummyNote();
+    const dummyOutput1 = createDummyNote();
+
+    // publicAmount is POSITIVE for withdrawal (use BN for Anchor serialization)
+    const publicAmount = new BN(withdrawAmount.toString());
+
+    // ExtData for withdrawal (fee and refund must be BN objects)
+    const extData = {
+      recipient: recipient.publicKey,
+      relayer: relayer.publicKey,
+      fee: new BN(fee.toString()),
+      refund: new BN(0),
+    };
+    const extDataHash = computeExtDataHash(extData);
+
+    // Derive nullifier marker PDAs
+    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(testNote.nullifier)],
+      program.programId
+    );
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput1.nullifier)],
+      program.programId
+    );
+
+    // Create dummy proof
+    const dummyProof = {
+      proofA: Array(64).fill(0),
+      proofB: Array(128).fill(0),
+      proofC: Array(64).fill(0),
+    };
+
     let failed = false;
     try {
-      await withdrawViaRelayerWithProof({
-        program: program as any,
-        relayer,
-        recipient: recipient.publicKey,
-        denomIndex,
-        feeBps,
-        root: onchainRoot,
-        nullifier: depositNullifier,
-        noteData: depositNote,
-        merklePath: depositMerklePath,
-        builder: proofBuilder,
-      });
+      // Attempt to transact while paused (should fail)
+      await (program.methods as any)
+        .transact(
+          Array.from(onchainRoot),
+          publicAmount,
+          Array.from(extDataHash),
+          SOL_MINT,
+          Array.from(testNote.nullifier),
+          Array.from(dummyInput1.nullifier),
+          Array.from(dummyOutput0.commitment),
+          Array.from(dummyOutput1.commitment),
+          extData,
+          dummyProof
+        )
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          nullifierMarker0,
+          nullifierMarker1,
+          relayer: relayer.publicKey,
+          recipient: recipient.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .preInstructions([
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+        ])
+        .signers([relayer])
+        .rpc();
     } catch (e: any) {
       failed = true;
       if (e instanceof SendTransactionError) {
@@ -526,67 +708,20 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       } as any)
       .rpc();
 
-    console.log("Paused flag enforced for withdraw");
+    console.log("✅ Paused flag correctly enforced for transact");
   });
 
   // ---------------------------------------------------------------------------
-  // Direct withdraw call (no SDK wrapper)
+  // Direct withdraw call (no SDK wrapper) - UTXO Model (2-in-2-out)
   // ---------------------------------------------------------------------------
 
-  /**
-   * Manually convert snarkjs proof to WithdrawProof format
-   * Based on SDK's encodeSnarkjsProofToWithdrawProof but implemented directly
-   */
-  function convertProofToBytes(proof: any): {
-    proofA: number[];
-    proofB: number[];
-    proofC: number[];
-  } {
-    // Helper to convert bigint to 32-byte big-endian array
-    function bigintTo32BytesBE(x: bigint): number[] {
-      const out = new Array(32).fill(0);
-      let v = x;
-      for (let i = 31; i >= 0; i--) {
-        out[i] = Number(v & 0xffn);
-        v >>= 8n;
-      }
-      return out;
+  it("withdraws via transact instruction (2-in-2-out UTXO model)", async () => {
+    if (!testNote) {
+      throw new Error("No test note available - deposit test must run first");
     }
 
-    // Extract proof components
-    const ax = BigInt(proof.pi_a[0]);
-    const ay = BigInt(proof.pi_a[1]);
-
-    const bx0 = BigInt(proof.pi_b[0][0]);
-    const bx1 = BigInt(proof.pi_b[0][1]);
-    const by0 = BigInt(proof.pi_b[1][0]);
-    const by1 = BigInt(proof.pi_b[1][1]);
-
-    const cx = BigInt(proof.pi_c[0]);
-    const cy = BigInt(proof.pi_c[1]);
-
-    // Convert to bytes: each element is 32 bytes
-    // NOTE: G2 points must be encoded as [c1, c0] for EIP-197 compatibility
-    const proofA = [...bigintTo32BytesBE(ax), ...bigintTo32BytesBE(ay)]; // 64 bytes
-    const proofB = [
-      ...bigintTo32BytesBE(bx1), // X imaginary part (c1)
-      ...bigintTo32BytesBE(bx0), // X real part (c0)
-      ...bigintTo32BytesBE(by1), // Y imaginary part (c1)
-      ...bigintTo32BytesBE(by0), // Y real part (c0)
-    ]; // 128 bytes
-    const proofC = [...bigintTo32BytesBE(cx), ...bigintTo32BytesBE(cy)]; // 64 bytes
-
-    return { proofA, proofB, proofC };
-  }
-
-  it("withdraws via direct program call (no SDK wrapper)", async () => {
-    const denomIndex = 0;
-    const amount = denomsLamports[denomIndex];
-    const fee = (amount * BigInt(feeBps)) / 10_000n;
-    const toUser = amount - fee;
-
     const relayer = Keypair.generate();
-    const recipient = wallet;
+    const recipient = Keypair.generate();
 
     // Fund relayer and recipient
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
@@ -608,43 +743,46 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    // Prepare circuit inputs
-    const testInputs = {
-      root: bytesToBigIntBE(onchainRoot),
-      nullifier: bytesToBigIntBE(depositNullifier),
-      denomIndex: BigInt(denomIndex),
-      recipient: bytesToBigIntBE(recipient.publicKey.toBytes()),
+    // Prepare withdrawal: full amount withdrawal
+    const withdrawAmount = testNote.amount;
+    const fee = (testNote.amount * BigInt(feeBps)) / 10_000n;
+    const toRecipient = testNote.amount - fee;
 
-      // Private inputs
-      noteValue: depositNote.value,
-      noteOwner: bytesToBigIntBE(depositNote.owner.toBytes()),
-      noteRho: bytesToBigIntBE(depositNote.rho),
-      noteR: bytesToBigIntBE(depositNote.r),
+    // Create dummy note for second input (2-in-2-out requires 2 inputs)
+    const dummyInput1 = createDummyNote();
 
-      pathElements: depositMerklePath.path.map((p: Uint8Array) =>
-        bytesToBigIntBE(p)
-      ),
-      pathIndices: depositMerklePath.indices.map((i: number) => BigInt(i)),
+    // Create dummy outputs (full withdrawal, no change notes)
+    const dummyOutput0 = createDummyNote();
+    const dummyOutput1 = createDummyNote();
+
+    // publicAmount is POSITIVE for withdrawal (use BN for Anchor serialization)
+    const publicAmount = new BN(withdrawAmount.toString());
+
+    // ExtData for withdrawal (fee and refund must be BN objects)
+    const extData = {
+      recipient: recipient.publicKey,
+      relayer: relayer.publicKey,
+      fee: new BN(fee.toString()),
+      refund: new BN(0),
     };
+    const extDataHash = computeExtDataHash(extData);
 
-    // Generate proof using groth16.fullProve directly
-    const wasmPath = path.join(__dirname, "../zk/circuits/withdraw.wasm");
-    const zkeyPath = path.join(__dirname, "../zk/circuits/withdraw_0001.zkey");
-
-    const { proof, publicSignals } = await groth16.fullProve(
-      testInputs,
-      wasmPath,
-      zkeyPath
+    // Derive nullifier marker PDAs (2 markers for 2 inputs)
+    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(testNote.nullifier)],
+      program.programId
+    );
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput1.nullifier)],
+      program.programId
     );
 
-    console.log("✓ Proof generated successfully", proof, publicSignals);
-    // Convert proof manually (no SDK helper)
-    const withdrawProof = convertProofToBytes(proof);
-
-    const vkPath = path.join(__dirname, "../zk/circuits/verification_key.json");
-    const vKey = require(vkPath);
-    const valid = await groth16.verify(vKey, publicSignals, proof);
-    console.log("Proof valid?", valid);
+    // Create dummy proof (replace with real proof from circuit later)
+    const dummyProof = {
+      proofA: Array(64).fill(0),
+      proofB: Array(128).fill(0),
+      proofC: Array(64).fill(0),
+    };
 
     const beforeVault = BigInt(
       await provider.connection.getBalance(vault as PublicKey)
@@ -656,32 +794,32 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       await provider.connection.getBalance(recipient.publicKey)
     );
 
-    // Derive nullifier marker PDA
-    const [nullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), depositNullifier],
-      program.programId
-    );
-
     try {
-      // Call withdraw directly with compute budget
+      // Call transact for withdrawal (2-in-2-out model)
       await (program.methods as any)
-        .withdraw(
+        .transact(
           Array.from(onchainRoot),
-          Array.from(depositNullifier),
-          denomIndex,
-          recipient.publicKey,
-          withdrawProof
+          publicAmount,
+          Array.from(extDataHash),
+          SOL_MINT,
+          Array.from(testNote.nullifier),      // Input 1: real note
+          Array.from(dummyInput1.nullifier),   // Input 2: dummy note
+          Array.from(dummyOutput0.commitment), // Output 1: dummy
+          Array.from(dummyOutput1.commitment), // Output 2: dummy
+          extData,
+          dummyProof
         )
         .accounts({
           config,
           vault,
           noteTree,
           nullifiers,
-          nullifierMarker,
+          nullifierMarker0,
+          nullifierMarker1,
           relayer: relayer.publicKey,
           recipient: recipient.publicKey,
           systemProgram: SystemProgram.programId,
-        } as any)
+        })
         .preInstructions([
           ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
         ])
@@ -702,7 +840,7 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
       console.error("====================================\n");
       throw e;
     }
-    //comment
+
     const afterVault = BigInt(
       await provider.connection.getBalance(vault as PublicKey)
     );
@@ -716,20 +854,39 @@ describe("privacy-pool fixed-denom SOL (Merkle v3, sdk-core)", () => {
     console.log("Balances:", {
       beforeVault,
       afterVault,
+      vaultDelta: beforeVault - afterVault,
       beforeRelayer,
       afterRelayer,
+      relayerDelta: afterRelayer - beforeRelayer,
       beforeRecipient,
       afterRecipient,
+      recipientDelta: afterRecipient - beforeRecipient,
     });
 
-    if (beforeVault - afterVault !== amount) {
-      throw new Error("Vault SOL delta mismatch");
+    // Verify vault balance decreased by withdrawal amount
+    if (beforeVault - afterVault !== testNote.amount) {
+      throw new Error(
+        `Vault SOL delta mismatch: expected ${testNote.amount}, got ${beforeVault - afterVault}`
+      );
     }
-    //can't be the same again, bcoz relayer pays rent for nullifier account
-    // if (afterRelayer - beforeRelayer !== fee) {
-    //   throw new Error("Relayer fee mismatch");
-    // }
 
-    console.log("Direct withdraw (no SDK) OK");
+    // Verify recipient received correct amount (withdrawal - fee)
+    if (afterRecipient - beforeRecipient !== toRecipient) {
+      throw new Error(
+        `Recipient amount mismatch: expected ${toRecipient}, got ${afterRecipient - beforeRecipient}`
+      );
+    }
+
+    // Verify relayer received fee (minus rent for nullifier accounts)
+    // Note: Can't do exact check because relayer pays rent for nullifier marker accounts
+    const relayerDelta = afterRelayer - beforeRelayer;
+    if (relayerDelta <= 0n) {
+      throw new Error("Relayer should have received fee");
+    }
+
+    console.log(`✅ Withdrawal successful (2-in-2-out UTXO model)`);
+    console.log(`   Withdrawn: ${withdrawAmount.toString()} lamports`);
+    console.log(`   Fee: ${fee.toString()} lamports`);
+    console.log(`   To recipient: ${toRecipient.toString()} lamports`);
   });
 });
