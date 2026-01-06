@@ -124,8 +124,8 @@ function computeExtDataHash(
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
 }
 
-// Helper: Compute commitment = Poseidon(amount, pubkey, blinding, mintAddress)
-// This matches the circuit's UTXOCommitment template (4 inputs)
+// Helper: Compute commitment = Poseidon(amount, pubkey, blinding)
+// This matches the circuit's UTXOCommitment template (3 inputs)
 function computeCommitment(
   poseidon: any,
   amount: bigint,
@@ -136,9 +136,11 @@ function computeCommitment(
   const amountField = poseidon.F.e(amount.toString());
   const ownerField = poseidon.F.e(ownerPubkey.toString());
   const blindingField = poseidon.F.e(bytesToBigIntBE(blinding));
-  const mintField = poseidon.F.e(reduceToField(mintAddress.toBytes()));
+  const mintField = poseidon.F.e(
+    reduceToField(mintAddress.toBytes()).toString()
+  );
 
-  // Single Poseidon hash with 4 inputs
+  // Poseidon hash with 4 inputs (amount, pubkey, blinding, mint)
   const commitment = poseidon([
     amountField,
     ownerField,
@@ -248,6 +250,10 @@ class OffchainMerkleTree {
       this.zeros.push(currentZero);
       console.log(`Level ${i + 1} zero: ${bytesToBigIntBE(currentZero)}`);
     }
+  }
+
+  getZeros(): Uint8Array[] {
+    return this.zeros;
   }
 
   insert(commitment: Uint8Array): number {
@@ -387,7 +393,6 @@ async function generateTransactionProof(inputs: {
   inputPrivateKeys: [Uint8Array, Uint8Array]; // Private keys for input UTXOs
   inputPublicKeys: [bigint, bigint]; // Derived public keys (Poseidon(privateKey))
   inputBlindings: [Uint8Array, Uint8Array];
-  inputPrivateKeys: [Uint8Array, Uint8Array];
   inputMerklePaths: [
     { pathElements: bigint[]; pathIndices: number[] },
     { pathElements: bigint[]; pathIndices: number[] }
@@ -401,7 +406,11 @@ async function generateTransactionProof(inputs: {
   const circuitInputs = {
     // Public inputs (single values)
     root: bytesToBigIntBE(inputs.root).toString(),
-    publicAmount: inputs.publicAmount.toString(),
+    // Try using absolute value for publicAmount (circuit might expect positive for deposit)
+    publicAmount: (inputs.publicAmount < 0n
+      ? -inputs.publicAmount
+      : inputs.publicAmount
+    ).toString(),
     extDataHash: bytesToBigIntBE(inputs.extDataHash).toString(),
     mintAddress: reduceToField(inputs.mintAddress.toBytes()).toString(),
 
@@ -633,6 +642,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
 
     // Generate real proof
+    const zeros = offchainTree.getZeros();
+    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+
     const proof = await generateTransactionProof({
       root: onchainRoot,
       publicAmount: -depositAmount, // Negative for deposit
@@ -646,14 +658,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPrivateKeys: [dummyPrivKey0, dummyPrivKey1],
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [randomBytes32(), randomBytes32()],
-      inputMintAddresses: [SOL_MINT, SOL_MINT],
       inputMerklePaths: [
         {
-          pathElements: new Array(16).fill(0n),
+          pathElements: zeroPathElements,
           pathIndices: new Array(16).fill(0),
         },
         {
-          pathElements: new Array(16).fill(0n),
+          pathElements: zeroPathElements,
           pathIndices: new Array(16).fill(0),
         },
       ],
@@ -662,7 +673,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       outputAmounts: [depositAmount, 0n],
       outputOwners: [publicKey, dummyOutputPubKey], // Use derived public keys
       outputBlindings: [blinding, randomBytes32()],
-      outputMintAddresses: [SOL_MINT, SOL_MINT],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
@@ -814,7 +824,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPrivateKeys: [depositNote.privateKey, dummyPrivKey1],
       inputPublicKeys: [depositNote.publicKey, dummyPubKey1],
       inputBlindings: [depositNote.blinding, randomBytes32()],
-      inputMintAddresses: [SOL_MINT, SOL_MINT],
       inputMerklePaths: [
         depositNote.merklePath,
         {
@@ -826,7 +835,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       outputAmounts: [0n, 0n],
       outputOwners: [dummyOutputPubKey0, dummyOutputPubKey1],
       outputBlindings: [randomBytes32(), randomBytes32()],
-      outputMintAddresses: [SOL_MINT, SOL_MINT],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
