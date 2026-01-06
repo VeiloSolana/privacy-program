@@ -674,10 +674,28 @@ pub mod privacy_pool {
 
         // 9. Insert both output commitments into tree
         let mut tree = ctx.accounts.note_tree.load_mut()?;
+        let leaf_index_0 = tree.next_index;
         MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *tree)?;
+        let leaf_index_1 = tree.next_index;
         MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *tree)?;
+        let new_root = tree.root;
 
         drop(tree); // Release mutable borrow
+
+        // Emit commitment events for both outputs
+        let timestamp = Clock::get()?.unix_timestamp;
+        emit!(CommitmentEvent {
+            commitment: output_commitments[0],
+            leaf_index: leaf_index_0,
+            new_root,
+            timestamp,
+        });
+        emit!(CommitmentEvent {
+            commitment: output_commitments[1],
+            leaf_index: leaf_index_1,
+            new_root,
+            timestamp,
+        });
 
         // 10. Handle public amount (deposits/withdrawals)
         handle_public_amount(
@@ -703,8 +721,10 @@ fn mark_nullifier_spent(
     nullifier: [u8; 32],
     bump: u8,
 ) -> Result<()> {
+    let timestamp = Clock::get()?.unix_timestamp;
+
     marker.nullifier = nullifier;
-    marker.timestamp = Clock::get()?.unix_timestamp;
+    marker.timestamp = timestamp;
     marker.withdrawal_index = nullifier_set.count;
     marker.bump = bump;
 
@@ -712,6 +732,12 @@ fn mark_nullifier_spent(
         .count
         .checked_add(1)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    // Emit event when nullifier is spent
+    emit!(NullifierSpent {
+        nullifier,
+        timestamp,
+    });
 
     Ok(())
 }
@@ -855,6 +881,22 @@ fn handle_public_amount<'info>(
     // else: public_amount == 0, no lamport movement (pure private transfer)
 
     Ok(())
+}
+
+// ---- Events ----
+
+#[event]
+pub struct CommitmentEvent {
+    pub commitment: [u8; 32],
+    pub leaf_index: u64,
+    pub new_root: [u8; 32],
+    pub timestamp: i64,
+}
+
+#[event]
+pub struct NullifierSpent {
+    pub nullifier: [u8; 32],
+    pub timestamp: i64,
 }
 
 // ---- Errors ----
