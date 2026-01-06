@@ -731,15 +731,22 @@ fn handle_public_amount<'info>(
     ext_data: &ExtData,
 ) -> Result<()> {
     // Validate ext_data values are non-negative
-    require!(ext_data.fee < i64::MAX as u64, PrivacyError::InvalidFeeAmount);
+    require!(
+        ext_data.fee < i64::MAX as u64,
+        PrivacyError::InvalidFeeAmount
+    );
     require!(
         ext_data.refund < i64::MAX as u64,
         PrivacyError::InvalidPublicAmount
     );
 
-    if public_amount < 0 {
-        // DEPOSIT: user deposits |public_amount| lamports
-        let deposit_amount = public_amount.abs() as u64;
+    // Circuit convention: sumIns + publicAmount = sumOuts
+    // - Positive publicAmount = DEPOSIT (adding to pool: 0 + amount = outputs)
+    // - Negative publicAmount = WITHDRAWAL (removing from pool: inputs + negative = 0)
+
+    if public_amount > 0 {
+        // DEPOSIT: user deposits public_amount lamports
+        let deposit_amount = public_amount as u64;
 
         // For deposits, fee and refund should be zero
         require!(
@@ -770,9 +777,9 @@ fn handle_public_amount<'info>(
             .total_tvl
             .checked_add(deposit_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
-    } else if public_amount > 0 {
-        // WITHDRAWAL: vault pays out public_amount
-        let withdrawal_amount = public_amount as u64;
+    } else if public_amount < 0 {
+        // WITHDRAWAL: vault pays out |public_amount| lamports
+        let withdrawal_amount = public_amount.abs() as u64;
 
         // Validate that fee + refund doesn't exceed withdrawal amount
         let fee = ext_data.fee;

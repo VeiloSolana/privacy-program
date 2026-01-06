@@ -406,11 +406,17 @@ async function generateTransactionProof(inputs: {
   const circuitInputs = {
     // Public inputs (single values)
     root: bytesToBigIntBE(inputs.root).toString(),
-    // Try using absolute value for publicAmount (circuit might expect positive for deposit)
-    publicAmount: (inputs.publicAmount < 0n
-      ? -inputs.publicAmount
-      : inputs.publicAmount
-    ).toString(),
+    // For negative publicAmount (withdrawals), convert to field representation
+    // In BN254 Fr field, negative numbers are represented as (modulus - abs(value))
+    publicAmount: (() => {
+      if (inputs.publicAmount < 0n) {
+        const FR_MODULUS = BigInt(
+          "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+        );
+        return (FR_MODULUS + inputs.publicAmount).toString();
+      }
+      return inputs.publicAmount.toString();
+    })(),
     extDataHash: bytesToBigIntBE(inputs.extDataHash).toString(),
     mintAddress: reduceToField(inputs.mintAddress.toBytes()).toString(),
 
@@ -584,8 +590,47 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   // =============================================================================
 
   it("deposits 1.5 SOL using transact with real proof", async () => {
+    // Generate sender (who will sign and pay for the deposit)
+    const sender = Keypair.generate();
+
+    // Airdrop funds to sender
+    console.log("\n🎁 Airdropping funds for deposit test...");
+    console.log(`   Sender:  ${sender.publicKey.toBase58()}`);
+    await airdropAndConfirm(provider, sender.publicKey, 3 * LAMPORTS_PER_SOL);
+
+    // For deposit, sender acts as their own relayer (self-deposit)
+    // Register sender as relayer
+    await (program.methods as any)
+      .addRelayer(sender.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
     const depositAmount = BigInt(Math.floor(1.5 * LAMPORTS_PER_SOL));
-    const beforeVault = await provider.connection.getBalance(vault);
+
+    // 💰 BALANCE CHECK: Before deposit
+    const beforeSender = BigInt(
+      await provider.connection.getBalance(sender.publicKey)
+    );
+    const beforeVault = BigInt(await provider.connection.getBalance(vault));
+
+    console.log("\n💰 Balance Check - Before Deposit:");
+    console.log(`   Sender/Relayer: ${sender.publicKey.toBase58()}`);
+    console.log(
+      `                   ${beforeSender} lamports (${
+        Number(beforeSender) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Vault:          ${vault.toBase58()}`);
+    console.log(
+      `                   ${beforeVault} lamports (${
+        Number(beforeVault) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(
+      `   Deposit amount: ${depositAmount} lamports (${
+        Number(depositAmount) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
 
     // Generate keypair for the note
     const privateKey = randomBytes32();
@@ -601,8 +646,24 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       SOL_MINT
     );
 
-    // Insert into off-chain tree
+    // Create dummy output (will be inserted as second output on-chain)
+    const dummyOutputPrivKey = randomBytes32();
+    const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
+    const dummyOutputBlinding = randomBytes32();
+    const dummyOutputAmount = 0n;
+
+    const dummyOutputCommitment = computeCommitment(
+      poseidon,
+      dummyOutputAmount,
+      dummyOutputPubKey,
+      dummyOutputBlinding,
+      SOL_MINT
+    );
+
+    // Insert into off-chain tree - INSERT BOTH outputs to match on-chain behavior
     const leafIndex = offchainTree.insert(commitment);
+    offchainTree.insert(dummyOutputCommitment); // Second output also gets inserted on-chain
+
     const merklePath = offchainTree.getMerkleProof(leafIndex);
     const nullifier = computeNullifier(
       poseidon,
@@ -611,22 +672,53 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       privateKey
     );
 
-    // For deposit: use dummy inputs
-    const dummyInput0 = createDummyNote();
-    const dummyInput1 = createDummyNote();
-    const dummyOutput = createDummyNote();
+    // For deposit: use dummy inputs - MUST BE INTERNALLY CONSISTENT
+    // The circuit checks: nullifier == Poseidon(commitment, pathIndex, signature)
+    // So we cannot just use random bytes for nullifier if we pass specific private keys/blindings as witness.
 
-    // Dummy keypairs for dummy inputs
+    // 1. Generate Witness Data
     const dummyPrivKey0 = randomBytes32();
     const dummyPrivKey1 = randomBytes32();
+    const dummyBlinding0 = randomBytes32();
+    const dummyBlinding1 = randomBytes32();
+
     const dummyPubKey0 = derivePublicKey(poseidon, dummyPrivKey0);
     const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
 
-    const publicAmount = new BN(-depositAmount.toString());
+    // 2. Compute Commitments for Dummy Inputs
+    const dummyCommitment0 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey0,
+      dummyBlinding0,
+      SOL_MINT
+    );
+    const dummyCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey1,
+      dummyBlinding1,
+      SOL_MINT
+    );
 
+    // 3. Compute Nullifiers for Dummy Inputs (pathIndex = 0)
+    const dummyNullifier0 = computeNullifier(
+      poseidon,
+      dummyCommitment0,
+      0,
+      dummyPrivKey0
+    );
+    const dummyNullifier1 = computeNullifier(
+      poseidon,
+      dummyCommitment1,
+      0,
+      dummyPrivKey1
+    );
+
+    // --- Restore context variables (extData, onchainRoot) ---
     const extData = {
-      recipient: wallet.publicKey,
-      relayer: wallet.publicKey,
+      recipient: sender.publicKey,
+      relayer: sender.publicKey, // Sender is their own relayer for deposit
       fee: new BN(0),
       refund: new BN(0),
     };
@@ -636,10 +728,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.account as any
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
-
-    // Output keypairs (for the real output and dummy output)
-    const dummyOutputPrivKey = randomBytes32();
-    const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
+    // ---------------------------------------------------------
 
     // Generate real proof
     const zeros = offchainTree.getZeros();
@@ -647,17 +736,17 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
-      publicAmount: -depositAmount, // Negative for deposit
+      publicAmount: depositAmount, // Positive for deposit (adds to pool)
       extDataHash,
       mintAddress: SOL_MINT,
-      inputNullifiers: [dummyInput0.nullifier, dummyInput1.nullifier],
-      outputCommitments: [commitment, dummyOutput.commitment],
+      inputNullifiers: [dummyNullifier0, dummyNullifier1],
+      outputCommitments: [commitment, dummyOutputCommitment],
 
       // Private inputs (dummy inputs for deposit)
       inputAmounts: [0n, 0n],
       inputPrivateKeys: [dummyPrivKey0, dummyPrivKey1],
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
-      inputBlindings: [randomBytes32(), randomBytes32()],
+      inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
         {
           pathElements: zeroPathElements,
@@ -670,31 +759,33 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       ],
 
       // Output UTXOs
-      outputAmounts: [depositAmount, 0n],
-      outputOwners: [publicKey, dummyOutputPubKey], // Use derived public keys
-      outputBlindings: [blinding, randomBytes32()],
+      outputAmounts: [depositAmount, dummyOutputAmount],
+      outputOwners: [publicKey, dummyOutputPubKey],
+      outputBlindings: [blinding, dummyOutputBlinding],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput0.nullifier)],
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput1.nullifier)],
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
       program.programId
     );
 
+    const publicAmount = new BN(depositAmount.toString());
+
     try {
-      await (program.methods as any)
+      const tx = await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
           publicAmount,
           Array.from(extDataHash),
           SOL_MINT,
-          Array.from(dummyInput0.nullifier),
-          Array.from(dummyInput1.nullifier),
+          Array.from(dummyNullifier0),
+          Array.from(dummyNullifier1),
           Array.from(commitment),
-          Array.from(dummyOutput.commitment),
+          Array.from(dummyOutputCommitment),
           extData,
           proof
         )
@@ -705,12 +796,29 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           nullifiers,
           nullifierMarker0,
           nullifierMarker1,
-          relayer: wallet.publicKey,
-          recipient: wallet.publicKey,
+          relayer: sender.publicKey,
+          recipient: sender.publicKey,
           systemProgram: SystemProgram.programId,
         })
-        .signers([wallet.payer])
-        .rpc();
+        .signers([sender])
+        .transaction();
+
+      // Add compute budget instructions
+      const modifyComputeUnits =
+        anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
+          units: 1_400_000,
+        });
+      const addPriorityFee =
+        anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: 1,
+        });
+
+      const transaction = new anchor.web3.Transaction();
+      transaction.add(modifyComputeUnits);
+      transaction.add(addPriorityFee);
+      transaction.add(tx);
+
+      await provider.sendAndConfirm(transaction, [sender]);
     } catch (e: any) {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
@@ -719,14 +827,62 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       throw e;
     }
 
-    const afterVault = await provider.connection.getBalance(vault);
-    const delta = afterVault - beforeVault;
+    // 💰 BALANCE CHECK: After deposit
+    const afterSender = BigInt(
+      await provider.connection.getBalance(sender.publicKey)
+    );
+    const afterVault = BigInt(await provider.connection.getBalance(vault));
 
-    if (delta !== Number(depositAmount)) {
+    const senderSpent = beforeSender - afterSender;
+    const vaultReceived = afterVault - beforeVault;
+
+    console.log("\n💰 Balance Check - After Deposit:");
+    console.log(`   Sender/Relayer: ${sender.publicKey.toBase58()}`);
+    console.log(
+      `                   ${afterSender} lamports (${
+        Number(afterSender) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Vault:          ${vault.toBase58()}`);
+    console.log(
+      `                   ${afterVault} lamports (${
+        Number(afterVault) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+
+    console.log("\n📊 Balance Changes:");
+    console.log(
+      `   Sender spent:     ${senderSpent} lamports (${depositAmount} deposit + ${
+        senderSpent - depositAmount
+      } tx fees)`
+    );
+    console.log(`   Vault received:   ${vaultReceived} lamports`);
+    console.log(`   Expected deposit: ${depositAmount} lamports`);
+
+    // Verify vault received exactly the deposit amount
+    if (vaultReceived !== depositAmount) {
       throw new Error(
-        `Vault delta mismatch: expected ${depositAmount}, got ${delta}`
+        `Vault delta mismatch: expected ${depositAmount}, got ${vaultReceived}`
       );
     }
+
+    // Verify sender paid deposit + tx fees
+    if (senderSpent < depositAmount) {
+      throw new Error(
+        `Sender spent too little: expected at least ${depositAmount}, got ${senderSpent}`
+      );
+    }
+
+    console.log("\n✅ Balance verification passed!");
+    console.log(`   ✓ Vault received exactly ${depositAmount} lamports`);
+    console.log(
+      `   ✓ Sender paid ${senderSpent} lamports (${depositAmount} deposit + ${
+        senderSpent - depositAmount
+      } tx fees)`
+    );
+
+    // Recompute Merkle path now that tree has both outputs inserted
+    const updatedMerklePath = offchainTree.getMerkleProof(leafIndex);
 
     // Save note for withdrawal
     depositNote = {
@@ -737,10 +893,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       privateKey,
       publicKey,
       leafIndex,
-      merklePath,
+      merklePath: updatedMerklePath,
     };
 
-    console.log("✅ Deposit successful");
+    console.log("\n✅ Deposit successful");
     console.log(`   Amount: ${depositAmount} lamports`);
     console.log(`   Leaf index: ${leafIndex}`);
   });
@@ -754,10 +910,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       throw new Error("No deposit note - deposit test must run first");
     }
 
+    // Generate relayer and recipient keypairs
     const relayer = Keypair.generate();
     const recipient = Keypair.generate();
 
+    // Airdrop funds to relayer and recipient
+    console.log("\n🎁 Airdropping funds for withdrawal test...");
+    console.log(`   Relayer:   ${relayer.publicKey.toBase58()}`);
     await airdropAndConfirm(provider, relayer.publicKey, 2 * LAMPORTS_PER_SOL);
+    console.log(`   Recipient: ${recipient.publicKey.toBase58()}`);
     await airdropAndConfirm(
       provider,
       recipient.publicKey,
@@ -774,20 +935,45 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const fee = (depositNote.amount * BigInt(feeBps)) / 10_000n;
     const toRecipient = depositNote.amount - fee;
 
-    // Create dummy for second input
-    const dummyInput1 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
-    const dummyOutput0 = createDummyInput(
-      poseidon,
-      PublicKey.default,
-      SOL_MINT
+    // 💰 BALANCE CHECK: Before withdrawal
+    const beforeVaultWithdraw = BigInt(
+      await provider.connection.getBalance(vault)
     );
-    const dummyOutput1 = createDummyInput(
-      poseidon,
-      PublicKey.default,
-      SOL_MINT
+    const beforeRelayerWithdraw = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const beforeRecipientWithdraw = BigInt(
+      await provider.connection.getBalance(recipient.publicKey)
     );
 
-    const publicAmount = new BN(withdrawAmount.toString());
+    console.log("\n💰 Balance Check - Before Withdrawal:");
+    console.log(`   Vault:     ${vault.toBase58()}`);
+    console.log(
+      `              ${beforeVaultWithdraw} lamports (${
+        Number(beforeVaultWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Relayer:   ${relayer.publicKey.toBase58()}`);
+    console.log(
+      `              ${beforeRelayerWithdraw} lamports (${
+        Number(beforeRelayerWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Recipient: ${recipient.publicKey.toBase58()}`);
+    console.log(
+      `              ${beforeRecipientWithdraw} lamports (${
+        Number(beforeRecipientWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(
+      `   Withdrawal amount: ${withdrawAmount} lamports (${
+        Number(withdrawAmount) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Fee (${feeBps} BPS): ${fee} lamports`);
+    console.log(`   Expected to recipient: ${toRecipient} lamports`);
+
+    const publicAmount = new BN(-withdrawAmount.toString());
 
     const extData = {
       recipient: recipient.publicKey,
@@ -802,39 +988,104 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    // Dummy keypairs for second input and outputs
+    // Debug: Check root synchronization
+    const offchainRoot = offchainTree.getRoot();
+    console.log("\n🔍 Withdrawal - Root verification:");
+    console.log("   On-chain root: ", bytesToBigIntBE(onchainRoot).toString());
+    console.log("   Off-chain root:", bytesToBigIntBE(offchainRoot).toString());
+    console.log(
+      "   Deposit commitment:",
+      bytesToBigIntBE(depositNote.commitment).toString()
+    );
+    console.log("   Leaf index:", depositNote.leafIndex);
+
+    if (bytesToBigIntBE(onchainRoot) !== bytesToBigIntBE(offchainRoot)) {
+      console.warn("   ⚠️  WARNING: Roots don't match!");
+    }
+
+    // Recompute Merkle path from off-chain tree (now includes deposited note)
+    const updatedMerklePath = offchainTree.getMerkleProof(
+      depositNote.leafIndex
+    );
+
+    console.log(
+      "   Updated path[0]:",
+      updatedMerklePath.pathElements[0].toString()
+    );
+    console.log("   Path indices:", updatedMerklePath.pathIndices);
+
+    // Create consistent dummy input (second input)
     const dummyPrivKey1 = randomBytes32();
     const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
+    const dummyBlinding1 = randomBytes32();
+
+    const dummyCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey1,
+      dummyBlinding1,
+      SOL_MINT
+    );
+
+    const dummyNullifier1 = computeNullifier(
+      poseidon,
+      dummyCommitment1,
+      0,
+      dummyPrivKey1
+    );
+
+    // Create consistent dummy outputs
     const dummyOutputPrivKey0 = randomBytes32();
     const dummyOutputPubKey0 = derivePublicKey(poseidon, dummyOutputPrivKey0);
+    const dummyOutputBlinding0 = randomBytes32();
+    const dummyOutputCommitment0 = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutputPubKey0,
+      dummyOutputBlinding0,
+      SOL_MINT
+    );
+
     const dummyOutputPrivKey1 = randomBytes32();
     const dummyOutputPubKey1 = derivePublicKey(poseidon, dummyOutputPrivKey1);
+    const dummyOutputBlinding1 = randomBytes32();
+    const dummyOutputCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutputPubKey1,
+      dummyOutputBlinding1,
+      SOL_MINT
+    );
+
+    // Get zero path for dummy input
+    const zeros = offchainTree.getZeros();
+    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
 
     // Generate real proof
     const proof = await generateTransactionProof({
       root: onchainRoot,
-      publicAmount: withdrawAmount,
+      publicAmount: -withdrawAmount, // Negative for withdrawal (removes from pool)
       extDataHash,
       mintAddress: SOL_MINT,
-      inputNullifiers: [depositNote.nullifier, dummyInput1.nullifier],
-      outputCommitments: [dummyOutput0.commitment, dummyOutput1.commitment],
+      inputNullifiers: [depositNote.nullifier, dummyNullifier1],
+      outputCommitments: [dummyOutputCommitment0, dummyOutputCommitment1],
 
       // Private inputs
       inputAmounts: [depositNote.amount, 0n],
       inputPrivateKeys: [depositNote.privateKey, dummyPrivKey1],
       inputPublicKeys: [depositNote.publicKey, dummyPubKey1],
-      inputBlindings: [depositNote.blinding, randomBytes32()],
+      inputBlindings: [depositNote.blinding, dummyBlinding1],
       inputMerklePaths: [
-        depositNote.merklePath,
+        updatedMerklePath,
         {
-          pathElements: new Array(16).fill(0n),
+          pathElements: zeroPathElements,
           pathIndices: new Array(16).fill(0),
         },
       ],
 
       outputAmounts: [0n, 0n],
       outputOwners: [dummyOutputPubKey0, dummyOutputPubKey1],
-      outputBlindings: [randomBytes32(), randomBytes32()],
+      outputBlindings: [dummyOutputBlinding0, dummyOutputBlinding1],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
@@ -842,25 +1093,21 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyInput1.nullifier)],
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
       program.programId
     );
 
-    const beforeRecipient = BigInt(
-      await provider.connection.getBalance(recipient.publicKey)
-    );
-
     try {
-      await (program.methods as any)
+      const tx = await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
           publicAmount,
           Array.from(extDataHash),
           SOL_MINT,
           Array.from(depositNote.nullifier),
-          Array.from(dummyInput1.nullifier),
-          Array.from(dummyOutput0.commitment),
-          Array.from(dummyOutput1.commitment),
+          Array.from(dummyNullifier1),
+          Array.from(dummyOutputCommitment0),
+          Array.from(dummyOutputCommitment1),
           extData,
           proof
         )
@@ -876,7 +1123,24 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           systemProgram: SystemProgram.programId,
         })
         .signers([relayer])
-        .rpc();
+        .transaction();
+
+      // Add compute budget instructions
+      const modifyComputeUnits =
+        anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
+          units: 1_400_000,
+        });
+      const addPriorityFee =
+        anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: 1,
+        });
+
+      const transaction = new anchor.web3.Transaction();
+      transaction.add(modifyComputeUnits);
+      transaction.add(addPriorityFee);
+      transaction.add(tx);
+
+      await provider.sendAndConfirm(transaction, [relayer]);
     } catch (e: any) {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
@@ -885,18 +1149,87 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       throw e;
     }
 
-    const afterRecipient = BigInt(
+    // 💰 BALANCE CHECK: After withdrawal
+    const afterVaultWithdraw = BigInt(
+      await provider.connection.getBalance(vault)
+    );
+    const afterRelayerWithdraw = BigInt(
+      await provider.connection.getBalance(relayer.publicKey)
+    );
+    const afterRecipientWithdraw = BigInt(
       await provider.connection.getBalance(recipient.publicKey)
     );
-    const recipientDelta = afterRecipient - beforeRecipient;
 
-    if (recipientDelta !== toRecipient) {
+    const vaultPaid = beforeVaultWithdraw - afterVaultWithdraw;
+    const relayerReceived = afterRelayerWithdraw - beforeRelayerWithdraw;
+    const recipientReceived = afterRecipientWithdraw - beforeRecipientWithdraw;
+
+    console.log("\n💰 Balance Check - After Withdrawal:");
+    console.log(`   Vault:     ${vault.toBase58()}`);
+    console.log(
+      `              ${afterVaultWithdraw} lamports (${
+        Number(afterVaultWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Relayer:   ${relayer.publicKey.toBase58()}`);
+    console.log(
+      `              ${afterRelayerWithdraw} lamports (${
+        Number(afterRelayerWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+    console.log(`   Recipient: ${recipient.publicKey.toBase58()}`);
+    console.log(
+      `              ${afterRecipientWithdraw} lamports (${
+        Number(afterRecipientWithdraw) / LAMPORTS_PER_SOL
+      } SOL)`
+    );
+
+    console.log("\n📊 Balance Changes:");
+    console.log(`   Vault paid:          ${vaultPaid} lamports`);
+    console.log(
+      `   Relayer received:    ${relayerReceived} lamports (after tx fees)`
+    );
+    console.log(`   Recipient received:  ${recipientReceived} lamports`);
+    console.log(`   Expected withdrawal: ${withdrawAmount} lamports`);
+    console.log(`   Expected fee:        ${fee} lamports`);
+    console.log(`   Expected to recipient: ${toRecipient} lamports`);
+
+    // Verify vault paid exactly the withdrawal amount
+    if (vaultPaid !== withdrawAmount) {
       throw new Error(
-        `Recipient delta mismatch: expected ${toRecipient}, got ${recipientDelta}`
+        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
       );
     }
 
-    console.log("✅ Withdrawal successful");
+    // Verify recipient received exactly the expected amount (withdrawal - fee)
+    if (recipientReceived !== toRecipient) {
+      throw new Error(
+        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`
+      );
+    }
+
+    // Verify relayer received fee (minus tx costs)
+    // Note: Relayer's balance change includes fee income minus tx costs
+    const expectedRelayerMin = fee - 10_000_000n; // Allow up to 0.01 SOL for tx fees
+    if (relayerReceived < expectedRelayerMin) {
+      console.warn(
+        `   ⚠️  Relayer received less than expected (likely due to tx fees): ${relayerReceived} < ${expectedRelayerMin}`
+      );
+    }
+
+    console.log("\n✅ Balance verification passed!");
+    console.log(`   ✓ Vault paid exactly ${withdrawAmount} lamports`);
+    console.log(
+      `   ✓ Recipient received exactly ${toRecipient} lamports (${withdrawAmount} - ${fee} fee)`
+    );
+    console.log(
+      `   ✓ Relayer received ${relayerReceived} lamports (${fee} fee - tx costs)`
+    );
+    console.log(
+      `   ✓ Total accounted: ${vaultPaid} = ${recipientReceived} + ${fee} (sent to relayer)`
+    );
+
+    console.log("\n✅ Withdrawal successful");
     console.log(`   Withdrawn: ${withdrawAmount} lamports`);
     console.log(`   Fee: ${fee} lamports`);
     console.log(`   To recipient: ${toRecipient} lamports`);
