@@ -28,8 +28,6 @@ import { getPoolPdas } from "@zkprivacysol/sdk-core";
 // Configuration
 // =============================================================================
 
-const CIRCUIT_DIR =
-  "/Users/jaybee/Documents/Coding/Coding Projects/zk-circuits";
 const WASM_PATH = path.join(
   __dirname,
   "../zk/circuits/transaction/transaction_js/transaction.wasm"
@@ -94,6 +92,13 @@ function reduceToField(bytes: Uint8Array): bigint {
   return value % FR_MODULUS;
 }
 
+// Helper: Derive public key from private key: pubkey = Poseidon(privateKey)
+function derivePublicKey(poseidon: any, privateKey: Uint8Array): bigint {
+  const privateKeyField = poseidon.F.e(bytesToBigIntBE(privateKey));
+  const publicKeyHash = poseidon([privateKeyField]);
+  return poseidon.F.toObject(publicKeyHash);
+}
+
 // Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
 function computeExtDataHash(
   poseidon: any,
@@ -119,40 +124,50 @@ function computeExtDataHash(
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
 }
 
-// Helper: Compute commitment = Poseidon(Poseidon(amount, owner), Poseidon(blinding, mintAddress))
+// Helper: Compute commitment = Poseidon(amount, pubkey, blinding, mintAddress)
+// This matches the circuit's UTXOCommitment template (4 inputs)
 function computeCommitment(
   poseidon: any,
   amount: bigint,
-  owner: PublicKey,
+  ownerPubkey: bigint, // Already derived from private key
   blinding: Uint8Array,
   mintAddress: PublicKey
 ): Uint8Array {
   const amountField = poseidon.F.e(amount.toString());
-  const ownerField = poseidon.F.e(reduceToField(owner.toBytes()));
+  const ownerField = poseidon.F.e(ownerPubkey.toString());
   const blindingField = poseidon.F.e(bytesToBigIntBE(blinding));
   const mintField = poseidon.F.e(reduceToField(mintAddress.toBytes()));
 
-  const hash1 = poseidon([amountField, ownerField]);
-  const hash2 = poseidon([blindingField, mintField]);
-  const finalHash = poseidon([hash1, hash2]);
+  // Single Poseidon hash with 4 inputs
+  const commitment = poseidon([
+    amountField,
+    ownerField,
+    blindingField,
+    mintField,
+  ]);
 
-  const hashBytes = poseidon.F.toString(finalHash, 16).padStart(64, "0");
+  const hashBytes = poseidon.F.toString(commitment, 16).padStart(64, "0");
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
 }
 
-// Helper: Compute nullifier (you'll need to match your circuit's nullifier derivation)
+// Helper: Compute nullifier matching circuit's UTXONullifier template
+// signature = Poseidon(privateKey, commitment, pathIndex)
+// nullifier = Poseidon(commitment, pathIndex, signature)
 function computeNullifier(
   poseidon: any,
   commitment: Uint8Array,
   leafIndex: number,
   privateKey: Uint8Array
 ): Uint8Array {
-  // Nullifier = Poseidon(commitment, leafIndex, privateKey)
   const commitmentField = poseidon.F.e(bytesToBigIntBE(commitment));
   const indexField = poseidon.F.e(BigInt(leafIndex));
   const keyField = poseidon.F.e(bytesToBigIntBE(privateKey));
 
-  const nullifierHash = poseidon([commitmentField, indexField, keyField]);
+  // Step 1: Compute signature
+  const signature = poseidon([keyField, commitmentField, indexField]);
+
+  // Step 2: Compute nullifier
+  const nullifierHash = poseidon([commitmentField, indexField, signature]);
   const hashBytes = poseidon.F.toString(nullifierHash, 16).padStart(64, "0");
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
 }
@@ -369,7 +384,8 @@ async function generateTransactionProof(inputs: {
 
   // Private inputs
   inputAmounts: [bigint, bigint];
-  inputOwners: [PublicKey, PublicKey];
+  inputPrivateKeys: [Uint8Array, Uint8Array]; // Private keys for input UTXOs
+  inputPublicKeys: [bigint, bigint]; // Derived public keys (Poseidon(privateKey))
   inputBlindings: [Uint8Array, Uint8Array];
   inputPrivateKeys: [Uint8Array, Uint8Array];
   inputMerklePaths: [
@@ -378,77 +394,45 @@ async function generateTransactionProof(inputs: {
   ];
 
   outputAmounts: [bigint, bigint];
-  outputOwners: [PublicKey, PublicKey];
+  outputOwners: [bigint, bigint]; // Public keys as field elements
   outputBlindings: [Uint8Array, Uint8Array];
 }) {
-  // Format inputs for circuit - use arrays instead of flattened signals
+  // Format inputs for circuit - matching signal names from transaction.circom
   const circuitInputs = {
-    // Root
-    // For dummy inputs (amount=0), the root doesn't matter as long as it's valid in the tree history
-    // But the circuit might check merkle proof validity even for dummy inputs if enabled is not handled correctly
-    // Let's try to use the current root for all inputs
+    // Public inputs (single values)
     root: bytesToBigIntBE(inputs.root).toString(),
     publicAmount: inputs.publicAmount.toString(),
     extDataHash: bytesToBigIntBE(inputs.extDataHash).toString(),
     mintAddress: reduceToField(inputs.mintAddress.toBytes()).toString(),
 
-    // Nullifiers
-    inputNullifier: [
-      bytesToBigIntBE(inputs.inputNullifiers[0]).toString(),
-      bytesToBigIntBE(inputs.inputNullifiers[1]).toString(),
-    ],
+    // Public inputs (arrays)
+    inputNullifier: inputs.inputNullifiers.map((n) =>
+      bytesToBigIntBE(n).toString()
+    ),
+    outputCommitment: inputs.outputCommitments.map((c) =>
+      bytesToBigIntBE(c).toString()
+    ),
 
-    // Output commitments
-    outputCommitment: [
-      bytesToBigIntBE(inputs.outputCommitments[0]).toString(),
-      bytesToBigIntBE(inputs.outputCommitments[1]).toString(),
-    ],
+    // Private inputs - input UTXOs (arrays)
+    inAmount: inputs.inputAmounts.map((a) => a.toString()),
+    inPubkey: inputs.inputPublicKeys.map((pk) => pk.toString()),
+    inBlinding: inputs.inputBlindings.map((b) => bytesToBigIntBE(b).toString()),
+    inPathIndex: inputs.inputMerklePaths.map((p) =>
+      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0)
+    ),
+    inPathElements: inputs.inputMerklePaths.map((p) =>
+      p.pathElements.map((e) => e.toString())
+    ),
+    inPrivateKey: inputs.inputPrivateKeys.map((pk) =>
+      bytesToBigIntBE(pk).toString()
+    ),
 
-    // Private inputs
-    inAmount: [
-      inputs.inputAmounts[0].toString(),
-      inputs.inputAmounts[1].toString(),
-    ],
-
-    inPubkey: [
-      reduceToField(inputs.inputOwners[0].toBytes()).toString(),
-      reduceToField(inputs.inputOwners[1].toBytes()).toString(),
-    ],
-
-    inBlinding: [
-      bytesToBigIntBE(inputs.inputBlindings[0]).toString(),
-      bytesToBigIntBE(inputs.inputBlindings[1]).toString(),
-    ],
-
-    inPrivateKey: [
-      bytesToBigIntBE(inputs.inputPrivateKeys[0]).toString(),
-      bytesToBigIntBE(inputs.inputPrivateKeys[1]).toString(),
-    ],
-
-    // Merkle paths
-    inPathElements: [
-      inputs.inputMerklePaths[0].pathElements.map((e) => e.toString()),
-      inputs.inputMerklePaths[1].pathElements.map((e) => e.toString()),
-    ],
-    inPathIndex: [
-      packPathIndices(inputs.inputMerklePaths[0].pathIndices).toString(),
-      packPathIndices(inputs.inputMerklePaths[1].pathIndices).toString(),
-    ],
-
-    outAmount: [
-      inputs.outputAmounts[0].toString(),
-      inputs.outputAmounts[1].toString(),
-    ],
-
-    outPubkey: [
-      reduceToField(inputs.outputOwners[0].toBytes()).toString(),
-      reduceToField(inputs.outputOwners[1].toBytes()).toString(),
-    ],
-
-    outBlinding: [
-      bytesToBigIntBE(inputs.outputBlindings[0]).toString(),
-      bytesToBigIntBE(inputs.outputBlindings[1]).toString(),
-    ],
+    // Private inputs - output UTXOs (arrays)
+    outAmount: inputs.outputAmounts.map((a) => a.toString()),
+    outPubkey: inputs.outputOwners.map((o) => o.toString()),
+    outBlinding: inputs.outputBlindings.map((b) =>
+      bytesToBigIntBE(b).toString()
+    ),
   };
 
   console.log(
@@ -457,11 +441,26 @@ async function generateTransactionProof(inputs: {
   );
 
   // Generate proof
-  const { proof, publicSignals } = await groth16.fullProve(
-    circuitInputs,
-    WASM_PATH,
-    ZKEY_PATH
-  );
+  let proof, publicSignals;
+  try {
+    ({ proof, publicSignals } = await groth16.fullProve(
+      circuitInputs,
+      WASM_PATH,
+      ZKEY_PATH
+    ));
+  } catch (e: any) {
+    console.error("\n❌ Proof generation failed!");
+    console.error("Error:", e.message);
+    console.error("\n💡 Your circuit might expect different signal names.");
+    console.error("Common patterns:");
+    console.error("  1. Array syntax: inputNullifier[0], inputNullifier[1]");
+    console.error("  2. Flat signals: inputNullifier0, inputNullifier1");
+    console.error("  3. Different names: nullifier0, nullifier1");
+    console.error(
+      "\nPlease check your circuit's signal declarations in transaction.circom\n"
+    );
+    throw e;
+  }
 
   console.log("✓ Proof generated successfully");
   console.log("Public signals:", publicSignals);
@@ -508,6 +507,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     nullifier: Uint8Array;
     blinding: Uint8Array;
     privateKey: Uint8Array;
+    publicKey: bigint; // Derived from privateKey via Poseidon
     leafIndex: number;
     merklePath: { pathElements: bigint[]; pathIndices: number[] };
   } | null = null;
@@ -578,13 +578,16 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const depositAmount = BigInt(Math.floor(1.5 * LAMPORTS_PER_SOL));
     const beforeVault = await provider.connection.getBalance(vault);
 
-    // Generate note
-    const blinding = randomBytes32();
+    // Generate keypair for the note
     const privateKey = randomBytes32();
+    const publicKey = derivePublicKey(poseidon, privateKey);
+    const blinding = randomBytes32();
+
+    // Generate commitment using the derived public key
     const commitment = computeCommitment(
       poseidon,
       depositAmount,
-      wallet.publicKey,
+      publicKey,
       blinding,
       SOL_MINT
     );
@@ -600,9 +603,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     // For deposit: use dummy inputs
-    const dummyInput0 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
-    const dummyInput1 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
-    const dummyOutput = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
+    const dummyInput0 = createDummyNote();
+    const dummyInput1 = createDummyNote();
+    const dummyOutput = createDummyNote();
+
+    // Dummy keypairs for dummy inputs
+    const dummyPrivKey0 = randomBytes32();
+    const dummyPrivKey1 = randomBytes32();
+    const dummyPubKey0 = derivePublicKey(poseidon, dummyPrivKey0);
+    const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
 
     const publicAmount = new BN(-depositAmount.toString());
 
@@ -619,14 +628,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    console.log(
-      "On-chain root:",
-      BigInt(reduceToField(onchainRoot)).toString()
-    );
-    console.log(
-      "Off-chain root:",
-      bytesToBigIntBE(offchainTree.getRoot()).toString()
-    );
+    // Output keypairs (for the real output and dummy output)
+    const dummyOutputPrivKey = randomBytes32();
+    const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
 
     // Generate real proof
     const proof = await generateTransactionProof({
@@ -637,19 +641,28 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputNullifiers: [dummyInput0.nullifier, dummyInput1.nullifier],
       outputCommitments: [commitment, dummyOutput.commitment],
 
-      // Private inputs (dummy for deposit)
+      // Private inputs (dummy inputs for deposit)
       inputAmounts: [0n, 0n],
-      inputOwners: [PublicKey.default, PublicKey.default],
-      inputBlindings: [dummyInput0.blinding, dummyInput1.blinding],
-      inputPrivateKeys: [dummyInput0.privateKey, dummyInput1.privateKey],
+      inputPrivateKeys: [dummyPrivKey0, dummyPrivKey1],
+      inputPublicKeys: [dummyPubKey0, dummyPubKey1],
+      inputBlindings: [randomBytes32(), randomBytes32()],
+      inputMintAddresses: [SOL_MINT, SOL_MINT],
       inputMerklePaths: [
-        offchainTree.getMerkleProof(0),
-        offchainTree.getMerkleProof(0),
+        {
+          pathElements: new Array(16).fill(0n),
+          pathIndices: new Array(16).fill(0),
+        },
+        {
+          pathElements: new Array(16).fill(0n),
+          pathIndices: new Array(16).fill(0),
+        },
       ],
 
+      // Output UTXOs
       outputAmounts: [depositAmount, 0n],
-      outputOwners: [wallet.publicKey, PublicKey.default],
-      outputBlindings: [blinding, dummyOutput.blinding],
+      outputOwners: [publicKey, dummyOutputPubKey], // Use derived public keys
+      outputBlindings: [blinding, randomBytes32()],
+      outputMintAddresses: [SOL_MINT, SOL_MINT],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
@@ -712,6 +725,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       nullifier,
       blinding,
       privateKey,
+      publicKey,
       leafIndex,
       merklePath,
     };
@@ -778,6 +792,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
+    // Dummy keypairs for second input and outputs
+    const dummyPrivKey1 = randomBytes32();
+    const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
+    const dummyOutputPrivKey0 = randomBytes32();
+    const dummyOutputPubKey0 = derivePublicKey(poseidon, dummyOutputPrivKey0);
+    const dummyOutputPrivKey1 = randomBytes32();
+    const dummyOutputPubKey1 = derivePublicKey(poseidon, dummyOutputPrivKey1);
+
     // Generate real proof
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -789,9 +811,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
       // Private inputs
       inputAmounts: [depositNote.amount, 0n],
-      inputOwners: [wallet.publicKey, PublicKey.default],
-      inputBlindings: [depositNote.blinding, dummyInput1.blinding],
-      inputPrivateKeys: [depositNote.privateKey, dummyInput1.privateKey],
+      inputPrivateKeys: [depositNote.privateKey, dummyPrivKey1],
+      inputPublicKeys: [depositNote.publicKey, dummyPubKey1],
+      inputBlindings: [depositNote.blinding, randomBytes32()],
+      inputMintAddresses: [SOL_MINT, SOL_MINT],
       inputMerklePaths: [
         depositNote.merklePath,
         {
@@ -801,8 +824,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       ],
 
       outputAmounts: [0n, 0n],
-      outputOwners: [PublicKey.default, PublicKey.default],
-      outputBlindings: [dummyOutput0.blinding, dummyOutput1.blinding],
+      outputOwners: [dummyOutputPubKey0, dummyOutputPubKey1],
+      outputBlindings: [randomBytes32(), randomBytes32()],
+      outputMintAddresses: [SOL_MINT, SOL_MINT],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
