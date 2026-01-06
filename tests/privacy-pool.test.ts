@@ -16,6 +16,10 @@ import {
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { buildPoseidon } from "circomlibjs";
 import { groth16 } from "snarkjs";
 import { getPoolPdas } from "@zkprivacysol/sdk-core";
@@ -153,6 +157,36 @@ function computeNullifier(
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
 }
 
+function createDummyInput(
+  poseidon: any,
+  owner: PublicKey,
+  mintAddress: PublicKey
+) {
+  const amount = 0n;
+  const blinding = new Uint8Array(32).fill(0);
+  const privateKey = new Uint8Array(32).fill(0);
+  const pathIndices = new Array(16).fill(0);
+
+  const commitment = computeCommitment(
+    poseidon,
+    amount,
+    owner,
+    blinding,
+    mintAddress
+  );
+  const nullifier = computeNullifier(poseidon, commitment, 0, privateKey);
+
+  return {
+    amount,
+    owner,
+    blinding,
+    privateKey,
+    pathIndices,
+    commitment,
+    nullifier,
+  };
+}
+
 // Helper: Create dummy note
 function createDummyNote(): { commitment: Uint8Array; nullifier: Uint8Array } {
   return {
@@ -180,16 +214,62 @@ class OffchainMerkleTree {
   private leaves: Map<number, Uint8Array> = new Map();
   private levels: number;
   private poseidon: any;
+  private zeros: Uint8Array[] = [];
 
   constructor(levels: number, poseidon: any) {
     this.levels = levels;
     this.poseidon = poseidon;
+
+    // Precompute zero hashes
+    let currentZero = new Uint8Array(32).fill(0);
+    this.zeros.push(currentZero);
+    console.log(`Level 0 zero: ${bytesToBigIntBE(currentZero)}`);
+
+    for (let i = 0; i < levels; i++) {
+      const zeroField = poseidon.F.e(bytesToBigIntBE(currentZero));
+      const hash = poseidon([zeroField, zeroField]);
+      const hashBytes = poseidon.F.toString(hash, 16).padStart(64, "0");
+      currentZero = Uint8Array.from(Buffer.from(hashBytes, "hex"));
+      this.zeros.push(currentZero);
+      console.log(`Level ${i + 1} zero: ${bytesToBigIntBE(currentZero)}`);
+    }
   }
 
   insert(commitment: Uint8Array): number {
     const index = this.leaves.size;
     this.leaves.set(index, commitment);
     return index;
+  }
+
+  getNode(level: number, index: number): Uint8Array {
+    if (level === 0) {
+      return this.leaves.get(index) || this.zeros[0];
+    }
+
+    const left = this.getNode(level - 1, 2 * index);
+    const right = this.getNode(level - 1, 2 * index + 1);
+
+    // Optimization: if both children are zeros, this node is zero[level]
+    // We can check if they equal zeros[level-1]
+    // But simple comparison of bytes is enough, or just rely on the fact that
+    // if we don't have leaves in this subtree, it's a zero node.
+    // Since we fill sequentially, we can check if the range [start, end] has any leaves.
+    // But recursive is fine for small trees/tests.
+
+    // Check if we are in a zero subtree
+    // A node at (level, index) covers leaves from index*2^level to (index+1)*2^level - 1
+    // If this range is >= this.leaves.size, it's all zeros.
+    const rangeStart = index * Math.pow(2, level);
+    if (rangeStart >= this.leaves.size) {
+      return this.zeros[level];
+    }
+
+    const leftField = this.poseidon.F.e(bytesToBigIntBE(left));
+    const rightField = this.poseidon.F.e(bytesToBigIntBE(right));
+    const hash = this.poseidon([leftField, rightField]);
+
+    const hashBytes = this.poseidon.F.toString(hash, 16).padStart(64, "0");
+    return Uint8Array.from(Buffer.from(hashBytes, "hex"));
   }
 
   getMerkleProof(leafIndex: number): {
@@ -205,7 +285,7 @@ class OffchainMerkleTree {
       const isLeft = currentIndex % 2 === 0;
       const siblingIndex = isLeft ? currentIndex + 1 : currentIndex - 1;
 
-      const sibling = this.leaves.get(siblingIndex) || new Uint8Array(32);
+      const sibling = this.getNode(level, siblingIndex);
       pathElements.push(bytesToBigIntBE(sibling));
       pathIndices.push(isLeft ? 0 : 1);
 
@@ -216,44 +296,7 @@ class OffchainMerkleTree {
   }
 
   getRoot(): Uint8Array {
-    if (this.leaves.size === 0) {
-      return new Uint8Array(32);
-    }
-
-    // Build tree from bottom up
-    let currentLevel = new Map<number, Uint8Array>();
-
-    // Copy leaves to current level
-    for (const [index, leaf] of this.leaves) {
-      currentLevel.set(index, leaf);
-    }
-
-    // Hash up the tree
-    for (let level = 0; level < this.levels; level++) {
-      const nextLevel = new Map<number, Uint8Array>();
-      const maxIndex = Math.pow(2, this.levels - level);
-
-      for (let i = 0; i < maxIndex; i += 2) {
-        const left = currentLevel.get(i) || new Uint8Array(32);
-        const right = currentLevel.get(i + 1) || new Uint8Array(32);
-
-        const leftField = this.poseidon.F.e(bytesToBigIntBE(left));
-        const rightField = this.poseidon.F.e(bytesToBigIntBE(right));
-        const parentHash = this.poseidon([leftField, rightField]);
-
-        const hashBytes = this.poseidon.F.toString(parentHash, 16).padStart(
-          64,
-          "0"
-        );
-        const parentBytes = Uint8Array.from(Buffer.from(hashBytes, "hex"));
-
-        nextLevel.set(Math.floor(i / 2), parentBytes);
-      }
-
-      currentLevel = nextLevel;
-    }
-
-    return currentLevel.get(0) || new Uint8Array(32);
+    return this.getNode(this.levels, 0);
   }
 }
 
@@ -302,6 +345,16 @@ function convertProofToBytes(proof: any): {
   return { proofA, proofB, proofC };
 }
 
+function packPathIndices(indices: number[]): bigint {
+  let packed = 0n;
+  for (let i = 0; i < indices.length; i++) {
+    if (indices[i] === 1) {
+      packed += 1n << BigInt(i);
+    }
+  }
+  return packed;
+}
+
 /**
  * Generate transaction proof (2-in-2-out)
  */
@@ -318,7 +371,7 @@ async function generateTransactionProof(inputs: {
   inputAmounts: [bigint, bigint];
   inputOwners: [PublicKey, PublicKey];
   inputBlindings: [Uint8Array, Uint8Array];
-  inputMintAddresses: [PublicKey, PublicKey];
+  inputPrivateKeys: [Uint8Array, Uint8Array];
   inputMerklePaths: [
     { pathElements: bigint[]; pathIndices: number[] },
     { pathElements: bigint[]; pathIndices: number[] }
@@ -327,66 +380,75 @@ async function generateTransactionProof(inputs: {
   outputAmounts: [bigint, bigint];
   outputOwners: [PublicKey, PublicKey];
   outputBlindings: [Uint8Array, Uint8Array];
-  outputMintAddresses: [PublicKey, PublicKey];
 }) {
-  // Format inputs for circuit - flatten arrays to individual signals
+  // Format inputs for circuit - use arrays instead of flattened signals
   const circuitInputs = {
-    // Public inputs
+    // Root
+    // For dummy inputs (amount=0), the root doesn't matter as long as it's valid in the tree history
+    // But the circuit might check merkle proof validity even for dummy inputs if enabled is not handled correctly
+    // Let's try to use the current root for all inputs
     root: bytesToBigIntBE(inputs.root).toString(),
     publicAmount: inputs.publicAmount.toString(),
     extDataHash: bytesToBigIntBE(inputs.extDataHash).toString(),
     mintAddress: reduceToField(inputs.mintAddress.toBytes()).toString(),
 
-    // Flatten nullifiers
-    inputNullifier0: bytesToBigIntBE(inputs.inputNullifiers[0]).toString(),
-    inputNullifier1: bytesToBigIntBE(inputs.inputNullifiers[1]).toString(),
+    // Nullifiers
+    inputNullifier: [
+      bytesToBigIntBE(inputs.inputNullifiers[0]).toString(),
+      bytesToBigIntBE(inputs.inputNullifiers[1]).toString(),
+    ],
 
-    // Flatten output commitments
-    outputCommitment0: bytesToBigIntBE(inputs.outputCommitments[0]).toString(),
-    outputCommitment1: bytesToBigIntBE(inputs.outputCommitments[1]).toString(),
+    // Output commitments
+    outputCommitment: [
+      bytesToBigIntBE(inputs.outputCommitments[0]).toString(),
+      bytesToBigIntBE(inputs.outputCommitments[1]).toString(),
+    ],
 
-    // Private inputs - flatten arrays
-    inputAmount0: inputs.inputAmounts[0].toString(),
-    inputAmount1: inputs.inputAmounts[1].toString(),
+    // Private inputs
+    inAmount: [
+      inputs.inputAmounts[0].toString(),
+      inputs.inputAmounts[1].toString(),
+    ],
 
-    inputOwner0: reduceToField(inputs.inputOwners[0].toBytes()).toString(),
-    inputOwner1: reduceToField(inputs.inputOwners[1].toBytes()).toString(),
+    inPubkey: [
+      reduceToField(inputs.inputOwners[0].toBytes()).toString(),
+      reduceToField(inputs.inputOwners[1].toBytes()).toString(),
+    ],
 
-    inputBlinding0: bytesToBigIntBE(inputs.inputBlindings[0]).toString(),
-    inputBlinding1: bytesToBigIntBE(inputs.inputBlindings[1]).toString(),
+    inBlinding: [
+      bytesToBigIntBE(inputs.inputBlindings[0]).toString(),
+      bytesToBigIntBE(inputs.inputBlindings[1]).toString(),
+    ],
 
-    inputMintAddress0: reduceToField(
-      inputs.inputMintAddresses[0].toBytes()
-    ).toString(),
-    inputMintAddress1: reduceToField(
-      inputs.inputMintAddresses[1].toBytes()
-    ).toString(),
+    inPrivateKey: [
+      bytesToBigIntBE(inputs.inputPrivateKeys[0]).toString(),
+      bytesToBigIntBE(inputs.inputPrivateKeys[1]).toString(),
+    ],
 
-    // Merkle paths - flatten to individual elements
-    inputPathElements0: inputs.inputMerklePaths[0].pathElements.map((e) =>
-      e.toString()
-    ),
-    inputPathElements1: inputs.inputMerklePaths[1].pathElements.map((e) =>
-      e.toString()
-    ),
-    inputPathIndices0: inputs.inputMerklePaths[0].pathIndices,
-    inputPathIndices1: inputs.inputMerklePaths[1].pathIndices,
+    // Merkle paths
+    inPathElements: [
+      inputs.inputMerklePaths[0].pathElements.map((e) => e.toString()),
+      inputs.inputMerklePaths[1].pathElements.map((e) => e.toString()),
+    ],
+    inPathIndex: [
+      packPathIndices(inputs.inputMerklePaths[0].pathIndices).toString(),
+      packPathIndices(inputs.inputMerklePaths[1].pathIndices).toString(),
+    ],
 
-    outputAmount0: inputs.outputAmounts[0].toString(),
-    outputAmount1: inputs.outputAmounts[1].toString(),
+    outAmount: [
+      inputs.outputAmounts[0].toString(),
+      inputs.outputAmounts[1].toString(),
+    ],
 
-    outputOwner0: reduceToField(inputs.outputOwners[0].toBytes()).toString(),
-    outputOwner1: reduceToField(inputs.outputOwners[1].toBytes()).toString(),
+    outPubkey: [
+      reduceToField(inputs.outputOwners[0].toBytes()).toString(),
+      reduceToField(inputs.outputOwners[1].toBytes()).toString(),
+    ],
 
-    outputBlinding0: bytesToBigIntBE(inputs.outputBlindings[0]).toString(),
-    outputBlinding1: bytesToBigIntBE(inputs.outputBlindings[1]).toString(),
-
-    outputMintAddress0: reduceToField(
-      inputs.outputMintAddresses[0].toBytes()
-    ).toString(),
-    outputMintAddress1: reduceToField(
-      inputs.outputMintAddresses[1].toBytes()
-    ).toString(),
+    outBlinding: [
+      bytesToBigIntBE(inputs.outputBlindings[0]).toString(),
+      bytesToBigIntBE(inputs.outputBlindings[1]).toString(),
+    ],
   };
 
   console.log(
@@ -538,9 +600,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     // For deposit: use dummy inputs
-    const dummyInput0 = createDummyNote();
-    const dummyInput1 = createDummyNote();
-    const dummyOutput = createDummyNote();
+    const dummyInput0 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
+    const dummyInput1 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
+    const dummyOutput = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
 
     const publicAmount = new BN(-depositAmount.toString());
 
@@ -557,6 +619,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     ).merkleTreeAccount.fetch(noteTree);
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
+    console.log(
+      "On-chain root:",
+      BigInt(reduceToField(onchainRoot)).toString()
+    );
+    console.log(
+      "Off-chain root:",
+      bytesToBigIntBE(offchainTree.getRoot()).toString()
+    );
+
     // Generate real proof
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -568,24 +639,17 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
       // Private inputs (dummy for deposit)
       inputAmounts: [0n, 0n],
-      inputOwners: [wallet.publicKey, wallet.publicKey],
-      inputBlindings: [randomBytes32(), randomBytes32()],
-      inputMintAddresses: [SOL_MINT, SOL_MINT],
+      inputOwners: [PublicKey.default, PublicKey.default],
+      inputBlindings: [dummyInput0.blinding, dummyInput1.blinding],
+      inputPrivateKeys: [dummyInput0.privateKey, dummyInput1.privateKey],
       inputMerklePaths: [
-        {
-          pathElements: new Array(16).fill(0n),
-          pathIndices: new Array(16).fill(0),
-        },
-        {
-          pathElements: new Array(16).fill(0n),
-          pathIndices: new Array(16).fill(0),
-        },
+        offchainTree.getMerkleProof(0),
+        offchainTree.getMerkleProof(0),
       ],
 
       outputAmounts: [depositAmount, 0n],
-      outputOwners: [wallet.publicKey, wallet.publicKey],
-      outputBlindings: [blinding, randomBytes32()],
-      outputMintAddresses: [SOL_MINT, SOL_MINT],
+      outputOwners: [wallet.publicKey, PublicKey.default],
+      outputBlindings: [blinding, dummyOutput.blinding],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
@@ -687,9 +751,17 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const toRecipient = depositNote.amount - fee;
 
     // Create dummy for second input
-    const dummyInput1 = createDummyNote();
-    const dummyOutput0 = createDummyNote();
-    const dummyOutput1 = createDummyNote();
+    const dummyInput1 = createDummyInput(poseidon, PublicKey.default, SOL_MINT);
+    const dummyOutput0 = createDummyInput(
+      poseidon,
+      PublicKey.default,
+      SOL_MINT
+    );
+    const dummyOutput1 = createDummyInput(
+      poseidon,
+      PublicKey.default,
+      SOL_MINT
+    );
 
     const publicAmount = new BN(withdrawAmount.toString());
 
@@ -717,9 +789,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
       // Private inputs
       inputAmounts: [depositNote.amount, 0n],
-      inputOwners: [wallet.publicKey, wallet.publicKey],
-      inputBlindings: [depositNote.blinding, randomBytes32()],
-      inputMintAddresses: [SOL_MINT, SOL_MINT],
+      inputOwners: [wallet.publicKey, PublicKey.default],
+      inputBlindings: [depositNote.blinding, dummyInput1.blinding],
+      inputPrivateKeys: [depositNote.privateKey, dummyInput1.privateKey],
       inputMerklePaths: [
         depositNote.merklePath,
         {
@@ -729,9 +801,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       ],
 
       outputAmounts: [0n, 0n],
-      outputOwners: [wallet.publicKey, wallet.publicKey],
-      outputBlindings: [randomBytes32(), randomBytes32()],
-      outputMintAddresses: [SOL_MINT, SOL_MINT],
+      outputOwners: [PublicKey.default, PublicKey.default],
+      outputBlindings: [dummyOutput0.blinding, dummyOutput1.blinding],
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
