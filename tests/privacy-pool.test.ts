@@ -4,21 +4,33 @@
 //
 
 import "mocha";
-import anchor from "@coral-xyz/anchor";
-const { BN } = anchor;
+import {
+  AnchorProvider,
+  BN,
+  setProvider,
+  Wallet,
+  workspace,
+} from "@coral-xyz/anchor";
 import {
   PublicKey,
   Keypair,
   SystemProgram,
   LAMPORTS_PER_SOL,
   SendTransactionError,
+  Connection,
+  ComputeBudgetProgram,
+  Transaction,
 } from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  createMint,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  getAssociatedTokenAddress,
+} from "@solana/spl-token";
 import fs from "fs";
 import os from "os";
 import path from "path";
-
-// Use process.cwd() for the directory path
-const __dirname = process.cwd();
 import { buildPoseidon } from "circomlibjs";
 import { groth16 } from "snarkjs";
 import { getPoolPdas } from "@zkprivacysol/sdk-core";
@@ -77,15 +89,15 @@ class InMemoryNoteStorage {
 // =============================================================================
 
 const WASM_PATH = path.join(
-  __dirname,
+  process.cwd(),
   "zk/circuits/transaction/transaction_js/transaction.wasm"
 );
 const ZKEY_PATH = path.join(
-  __dirname,
+  process.cwd(),
   "zk/circuits/transaction/transaction_final.zkey"
 );
 const VK_PATH = path.join(
-  __dirname,
+  process.cwd(),
   "zk/circuits/transaction/transaction_verification_key.json"
 );
 
@@ -93,9 +105,9 @@ const VK_PATH = path.join(
 // Helper Functions
 // =============================================================================
 
-function makeProvider(): anchor.AnchorProvider {
+function makeProvider(): AnchorProvider {
   const url = process.env.ANCHOR_PROVIDER_URL ?? "http://127.0.0.1:8899";
-  const connection = new anchor.web3.Connection(url, "confirmed");
+  const connection = new Connection(url, "confirmed");
 
   const keypairPath =
     process.env.ANCHOR_WALLET ??
@@ -103,15 +115,15 @@ function makeProvider(): anchor.AnchorProvider {
 
   const secret = JSON.parse(fs.readFileSync(keypairPath, "utf8"));
   const kp = Keypair.fromSecretKey(Uint8Array.from(secret));
-  const wallet = new anchor.Wallet(kp);
+  const wallet = new Wallet(kp);
 
-  return new anchor.AnchorProvider(connection, wallet, {
+  return new AnchorProvider(connection, wallet, {
     commitment: "confirmed",
   });
 }
 
 async function airdropAndConfirm(
-  provider: anchor.AnchorProvider,
+  provider: AnchorProvider,
   pubkey: PublicKey,
   amount: number
 ) {
@@ -124,7 +136,35 @@ async function airdropAndConfirm(
 }
 
 function randomBytes32(): Uint8Array {
-  return anchor.web3.Keypair.generate().publicKey.toBytes();
+  return Keypair.generate().publicKey.toBytes();
+}
+
+// Helper: Create and fund SPL token account
+async function createAndFundTokenAccount(
+  provider: AnchorProvider,
+  mint: PublicKey,
+  owner: PublicKey,
+  amount: number
+): Promise<PublicKey> {
+  const tokenAccount = await getOrCreateAssociatedTokenAccount(
+    provider.connection,
+    (provider.wallet as Wallet).payer,
+    mint,
+    owner
+  );
+
+  if (amount > 0) {
+    await mintTo(
+      provider.connection,
+      (provider.wallet as Wallet).payer,
+      mint,
+      tokenAccount.address,
+      (provider.wallet as Wallet).payer,
+      amount
+    );
+  }
+
+  return tokenAccount.address;
 }
 
 function bytesToBigIntBE(bytes: Uint8Array): bigint {
@@ -153,8 +193,8 @@ function computeExtDataHash(
   extData: {
     recipient: PublicKey;
     relayer: PublicKey;
-    fee: anchor.BN;
-    refund: anchor.BN;
+    fee: BN;
+    refund: BN;
   }
 ): Uint8Array {
   const recipientField = poseidon.F.e(
@@ -550,10 +590,10 @@ async function generateTransactionProof(inputs: {
 
 describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   const provider = makeProvider();
-  anchor.setProvider(provider);
+  setProvider(provider);
 
-  const wallet = provider.wallet as anchor.Wallet;
-  const program: any = anchor.workspace.PrivacyPool as any;
+  const wallet = provider.wallet as Wallet;
+  const program: any = workspace.PrivacyPool as any;
 
   let poseidon: any;
   let config: PublicKey;
@@ -844,22 +884,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           nullifierMarker1,
           relayer: sender.publicKey,
           recipient: sender.publicKey,
+          vaultTokenAccount: sender.publicKey, // Placeholder for SOL
+          userTokenAccount: sender.publicKey, // Placeholder for SOL
+          recipientTokenAccount: sender.publicKey, // Placeholder for SOL
+          relayerTokenAccount: sender.publicKey, // Placeholder for SOL
+          tokenProgram: sender.publicKey, // Placeholder for SOL
           systemProgram: SystemProgram.programId,
         })
         .signers([sender])
         .transaction();
 
       // Add compute budget instructions
-      const modifyComputeUnits =
-        anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
-          units: 1_400_000,
-        });
-      const addPriorityFee =
-        anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 1,
-        });
+      const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 1_400_000,
+      });
+      const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 1,
+      });
 
-      const transaction = new anchor.web3.Transaction();
+      const transaction = new Transaction();
       transaction.add(modifyComputeUnits);
       transaction.add(addPriorityFee);
       transaction.add(tx);
@@ -1195,22 +1238,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           nullifierMarker1,
           relayer: relayer.publicKey,
           recipient: recipient.publicKey,
+          vaultTokenAccount: relayer.publicKey, // Placeholder for SOL
+          userTokenAccount: relayer.publicKey, // Placeholder for SOL
+          recipientTokenAccount: relayer.publicKey, // Placeholder for SOL
+          relayerTokenAccount: relayer.publicKey, // Placeholder for SOL
+          tokenProgram: relayer.publicKey, // Placeholder for SOL
           systemProgram: SystemProgram.programId,
         })
         .signers([relayer])
         .transaction();
 
       // Add compute budget instructions
-      const modifyComputeUnits =
-        anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
-          units: 1_400_000,
-        });
-      const addPriorityFee =
-        anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
-          microLamports: 1,
-        });
+      const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 1_400_000,
+      });
+      const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 1,
+      });
 
-      const transaction = new anchor.web3.Transaction();
+      const transaction = new Transaction();
       transaction.add(modifyComputeUnits);
       transaction.add(addPriorityFee);
       transaction.add(tx);
@@ -1475,23 +1521,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         nullifierMarker1,
         relayer: alice.publicKey,
         recipient: alice.publicKey,
+        vaultTokenAccount: alice.publicKey, // Placeholder for SOL
+        userTokenAccount: alice.publicKey, // Placeholder for SOL
+        recipientTokenAccount: alice.publicKey, // Placeholder for SOL
+        relayerTokenAccount: alice.publicKey, // Placeholder for SOL
+        tokenProgram: alice.publicKey, // Placeholder for SOL
         systemProgram: SystemProgram.programId,
       })
       .signers([alice])
       .transaction();
 
     // Add compute budget instructions
-    const modifyComputeUnits =
-      anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
-        units: 1_400_000,
-      });
-    const addPriorityFee = anchor.web3.ComputeBudgetProgram.setComputeUnitPrice(
-      {
-        microLamports: 1,
-      }
-    );
+    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
 
-    const depositTransaction = new anchor.web3.Transaction();
+    const depositTransaction = new Transaction();
     depositTransaction.add(modifyComputeUnits);
     depositTransaction.add(addPriorityFee);
     depositTransaction.add(depositTx);
@@ -1647,22 +1695,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         nullifierMarker1: transferDummyNullifierMarker,
         relayer: alice.publicKey,
         recipient: alice.publicKey,
+        vaultTokenAccount: alice.publicKey, // Placeholder for SOL
+        userTokenAccount: alice.publicKey, // Placeholder for SOL
+        recipientTokenAccount: alice.publicKey, // Placeholder for SOL
+        relayerTokenAccount: alice.publicKey, // Placeholder for SOL
+        tokenProgram: alice.publicKey, // Placeholder for SOL
         systemProgram: SystemProgram.programId,
       })
       .signers([alice])
       .transaction();
 
     // Add compute budget instructions
-    const transferComputeUnits =
-      anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
-        units: 1_400_000,
-      });
-    const transferPriorityFee =
-      anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: 1,
-      });
+    const transferComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const transferPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
 
-    const transferTransaction = new anchor.web3.Transaction();
+    const transferTransaction = new Transaction();
     transferTransaction.add(transferComputeUnits);
     transferTransaction.add(transferPriorityFee);
     transferTransaction.add(transferTx);
@@ -2023,23 +2074,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         nullifierMarker1: bobDummyNullifierMarker,
         relayer: bob.publicKey, // Bob is the relayer
         recipient: bobRecipient.publicKey,
+        vaultTokenAccount: bob.publicKey, // Placeholder for SOL
+        userTokenAccount: bob.publicKey, // Placeholder for SOL
+        recipientTokenAccount: bob.publicKey, // Placeholder for SOL
+        relayerTokenAccount: bob.publicKey, // Placeholder for SOL
+        tokenProgram: bob.publicKey, // Placeholder for SOL
         systemProgram: SystemProgram.programId,
       })
       .signers([bob]) // BOB SIGNS, NOT ALICE!
       .transaction();
 
     // Add compute budget instructions
-    const bobComputeUnits =
-      anchor.web3.ComputeBudgetProgram.setComputeUnitLimit({
-        units: 1_400_000,
-      });
-    const bobPriorityFee = anchor.web3.ComputeBudgetProgram.setComputeUnitPrice(
-      {
-        microLamports: 1,
-      }
-    );
+    const bobComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const bobPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
 
-    const bobTransaction = new anchor.web3.Transaction();
+    const bobTransaction = new Transaction();
     bobTransaction.add(bobComputeUnits);
     bobTransaction.add(bobPriorityFee);
     bobTransaction.add(bobWithdrawTx);
