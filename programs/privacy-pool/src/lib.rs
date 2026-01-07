@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{self, TokenAccount};
 use light_hasher::Poseidon;
 
 pub mod groth16;
@@ -397,6 +398,30 @@ pub struct Transact<'info> {
     #[account(mut)]
     pub recipient: SystemAccount<'info>,
 
+    /// Vault's token account (ATA for mint_address)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub vault_token_account: UncheckedAccount<'info>,
+
+    /// User's token account (for deposits)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub user_token_account: UncheckedAccount<'info>,
+
+    /// Recipient's token account (for withdrawals)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub recipient_token_account: UncheckedAccount<'info>,
+
+    /// Relayer's token account (for fees)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub relayer_token_account: UncheckedAccount<'info>,
+
+    /// SPL Token program
+    /// CHECK: Validated in instruction logic for token operations
+    pub token_program: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
 
@@ -506,6 +531,20 @@ pub struct TransferHint {
     pub old_nullifier: [u8; 32],
     pub new_commitment: [u8; 32],
     pub denom_index: u8,
+}
+
+// ---- Helper Functions ----
+
+/// Check if mint is a token (not native SOL)
+fn is_token_mint(mint: &Pubkey) -> bool {
+    mint != &Pubkey::default()
+}
+
+/// Safely deserialize a token account
+fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
+    let data = account.try_borrow_data()?;
+    TokenAccount::try_deserialize(&mut &data[..])
+        .map_err(|_| error!(PrivacyError::MissingTokenAccount))
 }
 
 // ---- Program ----
@@ -636,6 +675,68 @@ pub mod privacy_pool {
             PrivacyError::InvalidMintAddress
         );
 
+        // 4a. Validate token accounts if using SPL tokens
+        if is_token_mint(&mint_address) {
+            // Verify token program is provided
+            require_keys_eq!(
+                ctx.accounts.token_program.key(),
+                token::ID,
+                PrivacyError::MissingTokenProgram
+            );
+
+            // Deserialize and validate vault token account
+            let vault_token = deserialize_token_account(
+                &ctx.accounts.vault_token_account.to_account_info()
+            )?;
+
+            // Verify vault token account mint matches config
+            require_keys_eq!(
+                vault_token.mint,
+                cfg.mint_address,
+                PrivacyError::InvalidMintAddress
+            );
+
+            // Verify vault is the authority
+            require_keys_eq!(
+                vault_token.owner,
+                ctx.accounts.vault.key(),
+                PrivacyError::InvalidTokenAuthority
+            );
+
+            // For deposits (public_amount > 0), user token account required
+            if public_amount > 0 {
+                let user_token = deserialize_token_account(
+                    &ctx.accounts.user_token_account.to_account_info()
+                )?;
+                require_keys_eq!(
+                    user_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+            }
+
+            // For withdrawals (public_amount < 0), recipient/relayer token accounts required
+            if public_amount < 0 {
+                let recipient_token = deserialize_token_account(
+                    &ctx.accounts.recipient_token_account.to_account_info()
+                )?;
+                let relayer_token = deserialize_token_account(
+                    &ctx.accounts.relayer_token_account.to_account_info()
+                )?;
+
+                require_keys_eq!(
+                    recipient_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+                require_keys_eq!(
+                    relayer_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+            }
+        }
+
         // 5. Build public inputs for ZK proof
         let public_inputs = TransactionPublicInputs {
             root,
@@ -706,6 +807,11 @@ pub mod privacy_pool {
             &ctx.accounts.system_program,
             public_amount,
             &ext_data,
+            &ctx.accounts.vault_token_account,
+            &ctx.accounts.user_token_account,
+            &ctx.accounts.recipient_token_account,
+            &ctx.accounts.relayer_token_account,
+            &ctx.accounts.token_program,
         )?;
 
         Ok(())
@@ -742,11 +848,11 @@ fn mark_nullifier_spent(
     Ok(())
 }
 
-/// Handle lamport flows based on public_amount
+/// Handle lamport/token flows based on public_amount
 ///
 /// public_amount < 0: Deposit (user -> vault)
 /// public_amount > 0: Withdrawal (vault -> recipient + relayer)
-/// public_amount = 0: Private transfer (no SOL movement)
+/// public_amount = 0: Private transfer (no SOL/token movement)
 fn handle_public_amount<'info>(
     config: &mut PrivacyConfig,
     vault: &Account<'info, Vault>,
@@ -755,6 +861,11 @@ fn handle_public_amount<'info>(
     system_program: &Program<'info, System>,
     public_amount: i64,
     ext_data: &ExtData,
+    vault_token_account: &UncheckedAccount<'info>,
+    user_token_account: &UncheckedAccount<'info>,
+    recipient_token_account: &UncheckedAccount<'info>,
+    relayer_token_account: &UncheckedAccount<'info>,
+    token_program: &UncheckedAccount<'info>,
 ) -> Result<()> {
     // Validate ext_data values are non-negative
     require!(
@@ -770,8 +881,11 @@ fn handle_public_amount<'info>(
     // - Positive publicAmount = DEPOSIT (adding to pool: 0 + amount = outputs)
     // - Negative publicAmount = WITHDRAWAL (removing from pool: inputs + negative = 0)
 
+    // Determine if using SPL tokens or native SOL
+    let is_token = is_token_mint(&config.mint_address);
+
     if public_amount > 0 {
-        // DEPOSIT: user deposits public_amount lamports
+        // DEPOSIT: user deposits public_amount lamports/tokens
         let deposit_amount = public_amount as u64;
 
         // For deposits, fee and refund should be zero
@@ -786,17 +900,32 @@ fn handle_public_amount<'info>(
             PrivacyError::DepositLimitExceeded
         );
 
-        // Use system_program::transfer for deposits (safer, with built-in validations)
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: relayer.to_account_info(),
-                    to: vault.to_account_info(),
-                },
-            ),
-            deposit_amount,
-        )?;
+        if is_token {
+            // SPL Token deposit: user -> vault ATA
+            token::transfer(
+                CpiContext::new(
+                    token_program.to_account_info(),
+                    token::Transfer {
+                        from: user_token_account.to_account_info(),
+                        to: vault_token_account.to_account_info(),
+                        authority: relayer.to_account_info(),
+                    },
+                ),
+                deposit_amount,
+            )?;
+        } else {
+            // Native SOL deposit
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: relayer.to_account_info(),
+                        to: vault.to_account_info(),
+                    },
+                ),
+                deposit_amount,
+            )?;
+        }
 
         // Update TVL
         config.total_tvl = config
@@ -838,39 +967,87 @@ fn handle_public_amount<'info>(
             / 10_000;
         require!(fee <= max_fee, PrivacyError::ExcessiveFee);
 
-        // Ensure vault maintains rent exemption after withdrawal
-        let vault_ai = vault.to_account_info();
-        let rent = Rent::get()?;
-        let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
+        if is_token {
+            // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
+            // Deserialize vault token account to check balance
+            let vault_token_data = deserialize_token_account(
+                &vault_token_account.to_account_info()
+            )?;
 
-        let total_required = withdrawal_amount
-            .checked_add(rent_exempt_minimum)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+            // Check vault has sufficient tokens
+            require!(
+                vault_token_data.amount >= withdrawal_amount,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
 
-        require!(
-            vault_ai.lamports() >= total_required,
-            PrivacyError::InsufficientFundsForWithdrawal
-        );
+            // Transfer to recipient
+            token::transfer(
+                CpiContext::new_with_signer(
+                    token_program.to_account_info(),
+                    token::Transfer {
+                        from: vault_token_account.to_account_info(),
+                        to: recipient_token_account.to_account_info(),
+                        authority: vault.to_account_info(),
+                    },
+                    &[&[b"privacy_vault_v3", &[vault.bump]]],
+                ),
+                to_recipient,
+            )?;
 
-        // Transfer lamports using manual manipulation (vault is a PDA we control)
-        let recipient_ai = recipient.to_account_info();
-        let relayer_ai = relayer.to_account_info();
+            // Transfer fee + refund to relayer
+            let to_relayer = fee
+                .checked_add(refund)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        **vault_ai.try_borrow_mut_lamports()? = vault_ai
-            .lamports()
-            .checked_sub(withdrawal_amount)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+            if to_relayer > 0 {
+                token::transfer(
+                    CpiContext::new_with_signer(
+                        token_program.to_account_info(),
+                        token::Transfer {
+                            from: vault_token_account.to_account_info(),
+                            to: relayer_token_account.to_account_info(),
+                            authority: vault.to_account_info(),
+                        },
+                        &[&[b"privacy_vault_v3", &[vault.bump]]],
+                    ),
+                    to_relayer,
+                )?;
+            }
+        } else {
+            // Native SOL withdrawal (existing logic)
+            let vault_ai = vault.to_account_info();
+            let rent = Rent::get()?;
+            let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
 
-        **recipient_ai.try_borrow_mut_lamports()? = recipient_ai
-            .lamports()
-            .checked_add(to_recipient)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+            let total_required = withdrawal_amount
+                .checked_add(rent_exempt_minimum)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        **relayer_ai.try_borrow_mut_lamports()? = relayer_ai
-            .lamports()
-            .checked_add(fee)
-            .and_then(|x| x.checked_add(refund))
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+            require!(
+                vault_ai.lamports() >= total_required,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
+
+            // Transfer lamports using manual manipulation (vault is a PDA we control)
+            let recipient_ai = recipient.to_account_info();
+            let relayer_ai = relayer.to_account_info();
+
+            **vault_ai.try_borrow_mut_lamports()? = vault_ai
+                .lamports()
+                .checked_sub(withdrawal_amount)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            **recipient_ai.try_borrow_mut_lamports()? = recipient_ai
+                .lamports()
+                .checked_add(to_recipient)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            **relayer_ai.try_borrow_mut_lamports()? = relayer_ai
+                .lamports()
+                .checked_add(fee)
+                .and_then(|x| x.checked_add(refund))
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+        }
 
         // Update TVL
         config.total_tvl = config
@@ -878,7 +1055,7 @@ fn handle_public_amount<'info>(
             .checked_sub(withdrawal_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
     }
-    // else: public_amount == 0, no lamport movement (pure private transfer)
+    // else: public_amount == 0, no lamport/token movement (pure private transfer)
 
     Ok(())
 }
@@ -960,4 +1137,10 @@ pub enum PrivacyError {
     DuplicateNullifiers,
     #[msg("Duplicate output commitments detected")]
     DuplicateCommitments,
+    #[msg("Token account required for SPL token operations")]
+    MissingTokenAccount,
+    #[msg("Token program required for SPL token operations")]
+    MissingTokenProgram,
+    #[msg("Invalid token account authority")]
+    InvalidTokenAuthority,
 }
