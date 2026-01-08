@@ -8,13 +8,13 @@ skip-lint = false
 privacy_pool = ["zk-verify"]
 
 [programs.localnet]
-privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
+privacy_pool = "8aeAAnLc9TZE5K5Pye9sS7MxxvgeUa5uWYP3JpM8sgHM"
 
 [programs.devnet]
-privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
+privacy_pool = "8aeAAnLc9TZE5K5Pye9sS7MxxvgeUa5uWYP3JpM8sgHM"
 
 [programs.mainnet]
-privacy_pool = "8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP"
+privacy_pool = "8aeAAnLc9TZE5K5Pye9sS7MxxvgeUa5uWYP3JpM8sgHM"
 
 [registry]
 url = "https://api.apr.dev"

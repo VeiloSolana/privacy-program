@@ -9,7 +9,7 @@ pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
-declare_id!("8o61scVoCHLQij6s9E4EXzbXJg58Bku9C16frkVociwP");
+declare_id!("8aeAAnLc9TZE5K5Pye9sS7MxxvgeUa5uWYP3JpM8sgHM");
 
 // ---- Constants ----
 
@@ -654,7 +654,7 @@ pub mod privacy_pool {
 
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
         // For deposits (public_amount < 0), anyone can deposit without being a relayer
-        if public_amount >= 0 {
+        if public_amount <= 0 {
             require!(
                 cfg.is_relayer(&ctx.accounts.relayer.key()),
                 PrivacyError::RelayerNotAllowed
@@ -685,9 +685,8 @@ pub mod privacy_pool {
             );
 
             // Deserialize and validate vault token account
-            let vault_token = deserialize_token_account(
-                &ctx.accounts.vault_token_account.to_account_info()
-            )?;
+            let vault_token =
+                deserialize_token_account(&ctx.accounts.vault_token_account.to_account_info())?;
 
             // Verify vault token account mint matches config
             require_keys_eq!(
@@ -705,9 +704,8 @@ pub mod privacy_pool {
 
             // For deposits (public_amount > 0), user token account required
             if public_amount > 0 {
-                let user_token = deserialize_token_account(
-                    &ctx.accounts.user_token_account.to_account_info()
-                )?;
+                let user_token =
+                    deserialize_token_account(&ctx.accounts.user_token_account.to_account_info())?;
                 require_keys_eq!(
                     user_token.mint,
                     cfg.mint_address,
@@ -718,10 +716,10 @@ pub mod privacy_pool {
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
             if public_amount < 0 {
                 let recipient_token = deserialize_token_account(
-                    &ctx.accounts.recipient_token_account.to_account_info()
+                    &ctx.accounts.recipient_token_account.to_account_info(),
                 )?;
                 let relayer_token = deserialize_token_account(
-                    &ctx.accounts.relayer_token_account.to_account_info()
+                    &ctx.accounts.relayer_token_account.to_account_info(),
                 )?;
 
                 require_keys_eq!(
@@ -970,9 +968,8 @@ fn handle_public_amount<'info>(
         if is_token {
             // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
             // Deserialize vault token account to check balance
-            let vault_token_data = deserialize_token_account(
-                &vault_token_account.to_account_info()
-            )?;
+            let vault_token_data =
+                deserialize_token_account(&vault_token_account.to_account_info())?;
 
             // Check vault has sufficient tokens
             require!(
