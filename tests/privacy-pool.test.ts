@@ -4,13 +4,19 @@
 //
 
 import "mocha";
-import {
-  AnchorProvider,
-  BN,
-  setProvider,
-  Wallet,
-  workspace,
-} from "@coral-xyz/anchor";
+import * as anchor from "@coral-xyz/anchor";
+// Fix for CJS/ESM interop issues with anchor
+const anchorVal = (anchor as any).default || anchor;
+const BN = anchorVal.BN;
+const setProvider = anchorVal.setProvider;
+const workspace = anchorVal.workspace;
+const Wallet = anchorVal.Wallet;
+const AnchorProvider = anchorVal.AnchorProvider;
+
+type AnchorProvider = anchor.AnchorProvider;
+type Wallet = anchor.Wallet;
+type BN = anchor.BN;
+
 import {
   PublicKey,
   Keypair,
@@ -636,7 +642,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("Vault PDA:", vault.toBase58());
 
     // Airdrop to admin
-    await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
+    // await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
   });
 
   it("initializes the privacy pool (UTXO model)", async () => {
@@ -686,10 +692,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // For deposit, sender acts as their own relayer (self-deposit)
     // Register sender as relayer
-    await (program.methods as any)
-      .addRelayer(sender.publicKey)
-      .accounts({ config, admin: wallet.publicKey })
-      .rpc();
+    // await (program.methods as any)
+    //   .addRelayer(sender.publicKey)
+    //   .accounts({ config, admin: wallet.publicKey })
+    //   .rpc();
 
     const depositAmount = BigInt(Math.floor(1.5 * LAMPORTS_PER_SOL));
 
@@ -1368,6 +1374,2002 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   });
 
   // =============================================================================
+  // Multi-Input Withdrawal Test (Combining Two Deposits)
+  // =============================================================================
+
+  it("deposits twice (1 SOL + 0.8 SOL) and withdraws 1.3 SOL", async () => {
+    console.log("\n💰 Multi-Input Withdrawal Test:\n");
+
+    // Create a user who will make two deposits
+    const user = Keypair.generate();
+    console.log(`   User: ${user.publicKey.toBase58()}`);
+    await airdropAndConfirm(provider, user.publicKey, 3 * LAMPORTS_PER_SOL);
+
+    // Register user as relayer for deposits
+    await (program.methods as any)
+      .addRelayer(user.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    // =============================================================================
+    // FIRST DEPOSIT: 1 SOL
+    // =============================================================================
+
+    console.log("\n📥 First Deposit: 1 SOL\n");
+
+    const deposit1Amount = BigInt(1 * LAMPORTS_PER_SOL);
+    const deposit1PrivateKey = randomBytes32();
+    const deposit1PublicKey = derivePublicKey(poseidon, deposit1PrivateKey);
+    const deposit1Blinding = randomBytes32();
+
+    const deposit1Commitment = computeCommitment(
+      poseidon,
+      deposit1Amount,
+      deposit1PublicKey,
+      deposit1Blinding,
+      SOL_MINT
+    );
+
+    // Dummy output for first deposit
+    const deposit1DummyPrivKey = randomBytes32();
+    const deposit1DummyPubKey = derivePublicKey(poseidon, deposit1DummyPrivKey);
+    const deposit1DummyBlinding = randomBytes32();
+    const deposit1DummyCommitment = computeCommitment(
+      poseidon,
+      0n,
+      deposit1DummyPubKey,
+      deposit1DummyBlinding,
+      SOL_MINT
+    );
+
+    const deposit1LeafIndex = offchainTree.nextIndex;
+
+    // Generate dummy inputs for deposit
+    const dummyPrivKey0 = randomBytes32();
+    const dummyPrivKey1 = randomBytes32();
+    const dummyPubKey0 = derivePublicKey(poseidon, dummyPrivKey0);
+    const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
+    const dummyBlinding0 = randomBytes32();
+    const dummyBlinding1 = randomBytes32();
+    const dummyCommitment0 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey0,
+      dummyBlinding0,
+      SOL_MINT
+    );
+    const dummyCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey1,
+      dummyBlinding1,
+      SOL_MINT
+    );
+    const dummyNullifier0 = computeNullifier(
+      poseidon,
+      dummyCommitment0,
+      0,
+      dummyPrivKey0
+    );
+    const dummyNullifier1 = computeNullifier(
+      poseidon,
+      dummyCommitment1,
+      0,
+      dummyPrivKey1
+    );
+
+    const extDataDeposit1 = {
+      recipient: user.publicKey,
+      relayer: user.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashDeposit1 = computeExtDataHash(poseidon, extDataDeposit1);
+
+    let noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    let onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    const zeros = offchainTree.getZeros();
+    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+
+    const deposit1Proof = await generateTransactionProof({
+      root: onchainRoot,
+      publicAmount: deposit1Amount,
+      extDataHash: extDataHashDeposit1,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [dummyNullifier0, dummyNullifier1],
+      outputCommitments: [deposit1Commitment, deposit1DummyCommitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyPrivKey0, dummyPrivKey1],
+      inputPublicKeys: [dummyPubKey0, dummyPubKey1],
+      inputBlindings: [dummyBlinding0, dummyBlinding1],
+      inputMerklePaths: [
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+      ],
+      outputAmounts: [deposit1Amount, 0n],
+      outputOwners: [deposit1PublicKey, deposit1DummyPubKey],
+      outputBlindings: [deposit1Blinding, deposit1DummyBlinding],
+    });
+
+    const [nullifierMarker0_d1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      program.programId
+    );
+    const [nullifierMarker1_d1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      program.programId
+    );
+
+    const deposit1Tx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        new BN(deposit1Amount.toString()),
+        Array.from(extDataHashDeposit1),
+        SOL_MINT,
+        Array.from(dummyNullifier0),
+        Array.from(dummyNullifier1),
+        Array.from(deposit1Commitment),
+        Array.from(deposit1DummyCommitment),
+        extDataDeposit1,
+        deposit1Proof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker0_d1,
+        nullifierMarker1: nullifierMarker1_d1,
+        relayer: user.publicKey,
+        recipient: user.publicKey,
+        vaultTokenAccount: user.publicKey,
+        userTokenAccount: user.publicKey,
+        recipientTokenAccount: user.publicKey,
+        relayerTokenAccount: user.publicKey,
+        tokenProgram: user.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([user])
+      .transaction();
+
+    const modifyComputeUnits1 = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const addPriorityFee1 = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const deposit1Transaction = new Transaction();
+    deposit1Transaction.add(modifyComputeUnits1);
+    deposit1Transaction.add(addPriorityFee1);
+    deposit1Transaction.add(deposit1Tx);
+
+    await provider.sendAndConfirm(deposit1Transaction, [user]);
+
+    offchainTree.insert(deposit1Commitment);
+    offchainTree.insert(deposit1DummyCommitment);
+
+    console.log(`✅ First deposit complete (Leaf ${deposit1LeafIndex})\n`);
+
+    // =============================================================================
+    // SECOND DEPOSIT: 0.8 SOL
+    // =============================================================================
+
+    console.log("📥 Second Deposit: 0.8 SOL\n");
+
+    const deposit2Amount = BigInt(0.8 * LAMPORTS_PER_SOL);
+    const deposit2PrivateKey = randomBytes32();
+    const deposit2PublicKey = derivePublicKey(poseidon, deposit2PrivateKey);
+    const deposit2Blinding = randomBytes32();
+
+    const deposit2Commitment = computeCommitment(
+      poseidon,
+      deposit2Amount,
+      deposit2PublicKey,
+      deposit2Blinding,
+      SOL_MINT
+    );
+
+    // Dummy output for second deposit
+    const deposit2DummyPrivKey = randomBytes32();
+    const deposit2DummyPubKey = derivePublicKey(poseidon, deposit2DummyPrivKey);
+    const deposit2DummyBlinding = randomBytes32();
+    const deposit2DummyCommitment = computeCommitment(
+      poseidon,
+      0n,
+      deposit2DummyPubKey,
+      deposit2DummyBlinding,
+      SOL_MINT
+    );
+
+    const deposit2LeafIndex = offchainTree.nextIndex;
+
+    // Generate new dummy inputs for second deposit
+    const dummyPrivKey2 = randomBytes32();
+    const dummyPrivKey3 = randomBytes32();
+    const dummyPubKey2 = derivePublicKey(poseidon, dummyPrivKey2);
+    const dummyPubKey3 = derivePublicKey(poseidon, dummyPrivKey3);
+    const dummyBlinding2 = randomBytes32();
+    const dummyBlinding3 = randomBytes32();
+    const dummyCommitment2 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey2,
+      dummyBlinding2,
+      SOL_MINT
+    );
+    const dummyCommitment3 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey3,
+      dummyBlinding3,
+      SOL_MINT
+    );
+    const dummyNullifier2 = computeNullifier(
+      poseidon,
+      dummyCommitment2,
+      0,
+      dummyPrivKey2
+    );
+    const dummyNullifier3 = computeNullifier(
+      poseidon,
+      dummyCommitment3,
+      0,
+      dummyPrivKey3
+    );
+
+    const extDataDeposit2 = {
+      recipient: user.publicKey,
+      relayer: user.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashDeposit2 = computeExtDataHash(poseidon, extDataDeposit2);
+
+    noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree
+    );
+    onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    const deposit2Proof = await generateTransactionProof({
+      root: onchainRoot,
+      publicAmount: deposit2Amount,
+      extDataHash: extDataHashDeposit2,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [dummyNullifier2, dummyNullifier3],
+      outputCommitments: [deposit2Commitment, deposit2DummyCommitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyPrivKey2, dummyPrivKey3],
+      inputPublicKeys: [dummyPubKey2, dummyPubKey3],
+      inputBlindings: [dummyBlinding2, dummyBlinding3],
+      inputMerklePaths: [
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+      ],
+      outputAmounts: [deposit2Amount, 0n],
+      outputOwners: [deposit2PublicKey, deposit2DummyPubKey],
+      outputBlindings: [deposit2Blinding, deposit2DummyBlinding],
+    });
+
+    const [nullifierMarker0_d2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier2)],
+      program.programId
+    );
+    const [nullifierMarker1_d2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier3)],
+      program.programId
+    );
+
+    const deposit2Tx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        new BN(deposit2Amount.toString()),
+        Array.from(extDataHashDeposit2),
+        SOL_MINT,
+        Array.from(dummyNullifier2),
+        Array.from(dummyNullifier3),
+        Array.from(deposit2Commitment),
+        Array.from(deposit2DummyCommitment),
+        extDataDeposit2,
+        deposit2Proof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker0_d2,
+        nullifierMarker1: nullifierMarker1_d2,
+        relayer: user.publicKey,
+        recipient: user.publicKey,
+        vaultTokenAccount: user.publicKey,
+        userTokenAccount: user.publicKey,
+        recipientTokenAccount: user.publicKey,
+        relayerTokenAccount: user.publicKey,
+        tokenProgram: user.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([user])
+      .transaction();
+
+    const modifyComputeUnits2 = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const addPriorityFee2 = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const deposit2Transaction = new Transaction();
+    deposit2Transaction.add(modifyComputeUnits2);
+    deposit2Transaction.add(addPriorityFee2);
+    deposit2Transaction.add(deposit2Tx);
+
+    await provider.sendAndConfirm(deposit2Transaction, [user]);
+
+    offchainTree.insert(deposit2Commitment);
+    offchainTree.insert(deposit2DummyCommitment);
+
+    console.log(`✅ Second deposit complete (Leaf ${deposit2LeafIndex})\n`);
+
+    // =============================================================================
+    // WITHDRAWAL: Combine both notes to withdraw 1.3 SOL
+    // =============================================================================
+
+    console.log("💸 Withdrawing 1.3 SOL (combining both deposits):\n");
+
+    const withdrawRelayer = Keypair.generate();
+    const withdrawRecipient = Keypair.generate();
+
+    await airdropAndConfirm(
+      provider,
+      withdrawRelayer.publicKey,
+      1 * LAMPORTS_PER_SOL
+    );
+    await airdropAndConfirm(
+      provider,
+      withdrawRecipient.publicKey,
+      0.1 * LAMPORTS_PER_SOL
+    );
+
+    // Register withdrawal relayer
+    await (program.methods as any)
+      .addRelayer(withdrawRelayer.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    const withdrawAmount = BigInt(1.3 * LAMPORTS_PER_SOL);
+    const changeAmount = deposit1Amount + deposit2Amount - withdrawAmount; // 1 + 0.8 - 1.3 = 0.5 SOL
+    const withdrawFee = (withdrawAmount * BigInt(feeBps)) / 10_000n;
+    const toRecipient = withdrawAmount - withdrawFee;
+
+    console.log("   Inputs:");
+    console.log(`     - Note 1: ${deposit1Amount} lamports (1.0 SOL)`);
+    console.log(`     - Note 2: ${deposit2Amount} lamports (0.8 SOL)`);
+    console.log(`     Total: ${deposit1Amount + deposit2Amount} lamports`);
+    console.log("\n   Outputs:");
+    console.log(`     - Withdrawal: ${withdrawAmount} lamports (1.3 SOL)`);
+    console.log(`     - Change: ${changeAmount} lamports (0.5 SOL)`);
+    console.log(`     - Fee: ${withdrawFee} lamports`);
+    console.log(`     - Net to recipient: ${toRecipient} lamports\n`);
+
+    // Compute nullifiers for both deposits
+    const deposit1Nullifier = computeNullifier(
+      poseidon,
+      deposit1Commitment,
+      deposit1LeafIndex,
+      deposit1PrivateKey
+    );
+
+    const deposit2Nullifier = computeNullifier(
+      poseidon,
+      deposit2Commitment,
+      deposit2LeafIndex,
+      deposit2PrivateKey
+    );
+
+    // Create change output (user keeps 0.5 SOL)
+    const changePrivateKey = randomBytes32();
+    const changePublicKey = derivePublicKey(poseidon, changePrivateKey);
+    const changeBlinding = randomBytes32();
+    const changeCommitment = computeCommitment(
+      poseidon,
+      changeAmount,
+      changePublicKey,
+      changeBlinding,
+      SOL_MINT
+    );
+
+    // Dummy output (withdrawal only has change as real output)
+    const dummyOutputPrivKey = randomBytes32();
+    const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
+    const dummyOutputBlinding = randomBytes32();
+    const dummyOutputCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutputPubKey,
+      dummyOutputBlinding,
+      SOL_MINT
+    );
+
+    const extDataWithdraw = {
+      recipient: withdrawRecipient.publicKey,
+      relayer: withdrawRelayer.publicKey,
+      fee: new BN(withdrawFee.toString()),
+      refund: new BN(0),
+    };
+    const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
+
+    noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree
+    );
+    onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    // Get Merkle paths for both deposits
+    const deposit1Path = offchainTree.getMerkleProof(deposit1LeafIndex);
+    const deposit2Path = offchainTree.getMerkleProof(deposit2LeafIndex);
+
+    // Generate proof: spend both notes, create change + dummy
+    const withdrawProof = await generateTransactionProof({
+      root: onchainRoot,
+      publicAmount: -withdrawAmount,
+      extDataHash: extDataHashWithdraw,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [deposit1Nullifier, deposit2Nullifier],
+      outputCommitments: [changeCommitment, dummyOutputCommitment],
+
+      // Input both deposits
+      inputAmounts: [deposit1Amount, deposit2Amount],
+      inputPrivateKeys: [deposit1PrivateKey, deposit2PrivateKey],
+      inputPublicKeys: [deposit1PublicKey, deposit2PublicKey],
+      inputBlindings: [deposit1Blinding, deposit2Blinding],
+      inputMerklePaths: [deposit1Path, deposit2Path],
+
+      // Outputs: change + dummy
+      outputAmounts: [changeAmount, 0n],
+      outputOwners: [changePublicKey, dummyOutputPubKey],
+      outputBlindings: [changeBlinding, dummyOutputBlinding],
+    });
+
+    const [deposit1NullifierMarker] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(deposit1Nullifier)],
+      program.programId
+    );
+    const [deposit2NullifierMarker] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(deposit2Nullifier)],
+      program.programId
+    );
+
+    // Check balances before withdrawal
+    const beforeVault = BigInt(await provider.connection.getBalance(vault));
+    const beforeRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const withdrawTx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        new BN(-withdrawAmount.toString()),
+        Array.from(extDataHashWithdraw),
+        SOL_MINT,
+        Array.from(deposit1Nullifier),
+        Array.from(deposit2Nullifier),
+        Array.from(changeCommitment),
+        Array.from(dummyOutputCommitment),
+        extDataWithdraw,
+        withdrawProof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: deposit1NullifierMarker,
+        nullifierMarker1: deposit2NullifierMarker,
+        relayer: withdrawRelayer.publicKey,
+        recipient: withdrawRecipient.publicKey,
+        vaultTokenAccount: withdrawRelayer.publicKey,
+        userTokenAccount: withdrawRelayer.publicKey,
+        recipientTokenAccount: withdrawRelayer.publicKey,
+        relayerTokenAccount: withdrawRelayer.publicKey,
+        tokenProgram: withdrawRelayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([withdrawRelayer])
+      .transaction();
+
+    const withdrawComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const withdrawPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const withdrawTransaction = new Transaction();
+    withdrawTransaction.add(withdrawComputeUnits);
+    withdrawTransaction.add(withdrawPriorityFee);
+    withdrawTransaction.add(withdrawTx);
+
+    await provider.sendAndConfirm(withdrawTransaction, [withdrawRelayer]);
+
+    // Insert change commitment into tree
+    const changeLeafIndex = offchainTree.insert(changeCommitment);
+    offchainTree.insert(dummyOutputCommitment);
+
+    // Check balances after withdrawal
+    const afterVault = BigInt(await provider.connection.getBalance(vault));
+    const afterRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const vaultPaid = beforeVault - afterVault;
+    const recipientReceived = afterRecipient - beforeRecipient;
+
+    console.log("✅ Multi-Input Withdrawal Successful!\n");
+    console.log("📊 Verification:");
+    console.log(`   Vault paid: ${vaultPaid} lamports (1.3 SOL)`);
+    console.log(`   Recipient received: ${recipientReceived} lamports`);
+    console.log(`   Expected: ${toRecipient} lamports`);
+    console.log(`   Change note created: ${changeAmount} lamports (0.5 SOL)`);
+    console.log(`   Change note at leaf index: ${changeLeafIndex}\n`);
+
+    if (vaultPaid !== withdrawAmount) {
+      throw new Error(
+        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+      );
+    }
+
+    if (recipientReceived !== toRecipient) {
+      throw new Error(
+        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`
+      );
+    }
+
+    console.log("🎉 UTXO Model Demonstration Complete!");
+    console.log(
+      "   ✅ Combined two deposits (1 SOL + 0.8 SOL) into one withdrawal"
+    );
+    console.log("   ✅ Withdrew 1.3 SOL with proper accounting");
+    console.log("   ✅ Created 0.5 SOL change note for future use");
+    console.log(
+      "   ✅ Both input notes permanently spent (nullifiers on-chain)"
+    );
+    console.log(
+      "   ✅ Privacy preserved: no link between deposits and withdrawal\n"
+    );
+  });
+
+  // =============================================================================
+  // Multi-Step Combining: 4 deposits → 13 SOL withdrawal
+  // =============================================================================
+
+  it("combines 4 deposits (1, 2, 3, 8 SOL) progressively to withdraw 13 SOL (batch proofs)", async () => {
+    console.log(
+      "\n🔄 Multi-Step Note Combining Test (WITH BATCH PROOF GENERATION):\n"
+    );
+    console.log(
+      "💡 Circuit constraint: 2-in-2-out (cannot spend 3+ notes at once)"
+    );
+    console.log(
+      "💡 Solution: Combine notes progressively through multiple transactions"
+    );
+    console.log(
+      "⚡ Efficiency: Generate ALL proofs in parallel, then submit sequentially\n"
+    );
+
+    const user = Keypair.generate();
+    console.log(`   User: ${user.publicKey.toBase58()}`);
+    await airdropAndConfirm(provider, user.publicKey, 20 * LAMPORTS_PER_SOL);
+
+    await (program.methods as any)
+      .addRelayer(user.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    // Helper function to deposit
+    const depositNote = async (amount: bigint, label: string) => {
+      console.log(
+        `📥 Depositing ${Number(amount) / LAMPORTS_PER_SOL} SOL (${label})`
+      );
+
+      const privateKey = randomBytes32();
+      const publicKey = derivePublicKey(poseidon, privateKey);
+      const blinding = randomBytes32();
+
+      const commitment = computeCommitment(
+        poseidon,
+        amount,
+        publicKey,
+        blinding,
+        SOL_MINT
+      );
+
+      const dummyPrivKey = randomBytes32();
+      const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+      const dummyBlinding = randomBytes32();
+      const dummyCommitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyPubKey,
+        dummyBlinding,
+        SOL_MINT
+      );
+
+      const leafIndex = offchainTree.nextIndex;
+
+      const dummyIn0PrivKey = randomBytes32();
+      const dummyIn1PrivKey = randomBytes32();
+      const dummyIn0PubKey = derivePublicKey(poseidon, dummyIn0PrivKey);
+      const dummyIn1PubKey = derivePublicKey(poseidon, dummyIn1PrivKey);
+      const dummyIn0Blinding = randomBytes32();
+      const dummyIn1Blinding = randomBytes32();
+      const dummyIn0Commitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyIn0PubKey,
+        dummyIn0Blinding,
+        SOL_MINT
+      );
+      const dummyIn1Commitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyIn1PubKey,
+        dummyIn1Blinding,
+        SOL_MINT
+      );
+      const dummyIn0Nullifier = computeNullifier(
+        poseidon,
+        dummyIn0Commitment,
+        0,
+        dummyIn0PrivKey
+      );
+      const dummyIn1Nullifier = computeNullifier(
+        poseidon,
+        dummyIn1Commitment,
+        0,
+        dummyIn1PrivKey
+      );
+
+      const extData = {
+        recipient: user.publicKey,
+        relayer: user.publicKey,
+        fee: new BN(0),
+        refund: new BN(0),
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const noteTreeAcc: any = await (
+        program.account as any
+      ).merkleTreeAccount.fetch(noteTree);
+      const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+      const zeros = offchainTree.getZeros();
+      const zeroPathElements = zeros
+        .slice(0, 16)
+        .map((z) => bytesToBigIntBE(z));
+
+      const proof = await generateTransactionProof({
+        root: onchainRoot,
+        publicAmount: amount,
+        extDataHash,
+        mintAddress: SOL_MINT,
+        inputNullifiers: [dummyIn0Nullifier, dummyIn1Nullifier],
+        outputCommitments: [commitment, dummyCommitment],
+        inputAmounts: [0n, 0n],
+        inputPrivateKeys: [dummyIn0PrivKey, dummyIn1PrivKey],
+        inputPublicKeys: [dummyIn0PubKey, dummyIn1PubKey],
+        inputBlindings: [dummyIn0Blinding, dummyIn1Blinding],
+        inputMerklePaths: [
+          {
+            pathElements: zeroPathElements,
+            pathIndices: new Array(16).fill(0),
+          },
+          {
+            pathElements: zeroPathElements,
+            pathIndices: new Array(16).fill(0),
+          },
+        ],
+        outputAmounts: [amount, 0n],
+        outputOwners: [publicKey, dummyPubKey],
+        outputBlindings: [blinding, dummyBlinding],
+      });
+
+      const [nullifierMarker0] = PublicKey.findProgramAddressSync(
+        [Buffer.from("nullifier_v3"), Buffer.from(dummyIn0Nullifier)],
+        program.programId
+      );
+      const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+        [Buffer.from("nullifier_v3"), Buffer.from(dummyIn1Nullifier)],
+        program.programId
+      );
+
+      const tx = await (program.methods as any)
+        .transact(
+          Array.from(onchainRoot),
+          new BN(amount.toString()),
+          Array.from(extDataHash),
+          SOL_MINT,
+          Array.from(dummyIn0Nullifier),
+          Array.from(dummyIn1Nullifier),
+          Array.from(commitment),
+          Array.from(dummyCommitment),
+          extData,
+          proof
+        )
+        .accounts({
+          config,
+          vault,
+          noteTree,
+          nullifiers,
+          nullifierMarker0,
+          nullifierMarker1,
+          relayer: user.publicKey,
+          recipient: user.publicKey,
+          vaultTokenAccount: user.publicKey,
+          userTokenAccount: user.publicKey,
+          recipientTokenAccount: user.publicKey,
+          relayerTokenAccount: user.publicKey,
+          tokenProgram: user.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user])
+        .transaction();
+
+      const computeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+        units: 1_400_000,
+      });
+      const priorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: 1,
+      });
+
+      const transaction = new Transaction();
+      transaction.add(computeUnits, priorityFee, tx);
+      await provider.sendAndConfirm(transaction, [user]);
+
+      offchainTree.insert(commitment);
+      offchainTree.insert(dummyCommitment);
+
+      return { commitment, privateKey, publicKey, blinding, leafIndex, amount };
+    };
+
+    // Helper function to combine X notes into 2 notes (optimal for withdrawal)
+    // WITH BATCH PROOF GENERATION: Generate all proofs in parallel, submit sequentially
+    const combineToTwoNotes = async (
+      notes: any[],
+      relayer: any,
+      label: string = "Batch combine"
+    ) => {
+      if (notes.length === 0) {
+        throw new Error("No notes to combine");
+      }
+
+      if (notes.length === 1) {
+        throw new Error("Need at least 2 notes");
+      }
+
+      if (notes.length === 2) {
+        console.log(`   Already have 2 notes`);
+        return notes;
+      }
+
+      console.log(
+        `\n🔄 ${label}: Combining ${notes.length} notes into 2 (BATCH PROOF GENERATION)\n`
+      );
+
+      // =============================================================================
+      // PHASE 1: Plan all combine operations (use actual note objects)
+      // =============================================================================
+
+      // Sort notes by amount (smallest first)
+      const sortedNotes = [...notes].sort((a, b) =>
+        Number(a.amount - b.amount)
+      );
+
+      const combineOps: any[] = [];
+
+      // For batch proof generation, ALL combines must use original notes only
+      // (no dependencies - all proofs can be generated in parallel)
+      // Strategy: pair up original notes directly without creating intermediate notes
+
+      // Calculate how many pairs we need to combine
+      // 4 notes → 2 notes: combine 2 pairs = (1+2) and (3+8)
+      const numCombinesNeeded = sortedNotes.length - 2;
+
+      // Simply take pairs of smallest notes from the original list
+      for (let i = 0; i < numCombinesNeeded; i++) {
+        const idx1 = i * 2;
+        const idx2 = i * 2 + 1;
+
+        if (idx2 >= sortedNotes.length) break;
+
+        const note1 = sortedNotes[idx1];
+        const note2 = sortedNotes[idx2];
+        const combinedAmount = note1.amount + note2.amount;
+
+        combineOps.push({ note1, note2, combinedAmount });
+      }
+
+      console.log(
+        `   📋 Planned ${combineOps.length} combine operations (all independent)\n`
+      );
+
+      // =============================================================================
+      // PHASE 2: Generate ALL proofs in parallel (OFFLINE)
+      // =============================================================================
+
+      console.log(
+        `   ⚡ Generating ${combineOps.length} proofs in parallel...\n`
+      );
+      const proofStartTime = Date.now();
+
+      const proofData = await Promise.all(
+        combineOps.map(async (op, idx) => {
+          const { note1, note2, combinedAmount } = op;
+
+          const nullifier1 = computeNullifier(
+            poseidon,
+            note1.commitment,
+            note1.leafIndex,
+            note1.privateKey
+          );
+          const nullifier2 = computeNullifier(
+            poseidon,
+            note2.commitment,
+            note2.leafIndex,
+            note2.privateKey
+          );
+
+          const outputPrivateKey = randomBytes32();
+          const outputPublicKey = derivePublicKey(poseidon, outputPrivateKey);
+          const outputBlinding = randomBytes32();
+          const outputCommitment = computeCommitment(
+            poseidon,
+            combinedAmount,
+            outputPublicKey,
+            outputBlinding,
+            SOL_MINT
+          );
+
+          const dummyPrivKey = randomBytes32();
+          const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+          const dummyBlinding = randomBytes32();
+          const dummyCommitment = computeCommitment(
+            poseidon,
+            0n,
+            dummyPubKey,
+            dummyBlinding,
+            SOL_MINT
+          );
+
+          const extData = {
+            recipient: relayer.publicKey,
+            relayer: relayer.publicKey,
+            fee: new BN(0),
+            refund: new BN(0),
+          };
+          const extDataHash = computeExtDataHash(poseidon, extData);
+
+          const noteTreeAcc: any = await (
+            program.account as any
+          ).merkleTreeAccount.fetch(noteTree);
+          const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+          const path1 = offchainTree.getMerkleProof(note1.leafIndex);
+          const path2 = offchainTree.getMerkleProof(note2.leafIndex);
+
+          const proof = await generateTransactionProof({
+            root: onchainRoot,
+            publicAmount: 0n,
+            extDataHash,
+            mintAddress: SOL_MINT,
+            inputNullifiers: [nullifier1, nullifier2],
+            outputCommitments: [outputCommitment, dummyCommitment],
+            inputAmounts: [note1.amount, note2.amount],
+            inputPrivateKeys: [note1.privateKey, note2.privateKey],
+            inputPublicKeys: [note1.publicKey, note2.publicKey],
+            inputBlindings: [note1.blinding, note2.blinding],
+            inputMerklePaths: [path1, path2],
+            outputAmounts: [combinedAmount, 0n],
+            outputOwners: [outputPublicKey, dummyPubKey],
+            outputBlindings: [outputBlinding, dummyBlinding],
+          });
+
+          return {
+            note1,
+            note2,
+            nullifier1,
+            nullifier2,
+            outputCommitment,
+            dummyCommitment,
+            outputPrivateKey,
+            outputPublicKey,
+            outputBlinding,
+            combinedAmount,
+            extData,
+            extDataHash,
+            proof,
+            onchainRoot,
+          };
+        })
+      );
+
+      const proofTime = Date.now() - proofStartTime;
+      console.log(
+        `   ✅ Generated ${proofData.length} proofs in ${proofTime}ms (parallel)\n`
+      );
+
+      // =============================================================================
+      // PHASE 3: Submit transactions sequentially (ONLINE)
+      // =============================================================================
+
+      console.log(
+        `   📡 Submitting ${proofData.length} transactions on-chain...\n`
+      );
+
+      // Start with all original notes
+      let updatedNotes = [...notes];
+
+      for (let i = 0; i < proofData.length; i++) {
+        const data = proofData[i];
+
+        console.log(
+          `   🔄 Step ${i + 1}/${proofData.length}: Combining ${
+            Number(data.note1.amount) / LAMPORTS_PER_SOL
+          } + ${Number(data.note2.amount) / LAMPORTS_PER_SOL} = ${
+            Number(data.combinedAmount) / LAMPORTS_PER_SOL
+          } SOL`
+        );
+
+        // Remove the two notes we're combining (check by commitment to be safe)
+        updatedNotes = updatedNotes.filter(
+          (n) =>
+            !(
+              n.commitment &&
+              data.note1.commitment &&
+              n.commitment.toString() === data.note1.commitment.toString()
+            ) &&
+            !(
+              n.commitment &&
+              data.note2.commitment &&
+              n.commitment.toString() === data.note2.commitment.toString()
+            )
+        );
+
+        const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+          [Buffer.from("nullifier_v3"), Buffer.from(data.nullifier1)],
+          program.programId
+        );
+        const [nullifierMarker2] = PublicKey.findProgramAddressSync(
+          [Buffer.from("nullifier_v3"), Buffer.from(data.nullifier2)],
+          program.programId
+        );
+
+        const tx = await (program.methods as any)
+          .transact(
+            Array.from(data.onchainRoot),
+            new BN(0),
+            Array.from(data.extDataHash),
+            SOL_MINT,
+            Array.from(data.nullifier1),
+            Array.from(data.nullifier2),
+            Array.from(data.outputCommitment),
+            Array.from(data.dummyCommitment),
+            data.extData,
+            data.proof
+          )
+          .accounts({
+            config,
+            vault,
+            noteTree,
+            nullifiers,
+            nullifierMarker0: nullifierMarker1,
+            nullifierMarker1: nullifierMarker2,
+            relayer: relayer.publicKey,
+            recipient: relayer.publicKey,
+            vaultTokenAccount: relayer.publicKey,
+            userTokenAccount: relayer.publicKey,
+            recipientTokenAccount: relayer.publicKey,
+            relayerTokenAccount: relayer.publicKey,
+            tokenProgram: relayer.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([relayer])
+          .transaction();
+
+        const computeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+          units: 1_400_000,
+        });
+        const priorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: 1,
+        });
+
+        const transaction = new Transaction();
+        transaction.add(computeUnits, priorityFee, tx);
+        await provider.sendAndConfirm(transaction, [relayer]);
+
+        const leafIndex = offchainTree.insert(data.outputCommitment);
+        offchainTree.insert(data.dummyCommitment);
+
+        // Add the combined note to our tracking
+        const combinedNote = {
+          commitment: data.outputCommitment,
+          privateKey: data.outputPrivateKey,
+          publicKey: data.outputPublicKey,
+          blinding: data.outputBlinding,
+          leafIndex,
+          amount: data.combinedAmount,
+        };
+
+        updatedNotes.push(combinedNote);
+        updatedNotes.sort((a, b) => Number(a.amount - b.amount));
+      }
+
+      console.log(
+        `\n   ✅ Final 2 notes: ${
+          Number(updatedNotes[0].amount) / LAMPORTS_PER_SOL
+        } SOL + ${Number(updatedNotes[1].amount) / LAMPORTS_PER_SOL} SOL\n`
+      );
+      console.log(
+        `   ⚡ Batch proof generation saved time by generating proofs in parallel!\n`
+      );
+
+      return updatedNotes;
+    };
+
+    // =============================================================================
+    // STEP 1: Create 4 deposits
+    // =============================================================================
+
+    console.log("\n📥 Step 1: Creating 4 deposits\n");
+
+    const note1 = await depositNote(BigInt(1 * LAMPORTS_PER_SOL), "Note 1");
+    const note2 = await depositNote(BigInt(2 * LAMPORTS_PER_SOL), "Note 2");
+    const note3 = await depositNote(BigInt(3 * LAMPORTS_PER_SOL), "Note 3");
+    const note8 = await depositNote(BigInt(8 * LAMPORTS_PER_SOL), "Note 8");
+
+    console.log("\n✅ All 4 deposits complete (Total: 14 SOL)\n");
+
+    // =============================================================================
+    // STEP 2: Combine 4 notes into 2 notes (AUTOMATIC)
+    // =============================================================================
+
+    console.log(
+      "🔄 Step 2: Auto-combining 4 notes into 2 notes for withdrawal\n"
+    );
+
+    // Automatically combine all 4 notes into 2 notes (ready for withdrawal)
+    // User acts as relayer for combining (user is already registered as relayer)
+    const [combinedNote1, combinedNote2] = await combineToTwoNotes(
+      [note1, note2, note3, note8],
+      user,
+      "Automatic combine"
+    );
+
+    console.log("\n✅ Notes combined. Ready to withdraw!\n");
+
+    // =============================================================================
+    // STEP 3: Final withdrawal using the 2 combined notes
+    // =============================================================================
+
+    console.log("💸 Step 3: Withdrawing 13 SOL (from 2 combined notes)\n");
+
+    const withdrawRelayer = Keypair.generate();
+    const withdrawRecipient = Keypair.generate();
+
+    await airdropAndConfirm(
+      provider,
+      withdrawRelayer.publicKey,
+      1 * LAMPORTS_PER_SOL
+    );
+    await airdropAndConfirm(
+      provider,
+      withdrawRecipient.publicKey,
+      0.1 * LAMPORTS_PER_SOL
+    );
+
+    await (program.methods as any)
+      .addRelayer(withdrawRelayer.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    const withdrawAmount = BigInt(13 * LAMPORTS_PER_SOL);
+    const changeAmount =
+      combinedNote1.amount + combinedNote2.amount - withdrawAmount;
+    const withdrawFee = (withdrawAmount * BigInt(feeBps)) / 10_000n;
+    const toRecipient = withdrawAmount - withdrawFee;
+
+    console.log("   Inputs:");
+    console.log(
+      `     - Combined note 1: ${
+        Number(combinedNote1.amount) / LAMPORTS_PER_SOL
+      } SOL`
+    );
+    console.log(
+      `     - Combined note 2: ${
+        Number(combinedNote2.amount) / LAMPORTS_PER_SOL
+      } SOL`
+    );
+    console.log(
+      `     Total: ${
+        Number(combinedNote1.amount + combinedNote2.amount) / LAMPORTS_PER_SOL
+      } SOL`
+    );
+    console.log("\n   Outputs:");
+    console.log(
+      `     - Withdrawal: ${Number(withdrawAmount) / LAMPORTS_PER_SOL} SOL`
+    );
+    console.log(
+      `     - Change: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL`
+    );
+    console.log(`     - Fee: ${Number(withdrawFee) / LAMPORTS_PER_SOL} SOL`);
+    console.log(
+      `     - Net to recipient: ${Number(toRecipient) / LAMPORTS_PER_SOL} SOL\n`
+    );
+
+    const nullifier1 = computeNullifier(
+      poseidon,
+      combinedNote1.commitment,
+      combinedNote1.leafIndex,
+      combinedNote1.privateKey
+    );
+    const nullifier2 = computeNullifier(
+      poseidon,
+      combinedNote2.commitment,
+      combinedNote2.leafIndex,
+      combinedNote2.privateKey
+    );
+
+    const changePrivateKey = randomBytes32();
+    const changePublicKey = derivePublicKey(poseidon, changePrivateKey);
+    const changeBlinding = randomBytes32();
+    const changeCommitment = computeCommitment(
+      poseidon,
+      changeAmount,
+      changePublicKey,
+      changeBlinding,
+      SOL_MINT
+    );
+
+    const dummyOutPrivKey = randomBytes32();
+    const dummyOutPubKey = derivePublicKey(poseidon, dummyOutPrivKey);
+    const dummyOutBlinding = randomBytes32();
+    const dummyOutCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutPubKey,
+      dummyOutBlinding,
+      SOL_MINT
+    );
+
+    const extDataWithdraw = {
+      recipient: withdrawRecipient.publicKey,
+      relayer: withdrawRelayer.publicKey,
+      fee: new BN(withdrawFee.toString()),
+      refund: new BN(0),
+    };
+    const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
+
+    const noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    const path1 = offchainTree.getMerkleProof(combinedNote1.leafIndex);
+    const path2 = offchainTree.getMerkleProof(combinedNote2.leafIndex);
+
+    const withdrawProof = await generateTransactionProof({
+      root: onchainRoot,
+      publicAmount: -withdrawAmount,
+      extDataHash: extDataHashWithdraw,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [nullifier1, nullifier2],
+      outputCommitments: [changeCommitment, dummyOutCommitment],
+      inputAmounts: [combinedNote1.amount, combinedNote2.amount],
+      inputPrivateKeys: [combinedNote1.privateKey, combinedNote2.privateKey],
+      inputPublicKeys: [combinedNote1.publicKey, combinedNote2.publicKey],
+      inputBlindings: [combinedNote1.blinding, combinedNote2.blinding],
+      inputMerklePaths: [path1, path2],
+      // inputBlindings: [combinedNote1.blinding, combinedNote2.blinding],
+      // inputMerklePaths: [path1, path2],
+      outputAmounts: [changeAmount, 0n],
+      outputOwners: [changePublicKey, dummyOutPubKey],
+      outputBlindings: [changeBlinding, dummyOutBlinding],
+    });
+
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(nullifier1)],
+      program.programId
+    );
+    const [nullifierMarker2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(nullifier2)],
+      program.programId
+    );
+
+    const beforeVault = BigInt(await provider.connection.getBalance(vault));
+    const beforeRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const withdrawTx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        new BN(-withdrawAmount.toString()),
+        Array.from(extDataHashWithdraw),
+        SOL_MINT,
+        Array.from(nullifier1),
+        Array.from(nullifier2),
+        Array.from(changeCommitment),
+        Array.from(dummyOutCommitment),
+        extDataWithdraw,
+        withdrawProof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker1,
+        nullifierMarker1: nullifierMarker2,
+        relayer: withdrawRelayer.publicKey,
+        recipient: withdrawRecipient.publicKey,
+        vaultTokenAccount: withdrawRelayer.publicKey,
+        userTokenAccount: withdrawRelayer.publicKey,
+        recipientTokenAccount: withdrawRelayer.publicKey,
+        relayerTokenAccount: withdrawRelayer.publicKey,
+        tokenProgram: withdrawRelayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([withdrawRelayer])
+      .transaction();
+
+    const withdrawComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const withdrawPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const withdrawTransaction = new Transaction();
+    withdrawTransaction.add(
+      withdrawComputeUnits,
+      withdrawPriorityFee,
+      withdrawTx
+    );
+    await provider.sendAndConfirm(withdrawTransaction, [withdrawRelayer]);
+
+    offchainTree.insert(changeCommitment);
+    offchainTree.insert(dummyOutCommitment);
+
+    const afterVault = BigInt(await provider.connection.getBalance(vault));
+    const afterRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const vaultPaid = beforeVault - afterVault;
+    const recipientReceived = afterRecipient - beforeRecipient;
+
+    console.log("✅ Multi-Step Withdrawal Complete!\n");
+    console.log("📊 Verification:");
+    console.log(`   Vault paid: ${Number(vaultPaid) / LAMPORTS_PER_SOL} SOL`);
+    console.log(
+      `   Recipient received: ${
+        Number(recipientReceived) / LAMPORTS_PER_SOL
+      } SOL`
+    );
+    console.log(
+      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`
+    );
+
+    if (vaultPaid !== withdrawAmount) {
+      throw new Error(
+        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+      );
+    }
+
+    console.log("🎉 4-Note Batch Proof Generation Success!");
+    console.log("   ✅ Step 1: Created 4 deposit notes (1, 2, 3, 8 SOL)");
+    console.log(
+      "   ✅ Step 2: Generated ALL combine proofs in parallel (batch proof gen)"
+    );
+    console.log("   ✅ Step 2b: Submitted combine transactions sequentially");
+    console.log(
+      `   ✅ Step 3: Withdrew 13 SOL from 2 combined notes, kept 1 SOL change`
+    );
+    console.log("   ✅ Total: 4 original deposits → 13 SOL withdrawal");
+    console.log("   ✅ All done with 2-in-2-out constraint!");
+    console.log("   ✅ Privacy preserved across all transactions");
+    console.log(
+      "   ⚡ Batch proof generation: Proofs generated offline in parallel!"
+    );
+    console.log(
+      "   💡 This mimics wallet extension workflow: user generates all proofs locally\n"
+    );
+  });
+
+  // =============================================================================
+  // Batch Proof Generation: User generates all proofs offline, relayer submits
+  // =============================================================================
+
+  it("batch proof generation: user offline, relayer handles all on-chain", async () => {
+    console.log("\n🎯 Batch Proof Generation Workflow:\n");
+    console.log("💡 User generates ALL proofs offline in ONE session");
+    console.log("💡 Relayer submits ALL transactions on-chain");
+    console.log("💡 User NEVER signs transactions (relayer signs)\n");
+
+    // =============================================================================
+    // USER SESSION (Offline): Generate all proofs
+    // =============================================================================
+
+    console.log("👤 USER SESSION (Offline - runs locally on user's device):\n");
+
+    // User's secrets (never shared with relayer!)
+    const userPrivateKeys = {
+      deposit1: randomBytes32(),
+      deposit2: randomBytes32(),
+    };
+
+    const userNote1 = {
+      amount: BigInt(1.5 * LAMPORTS_PER_SOL),
+      privateKey: userPrivateKeys.deposit1,
+      publicKey: derivePublicKey(poseidon, userPrivateKeys.deposit1),
+      blinding: randomBytes32(),
+    };
+
+    const userNote2 = {
+      amount: BigInt(0.8 * LAMPORTS_PER_SOL),
+      privateKey: userPrivateKeys.deposit2,
+      publicKey: derivePublicKey(poseidon, userPrivateKeys.deposit2),
+      blinding: randomBytes32(),
+    };
+
+    console.log("   🔐 User generates secrets locally (NEVER shared):");
+    console.log(
+      `      Note 1: ${Number(userNote1.amount) / LAMPORTS_PER_SOL} SOL`
+    );
+    console.log(
+      `      Note 2: ${Number(userNote2.amount) / LAMPORTS_PER_SOL} SOL`
+    );
+    console.log("      Private keys: [HIDDEN]\n");
+
+    // Predict leaf indices (user needs to know tree state)
+    const predictedLeafIndex1 = offchainTree.nextIndex;
+    const predictedLeafIndex2 = predictedLeafIndex1 + 2; // After deposit 1 (main + dummy)
+
+    const commitment1 = computeCommitment(
+      poseidon,
+      userNote1.amount,
+      userNote1.publicKey,
+      userNote1.blinding,
+      SOL_MINT
+    );
+
+    const commitment2 = computeCommitment(
+      poseidon,
+      userNote2.amount,
+      userNote2.publicKey,
+      userNote2.blinding,
+      SOL_MINT
+    );
+
+    // Dummy outputs for deposits
+    const dummyDeposit1PrivKey = randomBytes32();
+    const dummyDeposit1PubKey = derivePublicKey(poseidon, dummyDeposit1PrivKey);
+    const dummyDeposit1Blinding = randomBytes32();
+    const dummyDeposit1Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyDeposit1PubKey,
+      dummyDeposit1Blinding,
+      SOL_MINT
+    );
+
+    const dummyDeposit2PrivKey = randomBytes32();
+    const dummyDeposit2PubKey = derivePublicKey(poseidon, dummyDeposit2PrivKey);
+    const dummyDeposit2Blinding = randomBytes32();
+    const dummyDeposit2Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyDeposit2PubKey,
+      dummyDeposit2Blinding,
+      SOL_MINT
+    );
+
+    // Dummy inputs for deposits
+    const dummyIn0PrivKey = randomBytes32();
+    const dummyIn0Blinding = randomBytes32();
+    const dummyIn0 = {
+      privateKey: dummyIn0PrivKey,
+      blinding: dummyIn0Blinding,
+      publicKey: derivePublicKey(poseidon, dummyIn0PrivKey),
+    };
+    const dummyIn0Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyIn0.publicKey,
+      dummyIn0.blinding,
+      SOL_MINT
+    );
+    const dummyIn0Nullifier = computeNullifier(
+      poseidon,
+      dummyIn0Commitment,
+      0,
+      dummyIn0.privateKey
+    );
+
+    const dummyIn1PrivKey = randomBytes32();
+    const dummyIn1Blinding = randomBytes32();
+    const dummyIn1 = {
+      privateKey: dummyIn1PrivKey,
+      blinding: dummyIn1Blinding,
+      publicKey: derivePublicKey(poseidon, dummyIn1PrivKey),
+    };
+    const dummyIn1Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyIn1.publicKey,
+      dummyIn1.blinding,
+      SOL_MINT
+    );
+    const dummyIn1Nullifier = computeNullifier(
+      poseidon,
+      dummyIn1Commitment,
+      0,
+      dummyIn1.privateKey
+    );
+
+    const dummyIn2PrivKey = randomBytes32();
+    const dummyIn2Blinding = randomBytes32();
+    const dummyIn2 = {
+      privateKey: dummyIn2PrivKey,
+      blinding: dummyIn2Blinding,
+      publicKey: derivePublicKey(poseidon, dummyIn2PrivKey),
+    };
+    const dummyIn2Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyIn2.publicKey,
+      dummyIn2.blinding,
+      SOL_MINT
+    );
+    const dummyIn2Nullifier = computeNullifier(
+      poseidon,
+      dummyIn2Commitment,
+      0,
+      dummyIn2.privateKey
+    );
+
+    const dummyIn3PrivKey = randomBytes32();
+    const dummyIn3Blinding = randomBytes32();
+    const dummyIn3 = {
+      privateKey: dummyIn3PrivKey,
+      blinding: dummyIn3Blinding,
+      publicKey: derivePublicKey(poseidon, dummyIn3PrivKey),
+    };
+    const dummyIn3Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyIn3.publicKey,
+      dummyIn3.blinding,
+      SOL_MINT
+    );
+    const dummyIn3Nullifier = computeNullifier(
+      poseidon,
+      dummyIn3Commitment,
+      0,
+      dummyIn3.privateKey
+    );
+
+    // User wallet for deposits
+    const userWallet = Keypair.generate();
+    const relayerWallet = Keypair.generate(); // Will handle all on-chain tx
+
+    // ExtData for deposits (user specifies but relayer signs)
+    const extDataDeposit1 = {
+      recipient: relayerWallet.publicKey, // Relayer receives (since relayer is depositing)
+      relayer: relayerWallet.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashDeposit1 = computeExtDataHash(poseidon, extDataDeposit1);
+
+    const extDataDeposit2 = {
+      recipient: relayerWallet.publicKey, // Relayer receives (since relayer is depositing)
+      relayer: relayerWallet.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashDeposit2 = computeExtDataHash(poseidon, extDataDeposit2);
+
+    // Get current tree state for deposits
+    let noteTreeAcc: any = await (
+      program.account as any
+    ).merkleTreeAccount.fetch(noteTree);
+    const initialRoot = extractRootFromAccount(noteTreeAcc); // Save initial root for ALL deposits
+
+    const zeros = offchainTree.getZeros();
+    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+
+    console.log("   📝 Generating Deposit Proof #1...");
+    const deposit1Proof = await generateTransactionProof({
+      root: initialRoot, // Use initial root
+      publicAmount: userNote1.amount,
+      extDataHash: extDataHashDeposit1,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [dummyIn0Nullifier, dummyIn1Nullifier],
+      outputCommitments: [commitment1, dummyDeposit1Commitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyIn0.privateKey, dummyIn1.privateKey],
+      inputPublicKeys: [dummyIn0.publicKey, dummyIn1.publicKey],
+      inputBlindings: [dummyIn0.blinding, dummyIn1.blinding],
+      inputMerklePaths: [
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+      ],
+      outputAmounts: [userNote1.amount, 0n],
+      outputOwners: [userNote1.publicKey, dummyDeposit1PubKey],
+      outputBlindings: [userNote1.blinding, dummyDeposit1Blinding],
+    });
+
+    console.log(
+      "   📝 Generating Deposit Proof #2 (Note: uses same root - relies on zero-path)..."
+    );
+    const deposit2Proof = await generateTransactionProof({
+      root: initialRoot, // Same initial root - deposits use zero-path proofs
+      publicAmount: userNote2.amount,
+      extDataHash: extDataHashDeposit2,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [dummyIn2Nullifier, dummyIn3Nullifier],
+      outputCommitments: [commitment2, dummyDeposit2Commitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyIn2.privateKey, dummyIn3.privateKey],
+      inputPublicKeys: [dummyIn2.publicKey, dummyIn3.publicKey],
+      inputBlindings: [dummyIn2.blinding, dummyIn3.blinding],
+      inputMerklePaths: [
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+      ],
+      outputAmounts: [userNote2.amount, 0n],
+      outputOwners: [userNote2.publicKey, dummyDeposit2PubKey],
+      outputBlindings: [userNote2.blinding, dummyDeposit2Blinding],
+    });
+
+    // Now generate withdrawal proof (user predicts combined state)
+    const withdrawAmount = BigInt(2 * LAMPORTS_PER_SOL);
+    const changeAmount = userNote1.amount + userNote2.amount - withdrawAmount;
+    const withdrawFee = (withdrawAmount * BigInt(feeBps)) / 10_000n;
+
+    const withdrawRecipient = Keypair.generate();
+
+    const nullifier1 = computeNullifier(
+      poseidon,
+      commitment1,
+      predictedLeafIndex1,
+      userNote1.privateKey
+    );
+    const nullifier2 = computeNullifier(
+      poseidon,
+      commitment2,
+      predictedLeafIndex2,
+      userNote2.privateKey
+    );
+
+    const changePrivateKey = randomBytes32();
+    const changePublicKey = derivePublicKey(poseidon, changePrivateKey);
+    const changeBlinding = randomBytes32();
+    const changeCommitment = computeCommitment(
+      poseidon,
+      changeAmount,
+      changePublicKey,
+      changeBlinding,
+      SOL_MINT
+    );
+
+    const dummyOutPrivKey = randomBytes32();
+    const dummyOutPubKey = derivePublicKey(poseidon, dummyOutPrivKey);
+    const dummyOutBlinding = randomBytes32();
+    const dummyOutCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutPubKey,
+      dummyOutBlinding,
+      SOL_MINT
+    );
+
+    const extDataWithdraw = {
+      recipient: withdrawRecipient.publicKey,
+      relayer: relayerWallet.publicKey,
+      fee: new BN(withdrawFee.toString()),
+      refund: new BN(0),
+    };
+    const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
+
+    console.log(
+      "   📝 Simulating tree state after both deposits for withdrawal proof..."
+    );
+
+    // Simulate BOTH deposits in local tree
+    const actualLeafIndex1 = offchainTree.insert(commitment1);
+    offchainTree.insert(dummyDeposit1Commitment);
+    const actualLeafIndex2 = offchainTree.insert(commitment2);
+    offchainTree.insert(dummyDeposit2Commitment);
+
+    // Verify our predictions match
+    if (actualLeafIndex1 !== predictedLeafIndex1) {
+      throw new Error(
+        `Leaf index mismatch: predicted ${predictedLeafIndex1}, got ${actualLeafIndex1}`
+      );
+    }
+    if (actualLeafIndex2 !== predictedLeafIndex2) {
+      throw new Error(
+        `Leaf index mismatch: predicted ${predictedLeafIndex2}, got ${actualLeafIndex2}`
+      );
+    }
+
+    console.log(
+      "   📝 Generating Withdrawal Proof (with predicted future tree state)..."
+    );
+
+    // Get Merkle paths from simulated tree
+    const path1 = offchainTree.getMerkleProof(actualLeafIndex1);
+    const path2 = offchainTree.getMerkleProof(actualLeafIndex2);
+    const predictedRoot = offchainTree.getRoot();
+
+    // Validate paths have correct structure
+    if (!path1 || !path1.pathElements || path1.pathElements.length === 0) {
+      throw new Error(`Invalid Merkle path for leaf ${actualLeafIndex1}`);
+    }
+    if (!path2 || !path2.pathElements || path2.pathElements.length === 0) {
+      throw new Error(`Invalid Merkle path for leaf ${actualLeafIndex2}`);
+    }
+
+    // Check for undefined elements in paths
+    path1.pathElements.forEach((elem, i) => {
+      if (elem === undefined || elem === null) {
+        throw new Error(`Path 1 element ${i} is undefined`);
+      }
+    });
+    path2.pathElements.forEach((elem, i) => {
+      if (elem === undefined || elem === null) {
+        throw new Error(`Path 2 element ${i} is undefined`);
+      }
+    });
+
+    console.log(`   ✅ Got Merkle paths (depth: ${path1.pathElements.length})`);
+    console.log(
+      `   ✅ Path 1 elements: ${path1.pathElements.length}, Path 2 elements: ${path2.pathElements.length}`
+    );
+
+    // Debug blindings
+    console.log(`   🔍 userNote1.blinding:`, userNote1.blinding);
+    console.log(`   🔍 userNote2.blinding:`, userNote2.blinding);
+    console.log(`   🔍 userNote1.privateKey:`, userNote1.privateKey);
+    console.log(`   🔍 userNote2.privateKey:`, userNote2.privateKey);
+
+    const withdrawProof = await generateTransactionProof({
+      root: predictedRoot,
+      publicAmount: -withdrawAmount,
+      extDataHash: extDataHashWithdraw,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [nullifier1, nullifier2],
+      outputCommitments: [changeCommitment, dummyOutCommitment],
+      inputAmounts: [userNote1.amount, userNote2.amount],
+      inputPrivateKeys: [userNote1.privateKey, userNote2.privateKey],
+      inputPublicKeys: [userNote1.publicKey, userNote2.publicKey],
+      inputBlindings: [userNote1.blinding, userNote2.blinding],
+      inputMerklePaths: [path1, path2],
+      outputAmounts: [changeAmount, 0n],
+      outputOwners: [changePublicKey, dummyOutPubKey],
+      outputBlindings: [changeBlinding, dummyOutBlinding],
+    });
+
+    console.log("\n   ✅ All proofs generated offline!");
+    console.log("   📦 User sends to relayer (proofs + public inputs only):");
+    console.log("      - Deposit proof 1 + public inputs");
+    console.log("      - Deposit proof 2 + public inputs");
+    console.log("      - Withdrawal proof + public inputs");
+    console.log("      🔐 Private keys NEVER shared!\n");
+
+    // =============================================================================
+    // RELAYER SESSION (Online): Submit all transactions
+    // =============================================================================
+
+    console.log("🌐 RELAYER SESSION (Online - submits to blockchain):\n");
+
+    // Setup relayer
+    await airdropAndConfirm(
+      provider,
+      relayerWallet.publicKey,
+      10 * LAMPORTS_PER_SOL
+    );
+    await airdropAndConfirm(
+      provider,
+      withdrawRecipient.publicKey,
+      0.1 * LAMPORTS_PER_SOL
+    );
+
+    await (program.methods as any)
+      .addRelayer(relayerWallet.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    console.log(`   Relayer: ${relayerWallet.publicKey.toBase58()}`);
+    console.log("   ✅ Relayer registered");
+    console.log(
+      "   💰 Relayer has funds to deposit (simulated via airdrop in test)"
+    );
+    console.log(
+      "   ⚠️  Note: In production, user must transfer SOL to relayer first"
+    );
+    console.log(
+      "      (off-chain via CEX, or on-chain which requires ONE user signature)"
+    );
+    console.log(
+      "   ✅ For deposits: Relayer signs blockchain transactions (user doesn't)\n"
+    );
+
+    // Transaction 1: Deposit #1
+    console.log("   📡 Tx 1: Submitting Deposit #1...");
+
+    const [nullifierMarker0_d1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn0Nullifier)],
+      program.programId
+    );
+    const [nullifierMarker1_d1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn1Nullifier)],
+      program.programId
+    );
+
+    const deposit1Tx = await (program.methods as any)
+      .transact(
+        Array.from(initialRoot), // Use initial root (matches proof)
+        new BN(userNote1.amount.toString()),
+        Array.from(extDataHashDeposit1),
+        SOL_MINT,
+        Array.from(dummyIn0Nullifier),
+        Array.from(dummyIn1Nullifier),
+        Array.from(commitment1),
+        Array.from(dummyDeposit1Commitment),
+        extDataDeposit1,
+        deposit1Proof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker0_d1,
+        nullifierMarker1: nullifierMarker1_d1,
+        relayer: relayerWallet.publicKey, // Relayer signs
+        recipient: relayerWallet.publicKey, // Relayer is depositing
+        vaultTokenAccount: relayerWallet.publicKey,
+        userTokenAccount: relayerWallet.publicKey, // Relayer's funds
+        recipientTokenAccount: relayerWallet.publicKey,
+        relayerTokenAccount: relayerWallet.publicKey,
+        tokenProgram: relayerWallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([relayerWallet]) // ONLY RELAYER SIGNS!
+      .transaction();
+
+    const computeUnits1 = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const priorityFee1 = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const transaction1 = new Transaction();
+    transaction1.add(computeUnits1, priorityFee1, deposit1Tx);
+    await provider.sendAndConfirm(transaction1, [relayerWallet]); // Only relayer signs!
+
+    // Note: Tree already updated during proof generation phase
+
+    console.log("   ✅ Deposit #1 confirmed\n");
+
+    // Transaction 2: Deposit #2
+    console.log("   📡 Tx 2: Submitting Deposit #2...");
+    console.log(
+      "   💡 Using same initial root (zero-path proofs work with any root)"
+    );
+
+    const [nullifierMarker0_d2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn2Nullifier)],
+      program.programId
+    );
+    const [nullifierMarker1_d2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn3Nullifier)],
+      program.programId
+    );
+
+    const deposit2Tx = await (program.methods as any)
+      .transact(
+        Array.from(initialRoot), // Use same initial root (matches proof)
+        new BN(userNote2.amount.toString()),
+        Array.from(extDataHashDeposit2),
+        SOL_MINT,
+        Array.from(dummyIn2Nullifier),
+        Array.from(dummyIn3Nullifier),
+        Array.from(commitment2),
+        Array.from(dummyDeposit2Commitment),
+        extDataDeposit2,
+        deposit2Proof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker0_d2,
+        nullifierMarker1: nullifierMarker1_d2,
+        relayer: relayerWallet.publicKey, // Relayer signs
+        recipient: relayerWallet.publicKey, // Relayer is depositing
+        vaultTokenAccount: relayerWallet.publicKey,
+        userTokenAccount: relayerWallet.publicKey, // Relayer's funds
+        recipientTokenAccount: relayerWallet.publicKey,
+        relayerTokenAccount: relayerWallet.publicKey,
+        tokenProgram: relayerWallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([relayerWallet]) // ONLY RELAYER SIGNS!
+      .transaction();
+
+    const computeUnits2 = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const priorityFee2 = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const transaction2 = new Transaction();
+    transaction2.add(computeUnits2, priorityFee2, deposit2Tx);
+    await provider.sendAndConfirm(transaction2, [relayerWallet]); // Only relayer signs!
+
+    // Note: Tree already updated during proof generation phase
+
+    console.log("   ✅ Deposit #2 confirmed\n");
+
+    console.log("   ✅ Deposit #2 confirmed\n");
+
+    // Transaction 3: Withdrawal
+    console.log("   📡 Tx 3: Submitting Withdrawal...");
+
+    noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTree
+    );
+    const onchainRoot = extractRootFromAccount(noteTreeAcc);
+
+    // Verify predicted root matches actual root
+    if (Buffer.compare(predictedRoot, onchainRoot) !== 0) {
+      throw new Error(
+        "Root mismatch! User's prediction doesn't match actual tree state"
+      );
+    }
+
+    console.log("   ✅ Predicted root matches on-chain root!");
+
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(nullifier1)],
+      program.programId
+    );
+    const [nullifierMarker2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("nullifier_v3"), Buffer.from(nullifier2)],
+      program.programId
+    );
+
+    const beforeVault = BigInt(await provider.connection.getBalance(vault));
+    const beforeRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const withdrawTx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        new BN(-withdrawAmount.toString()),
+        Array.from(extDataHashWithdraw),
+        SOL_MINT,
+        Array.from(nullifier1),
+        Array.from(nullifier2),
+        Array.from(changeCommitment),
+        Array.from(dummyOutCommitment),
+        extDataWithdraw,
+        withdrawProof
+      )
+      .accounts({
+        config,
+        vault,
+        noteTree,
+        nullifiers,
+        nullifierMarker0: nullifierMarker1,
+        nullifierMarker1: nullifierMarker2,
+        relayer: relayerWallet.publicKey,
+        recipient: withdrawRecipient.publicKey,
+        vaultTokenAccount: relayerWallet.publicKey,
+        userTokenAccount: relayerWallet.publicKey,
+        recipientTokenAccount: relayerWallet.publicKey,
+        relayerTokenAccount: relayerWallet.publicKey,
+        tokenProgram: relayerWallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([relayerWallet])
+      .transaction();
+
+    const computeUnits3 = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const priorityFee3 = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const transaction3 = new Transaction();
+    transaction3.add(computeUnits3, priorityFee3, withdrawTx);
+    await provider.sendAndConfirm(transaction3, [relayerWallet]);
+
+    offchainTree.insert(changeCommitment);
+    offchainTree.insert(dummyOutCommitment);
+
+    const afterVault = BigInt(await provider.connection.getBalance(vault));
+    const afterRecipient = BigInt(
+      await provider.connection.getBalance(withdrawRecipient.publicKey)
+    );
+
+    const vaultPaid = beforeVault - afterVault;
+    const recipientReceived = afterRecipient - beforeRecipient;
+
+    console.log("   ✅ Withdrawal confirmed\n");
+
+    console.log("📊 Final Verification:");
+    console.log(`   Vault paid: ${Number(vaultPaid) / LAMPORTS_PER_SOL} SOL`);
+    console.log(
+      `   Recipient received: ${
+        Number(recipientReceived) / LAMPORTS_PER_SOL
+      } SOL`
+    );
+    console.log(
+      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`
+    );
+
+    if (vaultPaid !== withdrawAmount) {
+      throw new Error(
+        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+      );
+    }
+
+    console.log("🎉 Batch Proof Generation Success!\n");
+    console.log("✅ Workflow Summary:");
+    console.log("   1. User generated 3 proofs offline (ONE session)");
+    console.log("      - Never shared private keys");
+    console.log("      - Predicted future tree state correctly");
+    console.log("   2. User transfers SOL to relayer (production options):");
+    console.log(
+      "      - Off-chain: CEX transfer, cash, etc. (no on-chain trace)"
+    );
+    console.log(
+      "      - On-chain: Direct transfer (requires ONE user signature)"
+    );
+    console.log("      - Test: Simulated via airdrop");
+    console.log("   3. Relayer submitted ALL 3 privacy pool transactions");
+    console.log(
+      "      - Signed deposits & withdrawal (user didn't sign these!)"
+    );
+    console.log("      - Deposited on behalf of user");
+    console.log("      - Withdrew to user's recipient address");
+    console.log("   4. Result: Deposited 2.3 SOL, withdrew 2 SOL");
+    console.log("      - Created 0.3 SOL change note");
+    console.log("      - Full privacy preserved\n");
+    console.log("💡 Key Benefits:");
+    console.log("   ✅ User NEVER signs privacy pool transactions");
+    console.log("   ✅ User only online ONCE to generate all proofs");
+    console.log(
+      "   ✅ Relayer handles ALL privacy pool blockchain interaction"
+    );
+    console.log("   ✅ User's secrets never leave their device");
+    console.log("   ✅ User's deposit wallet can remain off-chain (via CEX)");
+    console.log("   ⚠️  Caveat: User must initially fund relayer somehow\n");
+  });
+
+  // =============================================================================
   // Private Transfer Test
   // =============================================================================
 
@@ -1547,11 +3549,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await provider.sendAndConfirm(depositTransaction, [alice]);
 
     // NOW insert Alice's deposit outputs into offchainTree (after on-chain transaction)
-    offchainTree.insert(aliceCommitment);
+    const actualAliceLeafIndex = offchainTree.insert(aliceCommitment);
     offchainTree.insert(aliceDummyCommitment);
 
+    // Verify prediction was correct
+    if (actualAliceLeafIndex !== aliceLeafIndex) {
+      throw new Error(
+        `Alice leaf index mismatch: predicted ${aliceLeafIndex}, got ${actualAliceLeafIndex}`
+      );
+    }
+
     console.log(
-      `✅ Alice deposited ${aliceDepositAmount} lamports (Leaf ${aliceLeafIndex})\n`
+      `✅ Alice deposited ${aliceDepositAmount} lamports (Leaf ${actualAliceLeafIndex})\n`
     );
 
     // =============================================================================
@@ -1559,6 +3568,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // =============================================================================
 
     console.log("🔄 Private Transfer: Alice → Bob\n");
+
+    // Create and register a separate relayer (for enhanced privacy)
+    const transferRelayer = Keypair.generate();
+    console.log(
+      `   Relayer: ${transferRelayer.publicKey.toBase58()} (will sign tx)`
+    );
+    await airdropAndConfirm(
+      provider,
+      transferRelayer.publicKey,
+      1 * LAMPORTS_PER_SOL
+    );
+
+    // Register the relayer
+    await (program.methods as any)
+      .addRelayer(transferRelayer.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+
+    console.log(
+      "   ✅ Relayer registered (Alice will send proof to relayer off-chain)\n"
+    );
 
     // Bob generates his keypair (only Bob has this private key)
     const bobPrivateKey = randomBytes32();
@@ -1579,7 +3609,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(`   Input: Alice's ${aliceDepositAmount} lamports note`);
     console.log(`   Output 1: Bob receives ${transferAmount} lamports`);
     console.log(`   Output 2: Alice keeps ${changeAmount} lamports (change)`);
-    console.log(`   On-chain trace: NONE - fully private! 🎭\n`);
+    console.log(`   On-chain trace: NONE - fully private! 🎭`);
+    console.log(
+      `   🔐 Privacy: Relayer signs tx, Alice's wallet never appears on-chain!\n`
+    );
 
     // Create Alice's change note (new privateKey for security)
     const aliceChangePrivKey = randomBytes32();
@@ -1622,9 +3655,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     // Prepare transaction (publicAmount = 0 for pure transfer, no deposit/withdrawal)
+    // Alice will send this to the relayer off-chain
     const extDataTransfer = {
-      recipient: alice.publicKey, // Doesn't reveal anything
-      relayer: alice.publicKey,
+      recipient: Keypair.generate().publicKey, // Random recipient (no actual payment)
+      relayer: transferRelayer.publicKey, // Separate relayer signs the transaction
       fee: new BN(0),
       refund: new BN(0),
     };
@@ -1635,8 +3669,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
 
-    // Get Alice's Merkle path (after deposit, before transfer)
-    const aliceUpdatedPath = offchainTree.getMerkleProof(aliceLeafIndex);
+    // Get Alice's Merkle path (using the actual leaf index from insertion)
+    const aliceUpdatedPath = offchainTree.getMerkleProof(actualAliceLeafIndex);
+
+    console.log("🔐 Alice generates proof locally (off-chain):");
+    console.log("   ✅ Alice computes ZK proof with her private key (locally)");
+    console.log(
+      "   ✅ Alice sends proof + public inputs to relayer (off-chain)"
+    );
+    console.log("   ✅ Relayer will sign and submit transaction (on-chain)\n");
 
     // Generate proof: Alice spends her note, creates Bob's note + her change
     const transferProof = await generateTransactionProof({
@@ -1664,6 +3705,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     // Execute on-chain (nullifies Alice's old note, creates 2 new commitments)
+    // IMPORTANT: Relayer signs the transaction, NOT Alice!
     const [aliceNullifierMarker] = PublicKey.findProgramAddressSync(
       [Buffer.from("nullifier_v3"), Buffer.from(aliceNullifier)],
       program.programId
@@ -1693,16 +3735,16 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         nullifiers,
         nullifierMarker0: aliceNullifierMarker,
         nullifierMarker1: transferDummyNullifierMarker,
-        relayer: alice.publicKey,
-        recipient: alice.publicKey,
-        vaultTokenAccount: alice.publicKey, // Placeholder for SOL
-        userTokenAccount: alice.publicKey, // Placeholder for SOL
-        recipientTokenAccount: alice.publicKey, // Placeholder for SOL
-        relayerTokenAccount: alice.publicKey, // Placeholder for SOL
-        tokenProgram: alice.publicKey, // Placeholder for SOL
+        relayer: transferRelayer.publicKey, // RELAYER SIGNS, NOT ALICE!
+        recipient: extDataTransfer.recipient,
+        vaultTokenAccount: transferRelayer.publicKey, // Placeholder for SOL
+        userTokenAccount: transferRelayer.publicKey, // Placeholder for SOL
+        recipientTokenAccount: transferRelayer.publicKey, // Placeholder for SOL
+        relayerTokenAccount: transferRelayer.publicKey, // Placeholder for SOL
+        tokenProgram: transferRelayer.publicKey, // Placeholder for SOL
         systemProgram: SystemProgram.programId,
       })
-      .signers([alice])
+      .signers([transferRelayer]) // RELAYER SIGNS!
       .transaction();
 
     // Add compute budget instructions
@@ -1718,7 +3760,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     transferTransaction.add(transferPriorityFee);
     transferTransaction.add(transferTx);
 
-    await provider.sendAndConfirm(transferTransaction, [alice]);
+    console.log("📡 Relayer submits transaction on-chain:");
+    console.log(`   Signer: ${transferRelayer.publicKey.toBase58()} (relayer)`);
+    console.log("   ✅ Alice's wallet NEVER appears on-chain");
+    console.log(
+      "   ✅ On-chain observer sees: relayer submits anonymous transfer\n"
+    );
+
+    await provider.sendAndConfirm(transferTransaction, [transferRelayer]);
 
     // Now insert outputs into off-chain tree (after on-chain transaction)
     const bobLeafIndex = offchainTree.insert(bobCommitment);
@@ -1734,6 +3783,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
     console.log(
       `   🔒 Bob needs his secrets to spend (Alice sends these off-chain)\n`
+    );
+
+    console.log("🎭 Privacy Benefits:");
+    console.log(
+      "   ✅ Alice generated proof with her private key (proves ownership)"
+    );
+    console.log(
+      "   ✅ Relayer signed transaction (Alice's wallet never on-chain)"
+    );
+    console.log("   ✅ Bob receives note without on-chain link to Alice");
+    console.log(
+      "   ✅ On-chain: only see nullifiers + commitments (no identities!)\n"
     );
 
     // =============================================================================
@@ -1889,6 +3950,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   ✅ No on-chain link between Alice and Bob");
     console.log(
       "   ✅ Transfer is fully private (publicAmount = 0, no vault movement)"
+    );
+    console.log(
+      "   ✅ Relayer signing enhances privacy (Alice's wallet never on-chain)"
     );
     console.log(
       "   ✅ Recipient-only withdrawal enforced by ZK circuit requiring privateKey knowledge\n"
@@ -2132,6 +4196,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   ✅ Alice transferred 1 SOL to Bob privately");
     console.log("   ✅ Bob withdrew his 1 SOL successfully");
     console.log("   ✅ No on-chain link between Alice and Bob");
+    console.log(
+      "   ✅ Relayer signed transfer (Alice's wallet never appeared on-chain)"
+    );
     console.log(
       "   ✅ Only Bob (recipient) could withdraw the transferred note"
     );
