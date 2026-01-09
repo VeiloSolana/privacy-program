@@ -526,11 +526,19 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(depositNote.nullifier)],
+      [
+        Buffer.from("nullifier_v4"),
+        testMint.toBuffer(),
+        Buffer.from(depositNote.nullifier),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [
+        Buffer.from("nullifier_v4"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -587,8 +595,9 @@ describe("Privacy Pool - SPL Token Support", () => {
       await provider.connection.confirmTransaction({
         signature: sig,
         blockhash: blockhash,
-        lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-          .lastValidBlockHeight,
+        lastValidBlockHeight: (
+          await provider.connection.getLatestBlockhash()
+        ).lastValidBlockHeight,
       });
 
       // Insert outputs into offchain tree
@@ -799,8 +808,9 @@ describe("Privacy Pool - SPL Token Support", () => {
     await provider.connection.confirmTransaction({
       signature: depositSig,
       blockhash: blockhash,
-      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-        .lastValidBlockHeight,
+      lastValidBlockHeight: (
+        await provider.connection.getLatestBlockhash()
+      ).lastValidBlockHeight,
     });
 
     offchainTokenTree.insert(aliceCommitment);
@@ -903,11 +913,19 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [aliceNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(aliceNullifier)],
+      [
+        Buffer.from("nullifier_v4"),
+        testMint.toBuffer(),
+        Buffer.from(aliceNullifier),
+      ],
       program.programId
     );
     const [transferDummyNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(transferDummyNullifier)],
+      [
+        Buffer.from("nullifier_v4"),
+        testMint.toBuffer(),
+        Buffer.from(transferDummyNullifier),
+      ],
       program.programId
     );
 
@@ -966,8 +984,9 @@ describe("Privacy Pool - SPL Token Support", () => {
     await provider.connection.confirmTransaction({
       signature: transferSig,
       blockhash: transferBlockhash,
-      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-        .lastValidBlockHeight,
+      lastValidBlockHeight: (
+        await provider.connection.getLatestBlockhash()
+      ).lastValidBlockHeight,
     });
 
     const bobLeafIndex = offchainTokenTree.insert(bobCommitment);
