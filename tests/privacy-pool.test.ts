@@ -770,12 +770,23 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     poseidon = await buildPoseidon();
     offchainTree = new OffchainMerkleTree(16, poseidon);
 
-    // Get PDAs
-    const pdas = getPoolPdas(program.programId);
-    config = pdas.config;
-    vault = pdas.vault;
-    noteTree = pdas.noteTree;
-    nullifiers = pdas.nullifiers;
+    // Get PDAs (v3 with mint_address in seeds)
+    [config] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_config_v3"), SOL_MINT.toBuffer()],
+      program.programId
+    );
+    [vault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_vault_v3"), SOL_MINT.toBuffer()],
+      program.programId
+    );
+    [noteTree] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_note_tree_v3"), SOL_MINT.toBuffer()],
+      program.programId
+    );
+    [nullifiers] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_nullifiers_v3"), SOL_MINT.toBuffer()],
+      program.programId
+    );
 
     console.log("Program ID:", program.programId.toBase58());
     console.log("Config PDA:", config.toBase58());
@@ -833,7 +844,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // For deposit, sender acts as their own relayer (self-deposit)
     // Register sender as relayer
     // await (program.methods as any)
-    //   .addRelayer(sender.publicKey)
+    //   .addRelayer(SOL_MINT, sender.publicKey)
     //   .accounts({ config, admin: wallet.publicKey })
     //   .rpc();
 
@@ -997,11 +1008,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -1191,7 +1210,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register relayer
     await (program.methods as any)
-      .addRelayer(relayer.publicKey)
+      .addRelayer(SOL_MINT, relayer.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -1353,11 +1372,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(depositNote.nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(depositNote.nullifier),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -1527,7 +1554,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register user as relayer for deposits
     await (program.methods as any)
-      .addRelayer(user.publicKey)
+      .addRelayer(SOL_MINT, user.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -1635,11 +1662,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker0_d1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1_d1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -1795,11 +1830,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker0_d2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier2)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier2),
+      ],
       program.programId
     );
     const [nullifierMarker1_d2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier3)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier3),
+      ],
       program.programId
     );
 
@@ -1876,7 +1919,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register withdrawal relayer
     await (program.methods as any)
-      .addRelayer(withdrawRelayer.publicKey)
+      .addRelayer(SOL_MINT, withdrawRelayer.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -1974,11 +2017,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [deposit1NullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(deposit1Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(deposit1Nullifier),
+      ],
       program.programId
     );
     const [deposit2NullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(deposit2Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(deposit2Nullifier),
+      ],
       program.programId
     );
 
@@ -2104,7 +2155,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(provider, user.publicKey, 20 * LAMPORTS_PER_SOL);
 
     await (program.methods as any)
-      .addRelayer(user.publicKey)
+      .addRelayer(SOL_MINT, user.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -2217,11 +2268,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       });
 
       const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-        [Buffer.from("nullifier_v3"), Buffer.from(dummyIn0Nullifier)],
+        [
+          Buffer.from("nullifier_v3"),
+          SOL_MINT.toBuffer(),
+          Buffer.from(dummyIn0Nullifier),
+        ],
         program.programId
       );
       const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-        [Buffer.from("nullifier_v3"), Buffer.from(dummyIn1Nullifier)],
+        [
+          Buffer.from("nullifier_v3"),
+          SOL_MINT.toBuffer(),
+          Buffer.from(dummyIn1Nullifier),
+        ],
         program.programId
       );
 
@@ -2478,11 +2537,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         );
 
         const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-          [Buffer.from("nullifier_v3"), Buffer.from(data.nullifier1)],
+          [
+            Buffer.from("nullifier_v3"),
+            SOL_MINT.toBuffer(),
+            Buffer.from(data.nullifier1),
+          ],
           program.programId
         );
         const [nullifierMarker2] = PublicKey.findProgramAddressSync(
-          [Buffer.from("nullifier_v3"), Buffer.from(data.nullifier2)],
+          [
+            Buffer.from("nullifier_v3"),
+            SOL_MINT.toBuffer(),
+            Buffer.from(data.nullifier2),
+          ],
           program.programId
         );
 
@@ -2610,7 +2677,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     await (program.methods as any)
-      .addRelayer(withdrawRelayer.publicKey)
+      .addRelayer(SOL_MINT, withdrawRelayer.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -2719,11 +2786,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(nullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(nullifier1),
+      ],
       program.programId
     );
     const [nullifierMarker2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(nullifier2)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(nullifier2),
+      ],
       program.programId
     );
 
@@ -3230,7 +3305,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     await (program.methods as any)
-      .addRelayer(relayerWallet.publicKey)
+      .addRelayer(SOL_MINT, relayerWallet.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -3253,11 +3328,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   📡 Tx 1: Submitting Deposit #1...");
 
     const [nullifierMarker0_d1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn0Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyIn0Nullifier),
+      ],
       program.programId
     );
     const [nullifierMarker1_d1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn1Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyIn1Nullifier),
+      ],
       program.programId
     );
 
@@ -3315,11 +3398,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     );
 
     const [nullifierMarker0_d2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn2Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyIn2Nullifier),
+      ],
       program.programId
     );
     const [nullifierMarker1_d2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyIn3Nullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyIn3Nullifier),
+      ],
       program.programId
     );
 
@@ -3390,11 +3481,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   ✅ Predicted root matches on-chain root!");
 
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(nullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(nullifier1),
+      ],
       program.programId
     );
     const [nullifierMarker2] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(nullifier2)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(nullifier2),
+      ],
       program.programId
     );
 
@@ -3523,7 +3622,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register Alice as relayer
     await (program.methods as any)
-      .addRelayer(alice.publicKey)
+      .addRelayer(SOL_MINT, alice.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -3633,11 +3732,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -3722,7 +3829,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register the relayer
     await (program.methods as any)
-      .addRelayer(transferRelayer.publicKey)
+      .addRelayer(SOL_MINT, transferRelayer.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -3847,11 +3954,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Execute on-chain (nullifies Alice's old note, creates 2 new commitments)
     // IMPORTANT: Relayer signs the transaction, NOT Alice!
     const [aliceNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(aliceNullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(aliceNullifier),
+      ],
       program.programId
     );
     const [transferDummyNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(transferDummyNullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(transferDummyNullifier),
+      ],
       program.programId
     );
 
@@ -4123,7 +4238,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Register Bob as relayer
     await (program.methods as any)
-      .addRelayer(bob.publicKey)
+      .addRelayer(SOL_MINT, bob.publicKey)
       .accounts({ config, admin: wallet.publicKey })
       .rpc();
 
@@ -4234,11 +4349,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     const [bobNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(bobNullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(bobNullifier),
+      ],
       program.programId
     );
     const [bobDummyNullifierMarker] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(bobDummyNullifier)],
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(bobDummyNullifier),
+      ],
       program.programId
     );
 

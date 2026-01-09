@@ -29,7 +29,6 @@ import {
   getAssociatedTokenAddress,
 } from "@solana/spl-token";
 import { buildPoseidon } from "circomlibjs";
-import { getPoolPdas } from "@zkprivacysol/sdk-core";
 
 import {
   DepositNote,
@@ -96,12 +95,23 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
-    // Get PDAs for token pool
-    const pdas = getPoolPdas(program.programId, testMint);
-    tokenConfig = pdas.config;
-    tokenVault = pdas.vault;
-    tokenNoteTree = pdas.noteTree;
-    tokenNullifiers = pdas.nullifiers;
+    // Get PDAs for token pool (v3 with mint_address in seeds)
+    [tokenConfig] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_config_v3"), testMint.toBuffer()],
+      program.programId
+    );
+    [tokenVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_vault_v3"), testMint.toBuffer()],
+      program.programId
+    );
+    [tokenNoteTree] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_note_tree_v3"), testMint.toBuffer()],
+      program.programId
+    );
+    [tokenNullifiers] = PublicKey.findProgramAddressSync(
+      [Buffer.from("privacy_nullifiers_v3"), testMint.toBuffer()],
+      program.programId
+    );
 
     // Create vault's token account (ATA)
     vaultTokenAccount = await getAssociatedTokenAddress(
@@ -295,11 +305,19 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -587,8 +605,9 @@ describe("Privacy Pool - SPL Token Support", () => {
       await provider.connection.confirmTransaction({
         signature: sig,
         blockhash: blockhash,
-        lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-          .lastValidBlockHeight,
+        lastValidBlockHeight: (
+          await provider.connection.getLatestBlockhash()
+        ).lastValidBlockHeight,
       });
 
       // Insert outputs into offchain tree
@@ -739,11 +758,19 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
@@ -799,8 +826,9 @@ describe("Privacy Pool - SPL Token Support", () => {
     await provider.connection.confirmTransaction({
       signature: depositSig,
       blockhash: blockhash,
-      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-        .lastValidBlockHeight,
+      lastValidBlockHeight: (
+        await provider.connection.getLatestBlockhash()
+      ).lastValidBlockHeight,
     });
 
     offchainTokenTree.insert(aliceCommitment);
@@ -966,8 +994,9 @@ describe("Privacy Pool - SPL Token Support", () => {
     await provider.connection.confirmTransaction({
       signature: transferSig,
       blockhash: transferBlockhash,
-      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
-        .lastValidBlockHeight,
+      lastValidBlockHeight: (
+        await provider.connection.getLatestBlockhash()
+      ).lastValidBlockHeight,
     });
 
     const bobLeafIndex = offchainTokenTree.insert(bobCommitment);
@@ -1112,11 +1141,19 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
+      [
+        Buffer.from("nullifier_v3"),
+        testMint.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
       program.programId
     );
 
