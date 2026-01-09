@@ -571,3 +571,126 @@ export async function generateTransactionProof(inputs: {
 
   return convertProofToBytes(proof);
 }
+
+/**
+ * Fetches, parses, and verifies events from a transaction
+ * Returns the count of verified events
+ */
+export async function fetchAndDisplayEvents(
+  connection: Connection,
+  txSignature: string,
+  expectedMintAddress: PublicKey
+): Promise<number> {
+  const tx = await connection.getTransaction(txSignature, {
+    commitment: 'confirmed',
+    maxSupportedTransactionVersion: 0
+  });
+
+  if (!tx || !tx.meta) {
+    console.log("❌ Transaction not found");
+    throw new Error("Transaction not found");
+  }
+
+  const logs = tx.meta.logMessages || [];
+  console.log("\n=== Transaction Events ===");
+
+  // Filter for event logs (Anchor emits as "Program data: <base64>")
+  const eventLogs = logs.filter(log => log.includes('Program data:'));
+  console.log(`📊 Found ${eventLogs.length} event log entries`);
+
+  // Event discriminators (first 8 bytes of event data)
+  // CommitmentEvent discriminator: [89, 205, 140, 111, 36, 129, 217, 125]
+  // NullifierSpent discriminator: [166, 111, 130, 54, 212, 115, 152, 215]
+
+  let commitmentEventCount = 0;
+  let nullifierSpentCount = 0;
+  let mintAddressMatches = 0;
+
+  eventLogs.forEach((log, i) => {
+    // Extract base64 data from "Program data: <base64>"
+    const parts = log.split('Program data: ');
+    if (parts.length < 2) return;
+
+    const base64Data = parts[1].trim();
+    const eventData = Buffer.from(base64Data, 'base64');
+
+    if (eventData.length < 8) return;
+
+    // Check discriminator
+    const discriminator = Array.from(eventData.subarray(0, 8));
+
+    // CommitmentEvent: commitment[32] + leaf_index[8] + new_root[32] + timestamp[8] + mint_address[32]
+    // Total: 8 (discriminator) + 32 + 8 + 32 + 8 + 32 = 120 bytes
+    if (discriminator.join(',') === '89,205,140,111,36,129,217,125') {
+      commitmentEventCount++;
+      console.log(`\nEvent ${i + 1}: CommitmentEvent`);
+
+      if (eventData.length >= 120) {
+        // Extract mint_address (last 32 bytes of the data)
+        const mintAddressBytes = eventData.subarray(88, 120);
+        const mintAddress = new PublicKey(mintAddressBytes);
+
+        console.log(`   Commitment: ${eventData.subarray(8, 40).toString('hex').slice(0, 20)}...`);
+        console.log(`   Leaf Index: ${eventData.readBigUInt64LE(40)}`);
+        console.log(`   Mint Address: ${mintAddress.toString()}`);
+
+        if (mintAddress.equals(expectedMintAddress)) {
+          console.log(`   ✅ Mint address matches expected!`);
+          mintAddressMatches++;
+        } else {
+          console.log(`   ❌ Mint address MISMATCH!`);
+          console.log(`      Expected: ${expectedMintAddress.toString()}`);
+          console.log(`      Got:      ${mintAddress.toString()}`);
+          throw new Error(`Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`);
+        }
+      }
+    }
+
+    // NullifierSpent: nullifier[32] + timestamp[8] + mint_address[32]
+    // Total: 8 (discriminator) + 32 + 8 + 32 = 80 bytes
+    else if (discriminator.join(',') === '166,111,130,54,212,115,152,215') {
+      nullifierSpentCount++;
+      console.log(`\nEvent ${i + 1}: NullifierSpent`);
+
+      if (eventData.length >= 80) {
+        // Extract mint_address (last 32 bytes of the data)
+        const mintAddressBytes = eventData.subarray(48, 80);
+        const mintAddress = new PublicKey(mintAddressBytes);
+
+        console.log(`   Nullifier: ${eventData.subarray(8, 40).toString('hex').slice(0, 20)}...`);
+        console.log(`   Mint Address: ${mintAddress.toString()}`);
+
+        if (mintAddress.equals(expectedMintAddress)) {
+          console.log(`   ✅ Mint address matches expected!`);
+          mintAddressMatches++;
+        } else {
+          console.log(`   ❌ Mint address MISMATCH!`);
+          console.log(`      Expected: ${expectedMintAddress.toString()}`);
+          console.log(`      Got:      ${mintAddress.toString()}`);
+          throw new Error(`Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`);
+        }
+      }
+    }
+  });
+
+  console.log(`\n📊 Event Summary:`);
+  console.log(`   CommitmentEvent count: ${commitmentEventCount}`);
+  console.log(`   NullifierSpent count: ${nullifierSpentCount}`);
+  console.log(`   Mint addresses verified: ${mintAddressMatches}/${commitmentEventCount + nullifierSpentCount}`);
+  console.log(`   Expected mint_address: ${expectedMintAddress.toString()}`);
+
+  // Assert that we found the expected events and all mint addresses match
+  const totalEvents = commitmentEventCount + nullifierSpentCount;
+  if (totalEvents === 0) {
+    throw new Error("No events found in transaction");
+  }
+
+  if (mintAddressMatches !== totalEvents) {
+    throw new Error(`Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`);
+  }
+
+  console.log(`✅ All event mint_address fields verified successfully!`);
+  console.log("=== End Events ===\n");
+
+  return totalEvents;
+}
