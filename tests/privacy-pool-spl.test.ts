@@ -97,7 +97,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
     // Get PDAs for token pool
-    const pdas = getPoolPdas(program.programId);
+    const pdas = getPoolPdas(program.programId, testMint);
     tokenConfig = pdas.config;
     tokenVault = pdas.vault;
     tokenNoteTree = pdas.noteTree;
@@ -180,7 +180,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Register sender as relayer
     await (program.methods as any)
-      .addRelayer(sender.publicKey)
+      .addRelayer(testMint, sender.publicKey)
       .accounts({ config: tokenConfig, admin: wallet.publicKey })
       .rpc();
 
@@ -295,11 +295,11 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
       program.programId
     );
 
@@ -434,7 +434,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Register relayer
     await (program.methods as any)
-      .addRelayer(relayer.publicKey)
+      .addRelayer(testMint, relayer.publicKey)
       .accounts({ config: tokenConfig, admin: wallet.publicKey })
       .rpc();
 
@@ -632,7 +632,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Register Alice as relayer
     await (program.methods as any)
-      .addRelayer(alice.publicKey)
+      .addRelayer(testMint, alice.publicKey)
       .accounts({ config: tokenConfig, admin: wallet.publicKey })
       .rpc();
 
@@ -739,11 +739,11 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
       program.programId
     );
 
@@ -1009,7 +1009,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
 
     await (program.methods as any)
-      .addRelayer(sender.publicKey)
+      .addRelayer(testMint, sender.publicKey)
       .accounts({ config: tokenConfig, admin: wallet.publicKey })
       .rpc();
 
@@ -1112,11 +1112,11 @@ describe("Privacy Pool - SPL Token Support", () => {
     });
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier0)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier0],
       program.programId
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [Buffer.from("nullifier_v3"), Buffer.from(dummyNullifier1)],
+      [Buffer.from("nullifier_v4"), testMint.toBuffer(), dummyNullifier1],
       program.programId
     );
 
