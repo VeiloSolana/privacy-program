@@ -47,6 +47,7 @@ import {
   derivePublicKey,
   bytesToBigIntBE,
   generateTransactionProof,
+  fetchAndDisplayEvents,
 } from "./test-helpers";
 
 describe("Privacy Pool - SPL Token Support", () => {
@@ -302,6 +303,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       program.programId
     );
 
+    let txSignature: string;
+
     try {
       const tx = await (program.methods as any)
         .transact(
@@ -347,7 +350,11 @@ describe("Privacy Pool - SPL Token Support", () => {
       transaction.add(addPriorityFee);
       transaction.add(tx);
 
-      await provider.sendAndConfirm(transaction, [sender]);
+      txSignature = await provider.sendAndConfirm(transaction, [sender]);
+      console.log(`\n✅ Transaction signature: ${txSignature}`);
+
+      // Verify events
+      await fetchAndDisplayEvents(provider.connection, txSignature, testMint);
 
       // Insert outputs into offchain tree
       offchainTokenTree.insert(commitment);
