@@ -246,7 +246,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump,
         space = PrivacyConfig::LEN
     )]
@@ -255,7 +255,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v4", mint_address.as_ref()],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump,
         space = Vault::LEN
     )]
@@ -264,7 +264,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v4", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
         space = MerkleTreeAccount::LEN,
     )]
@@ -273,7 +273,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_nullifiers_v4", mint_address.as_ref()],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump,
         space = NullifierSet::LEN
     )]
@@ -290,7 +290,7 @@ pub struct Initialize<'info> {
 pub struct ConfigAdmin<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump,
         has_one = admin
     )]
@@ -305,21 +305,21 @@ pub struct ConfigAdmin<'info> {
 pub struct DepositFixed<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v4", mint_address.as_ref()],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v4", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
@@ -346,28 +346,28 @@ pub struct DepositFixed<'info> {
 pub struct Transact<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v4", mint_address.as_ref()],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v4", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v4", mint_address.as_ref()],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -376,7 +376,7 @@ pub struct Transact<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v4", mint_address.as_ref(), input_nullifier_0.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -386,7 +386,7 @@ pub struct Transact<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v4", mint_address.as_ref(), input_nullifier_1.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -435,28 +435,28 @@ pub struct Transact<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v4", mint_address.as_ref()],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v4", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v4", mint_address.as_ref()],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -465,7 +465,7 @@ pub struct Withdraw<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v4", mint_address.as_ref(), nullifier.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), nullifier.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -494,21 +494,21 @@ pub struct TransferPublicInputs {
 pub struct PrivateTransfer<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v4", mint_address.as_ref()],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v4", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v4", mint_address.as_ref()],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -517,7 +517,7 @@ pub struct PrivateTransfer<'info> {
     #[account(
         init,
         payer = sender,
-        seeds = [b"nullifier_v4", mint_address.as_ref(), old_nullifier.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), old_nullifier.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -595,13 +595,21 @@ pub mod privacy_pool {
         Ok(())
     }
 
-    pub fn set_paused(ctx: Context<ConfigAdmin>, _mint_address: Pubkey, paused: bool) -> Result<()> {
+    pub fn set_paused(
+        ctx: Context<ConfigAdmin>,
+        _mint_address: Pubkey,
+        paused: bool,
+    ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         cfg.paused = paused;
         Ok(())
     }
 
-    pub fn add_relayer(ctx: Context<ConfigAdmin>, _mint_address: Pubkey, new_relayer: Pubkey) -> Result<()> {
+    pub fn add_relayer(
+        ctx: Context<ConfigAdmin>,
+        _mint_address: Pubkey,
+        new_relayer: Pubkey,
+    ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         if cfg.is_relayer(&new_relayer) {
             return Ok(());
@@ -995,7 +1003,11 @@ fn handle_public_amount<'info>(
                         to: recipient_token_account.to_account_info(),
                         authority: vault.to_account_info(),
                     },
-                    &[&[b"privacy_vault_v4", config.mint_address.as_ref(), &[vault.bump]]],
+                    &[&[
+                        b"privacy_vault_v3",
+                        config.mint_address.as_ref(),
+                        &[vault.bump],
+                    ]],
                 ),
                 to_recipient,
             )?;
@@ -1014,7 +1026,11 @@ fn handle_public_amount<'info>(
                             to: relayer_token_account.to_account_info(),
                             authority: vault.to_account_info(),
                         },
-                        &[&[b"privacy_vault_v4", config.mint_address.as_ref(), &[vault.bump]]],
+                        &[&[
+                            b"privacy_vault_v3",
+                            config.mint_address.as_ref(),
+                            &[vault.bump],
+                        ]],
                     ),
                     to_relayer,
                 )?;
