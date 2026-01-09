@@ -762,6 +762,7 @@ pub mod privacy_pool {
             &mut ctx.accounts.nullifiers,
             input_nullifiers[0],
             ctx.bumps.nullifier_marker_0,
+            mint_address,
         )?;
 
         mark_nullifier_spent(
@@ -769,6 +770,7 @@ pub mod privacy_pool {
             &mut ctx.accounts.nullifiers,
             input_nullifiers[1],
             ctx.bumps.nullifier_marker_1,
+            mint_address,
         )?;
 
         // 9. Insert both output commitments into tree
@@ -788,12 +790,14 @@ pub mod privacy_pool {
             leaf_index: leaf_index_0,
             new_root,
             timestamp,
+            mint_address,
         });
         emit!(CommitmentEvent {
             commitment: output_commitments[1],
             leaf_index: leaf_index_1,
             new_root,
             timestamp,
+            mint_address,
         });
 
         // 10. Handle public amount (deposits/withdrawals)
@@ -824,6 +828,7 @@ fn mark_nullifier_spent(
     nullifier_set: &mut Account<NullifierSet>,
     nullifier: [u8; 32],
     bump: u8,
+    mint_address: Pubkey,
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
@@ -841,6 +846,7 @@ fn mark_nullifier_spent(
     emit!(NullifierSpent {
         nullifier,
         timestamp,
+        mint_address,
     });
 
     Ok(())
@@ -1065,12 +1071,14 @@ pub struct CommitmentEvent {
     pub leaf_index: u64,
     pub new_root: [u8; 32],
     pub timestamp: i64,
+    pub mint_address: Pubkey,
 }
 
 #[event]
 pub struct NullifierSpent {
     pub nullifier: [u8; 32],
     pub timestamp: i64,
+    pub mint_address: Pubkey,
 }
 
 // ---- Errors ----
