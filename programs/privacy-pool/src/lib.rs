@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
+use anchor_spl::token::{self, TokenAccount};
 use light_hasher::Poseidon;
 
 pub mod groth16;
@@ -8,9 +8,8 @@ pub mod vk_constants;
 pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
-use zk::{verify_withdraw_groth16, WithdrawProof};
 
-declare_id!("2wnQ73YALm7eFa6EKwdtNVheKpNFWRN8j4VXCPgBiu7R");
+declare_id!("25nWpBnbvqh8mQ19SpnkVcDnmm72m3R7YCSh2RAEpLQF");
 
 // ---- Constants ----
 
@@ -33,16 +32,20 @@ pub struct PrivacyConfig {
     pub admin: Pubkey,
     /// Is pool paused?
     pub paused: bool,
-    /// Fee in basis points (0–10_000)
+    /// Fee in basis points (0–10_000) for withdrawals
     pub fee_bps: u16,
 
-    /// Number of active denominations
-    pub num_denoms: u8,
-    /// Supported fixed denominations (in lamports)
-    pub denoms: [u64; MAX_DENOMS],
+    /// Minimum fee for withdrawals (in lamports) to ensure relayer compensation
+    pub min_withdrawal_fee: u64,
 
-    /// Total value locked per denom index
-    pub tvl: [u64; MAX_DENOMS],
+    /// Total value locked (all deposits combined)
+    pub total_tvl: u64,
+
+    /// Token mint address (for now: SOL, future: multi-token support)
+    pub mint_address: Pubkey,
+
+    /// Maximum amount allowed per deposit (in lamports/token units)
+    pub max_deposit_amount: u64,
 
     /// Relayer registry
     pub num_relayers: u8,
@@ -65,9 +68,10 @@ impl PrivacyConfig {
         32 +  // admin
         1 +   // paused
         2 +   // fee_bps
-        1 +   // num_denoms
-        8 * MAX_DENOMS + // denoms
-        8 * MAX_DENOMS + // tvl
+        8 +   // min_withdrawal_fee
+        8 +   // total_tvl
+        32 +  // mint_address
+        8 +   // max_deposit_amount
         1 +   // num_relayers
         32 * MAX_RELAYERS + // relayers
         8 +   // min_deposit
@@ -119,15 +123,126 @@ impl NullifierMarker {
     pub const LEN: usize = 8 + 32 + 8 + 4 + 1; // 53 bytes
 }
 
-// ---- ZK public inputs (for withdraw circuit) ----
+// ---- ZK public inputs (for transaction circuit) ----
 
-/// Public inputs passed to the zk circuit for a withdraw.
+/// Public inputs for Transaction(16, 2, 2) circuit
 ///
-/// Circom `WithdrawCircuit(DEPTH)` must use:
-///   0: Merkle root
-///   1: nullifier
-///   2: denom index
-///   3: recipient pubkey
+/// Circuit proves:
+/// 1. Two input notes exist in Merkle tree at `root`
+/// 2. User knows secrets for both input notes
+/// 3. sum(inputs) + publicAmount = sum(outputs)
+/// 4. Input notes haven't been spent (nullifiers fresh)
+/// 5. extDataHash commits to (recipient, relayer, fee, refund)
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct TransactionPublicInputs {
+    /// Merkle root (must be in root_history)
+    pub root: [u8; 32],
+
+    /// Net public amount (i64 - can be negative for deposits)
+    /// Positive = withdrawal, Negative = deposit, Zero = private transfer
+    pub public_amount: i64,
+
+    /// Hash of external data: Poseidon(recipient, relayer, fee, refund)
+    pub ext_data_hash: [u8; 32],
+
+    /// Token mint (for now: use SOL pubkey constant)
+    pub mint_address: Pubkey,
+
+    /// Input nullifiers (2 notes consumed)
+    pub input_nullifiers: [[u8; 32]; 2],
+
+    /// Output commitments (2 notes created)
+    pub output_commitments: [[u8; 32]; 2],
+}
+
+/// External data that gets hashed into ext_data_hash
+/// These are public parameters that affect financial flows
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct ExtData {
+    /// Who receives withdrawal
+    pub recipient: Pubkey,
+    /// Who submits tx (gets fee)
+    pub relayer: Pubkey,
+    /// Fee to relayer in lamports
+    pub fee: u64,
+    /// Refund to user in lamports
+    pub refund: u64,
+}
+
+impl ExtData {
+    /// Reduce 32-byte value modulo BN254 Fr field (copied from zk.rs)
+    fn reduce_to_field(bytes: [u8; 32]) -> [u8; 32] {
+        use num_bigint::BigUint;
+
+        // BN254 Fr modulus as 32-byte BE
+        const FR_MODULUS: [u8; 32] = [
+            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81,
+            0x58, 0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93,
+            0xf0, 0x00, 0x00, 0x01,
+        ];
+
+        // Quick check: if bytes < modulus, no reduction needed
+        let mut needs_reduction = false;
+        for i in 0..32 {
+            if bytes[i] < FR_MODULUS[i] {
+                break;
+            }
+            if bytes[i] > FR_MODULUS[i] {
+                needs_reduction = true;
+                break;
+            }
+        }
+
+        if !needs_reduction {
+            return bytes;
+        }
+
+        // Use BigUint for proper modulo reduction
+        let val = BigUint::from_bytes_be(&bytes);
+        let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+        let reduced = val % modulus;
+
+        let mut result = [0u8; 32];
+        let reduced_bytes = reduced.to_bytes_be();
+        let start = 32 - reduced_bytes.len();
+        result[start..].copy_from_slice(&reduced_bytes);
+
+        result
+    }
+
+    /// Compute Poseidon hash of external data
+    /// Returns 32-byte field element
+    pub fn hash(&self) -> Result<[u8; 32]> {
+        use light_hasher::Hasher;
+
+        // Convert PublicKeys to bytes and reduce modulo field
+        let recipient_bytes = Self::reduce_to_field(self.recipient.to_bytes());
+        let relayer_bytes = Self::reduce_to_field(self.relayer.to_bytes());
+
+        // Encode u64 values as 32-byte big-endian (these are already < Fr)
+        let mut fee_bytes = [0u8; 32];
+        fee_bytes[24..].copy_from_slice(&self.fee.to_be_bytes());
+
+        let mut refund_bytes = [0u8; 32];
+        refund_bytes[24..].copy_from_slice(&self.refund.to_be_bytes());
+
+        // Hash in pairs to match binary Merkle tree pattern
+        // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
+        let hash1 = PoseidonHasher::hashv(&[&recipient_bytes, &relayer_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+
+        let hash2 = PoseidonHasher::hashv(&[&fee_bytes, &refund_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+
+        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+
+        Ok(final_hash)
+    }
+}
+
+// ---- Legacy: Keep for backwards compatibility, will be removed ----
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct WithdrawPublicInputs {
     pub root: [u8; 32],
@@ -152,11 +267,12 @@ impl NoteHint {
 // ---- Instruction contexts ----
 
 #[derive(Accounts)]
+#[instruction(fee_bps: u16, mint_address: Pubkey)]
 pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_config_v3"],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump,
         space = PrivacyConfig::LEN
     )]
@@ -165,7 +281,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_vault_v3"],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump,
         space = Vault::LEN
     )]
@@ -174,7 +290,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v3"],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
         space = MerkleTreeAccount::LEN,
     )]
@@ -183,7 +299,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_nullifiers_v3"],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump,
         space = NullifierSet::LEN
     )]
@@ -196,10 +312,11 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
 pub struct ConfigAdmin<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3"],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump,
         has_one = admin
     )]
@@ -210,25 +327,25 @@ pub struct ConfigAdmin<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(denom_index: u8, commitment: [u8; 32])]
+#[instruction(mint_address: Pubkey)]
 pub struct DepositFixed<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3"],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v3"],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3"],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
@@ -248,33 +365,133 @@ pub struct DepositFixed<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// ---- New UTXO Transaction Instruction ----
+
 #[derive(Accounts)]
-#[instruction(root: [u8; 32], nullifier: [u8; 32], denom_index: u8, recipient_pk: Pubkey)]
-pub struct Withdraw<'info> {
+#[instruction(
+    root: [u8; 32],
+    public_amount: i64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32]
+)]
+pub struct Transact<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3"],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_vault_v3"],
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
     pub vault: Account<'info, Vault>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3"],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v3"],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
+        bump = nullifiers.bump
+    )]
+    pub nullifiers: Account<'info, NullifierSet>,
+
+    /// First nullifier marker (must not exist - ensures nullifier is fresh)
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_0: Account<'info, NullifierMarker>,
+
+    /// Second nullifier marker (must not exist - ensures nullifier is fresh)
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_1: Account<'info, NullifierMarker>,
+
+    /// Relayer who submits transaction (pays rent, receives fee)
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    /// Recipient (receives withdrawal amount if public_amount > 0)
+    /// CHECK: Validated via ext_data_hash in proof
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+
+    /// Vault's token account (ATA for mint_address)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub vault_token_account: UncheckedAccount<'info>,
+
+    /// User's token account (for deposits)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub user_token_account: UncheckedAccount<'info>,
+
+    /// Recipient's token account (for withdrawals)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub recipient_token_account: UncheckedAccount<'info>,
+
+    /// Relayer's token account (for fees)
+    /// CHECK: Validated in instruction logic for token operations
+    #[account(mut)]
+    pub relayer_token_account: UncheckedAccount<'info>,
+
+    /// SPL Token program
+    /// CHECK: Validated in instruction logic for token operations
+    pub token_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+// ---- Legacy Withdraw (will be removed) ----
+
+#[derive(Accounts)]
+#[instruction(root: [u8; 32], nullifier: [u8; 32], denom_index: u8, recipient_pk: Pubkey, mint_address: Pubkey)]
+pub struct Withdraw<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        bump = config.bump
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
+        bump = config.vault_bump
+    )]
+    pub vault: Account<'info, Vault>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
+        bump,
+    )]
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -283,7 +500,7 @@ pub struct Withdraw<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v3", nullifier.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), nullifier.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -308,25 +525,25 @@ pub struct TransferPublicInputs {
 }
 
 #[derive(Accounts)]
-#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32], denom_index: u8)]
+#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32], denom_index: u8, mint_address: Pubkey)]
 pub struct PrivateTransfer<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3"],
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3"],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
-        seeds = [b"privacy_nullifiers_v3"],
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
     pub nullifiers: Account<'info, NullifierSet>,
@@ -335,7 +552,7 @@ pub struct PrivateTransfer<'info> {
     #[account(
         init,
         payer = sender,
-        seeds = [b"nullifier_v3", old_nullifier.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), old_nullifier.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -363,13 +580,27 @@ pub struct TransferHint {
     pub denom_index: u8,
 }
 
+// ---- Helper Functions ----
+
+/// Check if mint is a token (not native SOL)
+fn is_token_mint(mint: &Pubkey) -> bool {
+    mint != &Pubkey::default()
+}
+
+/// Safely deserialize a token account
+fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
+    let data = account.try_borrow_data()?;
+    TokenAccount::try_deserialize(&mut &data[..])
+        .map_err(|_| error!(PrivacyError::MissingTokenAccount))
+}
+
 // ---- Program ----
 
 #[program]
 pub mod privacy_pool {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, denoms: Vec<u64>, fee_bps: u16) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, fee_bps: u16, mint_address: Pubkey) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -392,25 +623,15 @@ pub mod privacy_pool {
         cfg.admin = ctx.accounts.admin.key();
         cfg.paused = false;
         cfg.fee_bps = fee_bps;
+        cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
 
-        require!(!denoms.is_empty(), PrivacyError::NoDenoms);
-        require!(denoms.len() <= MAX_DENOMS, PrivacyError::TooManyDenoms);
+        // UTXO model: no fixed denominations
+        cfg.total_tvl = 0;
+        cfg.mint_address = mint_address;
+        cfg.max_deposit_amount = 1_000_000_000_000; // Default: 1000 SOL/tokens
 
-        cfg.num_denoms = denoms.len() as u8;
-
-        cfg.denoms = [0u64; MAX_DENOMS];
-        cfg.tvl = [0u64; MAX_DENOMS];
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
-
-        cfg.min_deposit = 0;
-        cfg.max_deposit = u64::MAX;
-        cfg.min_withdraw = 0;
-        cfg.relayer_enabled = true;
-
-        for (i, d) in denoms.into_iter().enumerate() {
-            cfg.denoms[i] = d;
-        }
 
         // ---- Nullifier set init ----
         nulls.count = 0;
@@ -418,13 +639,21 @@ pub mod privacy_pool {
         Ok(())
     }
 
-    pub fn set_paused(ctx: Context<ConfigAdmin>, paused: bool) -> Result<()> {
+    pub fn set_paused(
+        ctx: Context<ConfigAdmin>,
+        _mint_address: Pubkey,
+        paused: bool,
+    ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         cfg.paused = paused;
         Ok(())
     }
 
-    pub fn add_relayer(ctx: Context<ConfigAdmin>, new_relayer: Pubkey) -> Result<()> {
+    pub fn add_relayer(
+        ctx: Context<ConfigAdmin>,
+        _mint_address: Pubkey,
+        new_relayer: Pubkey,
+    ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         if cfg.is_relayer(&new_relayer) {
             return Ok(());
@@ -463,252 +692,465 @@ pub mod privacy_pool {
         Ok(())
     }
 
-    pub fn deposit_fixed(
-        ctx: Context<DepositFixed>,
-        denom_index: u8,
-        commitment: [u8; 32],
-        owner_hint: [u8; 32],
-        encrypted_note: Vec<u8>,
-    ) -> Result<()> {
-        let cfg = &mut ctx.accounts.config;
-        require!(!cfg.paused, PrivacyError::Paused);
-
-        let idx = denom_index as usize;
-        require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
-
-        let amount = cfg.denoms[idx];
-
-        require!(amount >= cfg.min_deposit, PrivacyError::DepositTooSmall);
-        require!(amount <= cfg.max_deposit, PrivacyError::DepositTooLarge);
-
-        // 1) Move SOL from depositor to vault PDA via CPI
-        let depositor = &ctx.accounts.depositor;
-        let vault_ai = ctx.accounts.vault.to_account_info();
-
-        let cpi_ctx = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: depositor.to_account_info(),
-                to: vault_ai,
-            },
-        );
-        system_program::transfer(cpi_ctx, amount)?;
-
-        // 2) Insert commitment into merkle tree
-        let mut tree = ctx.accounts.note_tree.load_mut()?;
-        MerkleTree::append::<PoseidonHasher>(commitment, &mut *tree)?;
-
-        let leaf_index = tree.next_index - 1;
-        let new_root = tree.root;
-
-        // Create and store the NoteHint account for tracking user deposits
-        let hint = &mut ctx.accounts.note_hint;
-        hint.bump = ctx.bumps.note_hint;
-        hint.commitment = commitment;
-        hint.owner_hint = owner_hint;
-        hint.encrypted_note = encrypted_note;
-        hint.leaf_index = leaf_index;
-
-        // 3) Update TVL
-        cfg.tvl[idx] = cfg.tvl[idx]
-            .checked_add(amount)
-            .ok_or(PrivacyError::MathOverflow)?;
-
-        // 4) Emit event for indexers
-        emit!(CommitmentEvent {
-            commitment,
-            leaf_index,
-            denom_index,
-            new_root,
-        });
-
-        Ok(())
-    }
-
-    pub fn private_transfer(
-        ctx: Context<PrivateTransfer>,
-        old_root: [u8; 32],
-        old_nullifier: [u8; 32],
-        new_commitment: [u8; 32],
-        denom_index: u8,
-        proof: Vec<u8>, // TransferProof
-    ) -> Result<()> {
-        let cfg = &ctx.accounts.config;
-        let mut tree = ctx.accounts.note_tree.load_mut()?;
-
-        require!(!cfg.paused, PrivacyError::Paused);
-        require!(
-            (denom_index as usize) < cfg.num_denoms as usize,
-            PrivacyError::BadDenomIndex
-        );
-
-        // 1. Verify ZK proof for transfer
-        let public_inputs = TransferPublicInputs {
-            old_root,
-            old_nullifier,
-            new_commitment,
-            denom_index,
-        };
-        // verify_transfer_groth16(proof, &public_inputs)?;
-
-        // 2. Check old root is known
-        require!(
-            MerkleTree::is_known_root(&*tree, old_root),
-            PrivacyError::UnknownRoot
-        );
-
-        // 3. Mark old nullifier as spent
-        // Note: The 'init' constraint on nullifier_marker already ensures the nullifier is fresh
-        let nulls = &mut ctx.accounts.nullifiers;
-        let marker = &mut ctx.accounts.nullifier_marker;
-
-        marker.nullifier = old_nullifier;
-        marker.timestamp = Clock::get()?.unix_timestamp;
-        marker.withdrawal_index = nulls.count;
-        marker.bump = ctx.bumps.nullifier_marker;
-
-        nulls.count = nulls
-            .count
-            .checked_add(1)
-            .ok_or(PrivacyError::MathOverflow)?;
-
-        // 4. Insert new commitment into tree
-        MerkleTree::append::<PoseidonHasher>(new_commitment, &mut *tree)?;
-
-        let leaf_index = tree.next_index - 1;
-        let new_root = tree.root;
-
-        let transferHint = TransferHint {
-            old_root,
-            old_nullifier,
-            new_commitment,
-            denom_index,
-        };
-
-        let transfer_hint_account = &mut ctx.accounts.transfer_hint;
-        transfer_hint_account.old_root = transferHint.old_root;
-        transfer_hint_account.old_nullifier = transferHint.old_nullifier;
-        transfer_hint_account.new_commitment = transferHint.new_commitment;
-        transfer_hint_account.denom_index = transferHint.denom_index;
-
-        // Note: No SOL moves, just commitment ownership transfer
-
-        // 5. Emit event for indexers
-        emit!(CommitmentEvent {
-            commitment: new_commitment,
-            leaf_index,
-            denom_index,
-            new_root,
-        });
-
-        Ok(())
-    }
-
-    pub fn withdraw(
-        ctx: Context<Withdraw>,
+    /// Unified UTXO transaction instruction
+    /// Handles deposits (publicAmount < 0), withdrawals (publicAmount > 0), and transfers (publicAmount = 0)
+    pub fn transact(
+        ctx: Context<Transact>,
         root: [u8; 32],
-        nullifier: [u8; 32],
-        denom_index: u8,
-        recipient_pk: Pubkey,
-        proof: WithdrawProof,
+        public_amount: i64,
+        ext_data_hash: [u8; 32],
+        mint_address: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        ext_data: ExtData,
+        proof: zk::TransactionProof,
     ) -> Result<()> {
+        // Combine individual nullifiers/commitments into arrays for processing
+        let input_nullifiers = [input_nullifier_0, input_nullifier_1];
+        let output_commitments = [output_commitment_0, output_commitment_1];
         let cfg = &mut ctx.accounts.config;
-        let tree = ctx.accounts.note_tree.load_mut()?;
+        let tree = ctx.accounts.note_tree.load()?;
+
         require!(!cfg.paused, PrivacyError::Paused);
 
-        // ---- 0) Verify Groth16 proof (stub or real, depending on groth16.rs) ----
-        let public_inputs = WithdrawPublicInputs {
-            root,
-            nullifier,
-            denom_index,
-            recipient: recipient_pk,
-        };
-        verify_withdraw_groth16(proof, &public_inputs)?;
-
-        // ---- 1) Check that root is known in Merkle tree ----
+        // Validate no duplicate nullifiers (prevents trying to spend same note twice in one tx)
         require!(
-            MerkleTree::is_known_root(&*tree, public_inputs.root),
-            PrivacyError::UnknownRoot
+            input_nullifiers[0] != input_nullifiers[1],
+            PrivacyError::DuplicateNullifiers
         );
 
-        // ---- 2) Mark nullifier as spent ----
-        // Note: The 'init' constraint on nullifier_marker already ensures the nullifier is fresh
-        let nulls = &mut ctx.accounts.nullifiers;
-        let marker = &mut ctx.accounts.nullifier_marker;
-
-        marker.nullifier = public_inputs.nullifier;
-        marker.timestamp = Clock::get()?.unix_timestamp;
-        marker.withdrawal_index = nulls.count;
-        marker.bump = ctx.bumps.nullifier_marker;
-
-        nulls.count = nulls
-            .count
-            .checked_add(1)
-            .ok_or(PrivacyError::MathOverflow)?;
-
-        // ---- 3) Denom & fee math ----
-        let idx = public_inputs.denom_index as usize;
-        require!(idx < cfg.num_denoms as usize, PrivacyError::BadDenomIndex);
-        let amount = cfg.denoms[idx];
-
-        require!(amount >= cfg.min_withdraw, PrivacyError::WithdrawTooSmall);
-
-        let fee = amount
-            .checked_mul(cfg.fee_bps as u64)
-            .ok_or(PrivacyError::MathOverflow)?
-            / 10_000;
-
-        let to_user = amount.checked_sub(fee).ok_or(PrivacyError::MathOverflow)?;
-
-        // ---- 4) Relayer must be authorized ----
-        let relayer_key = ctx.accounts.relayer.key();
-
-        require!(cfg.relayer_enabled, PrivacyError::RelayerDisabled);
+        // Validate no duplicate output commitments (prevents creating identical notes)
         require!(
-            cfg.is_relayer(&relayer_key),
-            PrivacyError::RelayerNotAllowed
+            output_commitments[0] != output_commitments[1],
+            PrivacyError::DuplicateCommitments
         );
 
-        // ---- 5) Vault balance & TVL ----
-        let vault_ai = ctx.accounts.vault.to_account_info();
-        let vault_balance = **vault_ai.lamports.borrow();
-
+        // 1. Verify ext_data_hash matches provided ext_data
+        let computed_ext_hash = ext_data.hash()?;
         require!(
-            vault_balance >= amount,
-            PrivacyError::InsufficientVaultBalance
+            computed_ext_hash == ext_data_hash,
+            PrivacyError::InvalidExtData
         );
 
-        cfg.tvl[idx] = cfg.tvl[idx]
-            .checked_sub(amount)
-            .ok_or(PrivacyError::MathOverflow)?;
-
-        // ---- 6) Recipient sanity check ----
-        require_keys_eq!(ctx.accounts.recipient.key(), public_inputs.recipient);
-
-        // ---- 7) Manual lamport moves from vault -> user + relayer ----
-        {
-            let recipient_ai = ctx.accounts.recipient.to_account_info();
-            let relayer_ai = ctx.accounts.relayer.to_account_info();
-
-            let mut vault_lamports = vault_ai.try_borrow_mut_lamports()?;
-            let mut recipient_lamports = recipient_ai.try_borrow_mut_lamports()?;
-            let mut relayer_lamports = relayer_ai.try_borrow_mut_lamports()?;
-
-            **vault_lamports = vault_lamports
-                .checked_sub(amount)
-                .ok_or(PrivacyError::MathOverflow)?;
-
-            **recipient_lamports = recipient_lamports
-                .checked_add(to_user)
-                .ok_or(PrivacyError::MathOverflow)?;
-
-            **relayer_lamports = relayer_lamports
-                .checked_add(fee)
-                .ok_or(PrivacyError::MathOverflow)?;
+        // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
+        // For deposits (public_amount < 0), anyone can deposit without being a relayer
+        if public_amount <= 0 {
+            require!(
+                cfg.is_relayer(&ctx.accounts.relayer.key()),
+                PrivacyError::RelayerNotAllowed
+            );
         }
 
+        // 3. Verify recipient matches ext_data
+        require_keys_eq!(
+            ctx.accounts.recipient.key(),
+            ext_data.recipient,
+            PrivacyError::RecipientMismatch
+        );
+
+        // 4. Verify mint address matches config
+        require_keys_eq!(
+            mint_address,
+            cfg.mint_address,
+            PrivacyError::InvalidMintAddress
+        );
+
+        // 4a. Validate token accounts if using SPL tokens
+        if is_token_mint(&mint_address) {
+            // Verify token program is provided
+            require_keys_eq!(
+                ctx.accounts.token_program.key(),
+                token::ID,
+                PrivacyError::MissingTokenProgram
+            );
+
+            // Deserialize and validate vault token account
+            let vault_token =
+                deserialize_token_account(&ctx.accounts.vault_token_account.to_account_info())?;
+
+            // Verify vault token account mint matches config
+            require_keys_eq!(
+                vault_token.mint,
+                cfg.mint_address,
+                PrivacyError::InvalidMintAddress
+            );
+
+            // Verify vault is the authority
+            require_keys_eq!(
+                vault_token.owner,
+                ctx.accounts.vault.key(),
+                PrivacyError::InvalidTokenAuthority
+            );
+
+            // For deposits (public_amount > 0), user token account required
+            if public_amount > 0 {
+                let user_token =
+                    deserialize_token_account(&ctx.accounts.user_token_account.to_account_info())?;
+                require_keys_eq!(
+                    user_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+            }
+
+            // For withdrawals (public_amount < 0), recipient/relayer token accounts required
+            if public_amount < 0 {
+                let recipient_token = deserialize_token_account(
+                    &ctx.accounts.recipient_token_account.to_account_info(),
+                )?;
+                let relayer_token = deserialize_token_account(
+                    &ctx.accounts.relayer_token_account.to_account_info(),
+                )?;
+
+                require_keys_eq!(
+                    recipient_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+                require_keys_eq!(
+                    relayer_token.mint,
+                    cfg.mint_address,
+                    PrivacyError::InvalidMintAddress
+                );
+            }
+        }
+
+        // 5. Build public inputs for ZK proof
+        let public_inputs = TransactionPublicInputs {
+            root,
+            public_amount,
+            ext_data_hash,
+            mint_address,
+            input_nullifiers,
+            output_commitments,
+        };
+
+        // 6. Verify Groth16 proof
+        zk::verify_transaction_groth16(proof, &public_inputs)?;
+
+        // 7. Check root is known in tree
+        require!(
+            MerkleTree::is_known_root(&*tree, root),
+            PrivacyError::UnknownRoot
+        );
+
+        drop(tree); // Release immutable borrow
+
+        // 8. Mark both input nullifiers as spent
+        mark_nullifier_spent(
+            &mut ctx.accounts.nullifier_marker_0,
+            &mut ctx.accounts.nullifiers,
+            input_nullifiers[0],
+            ctx.bumps.nullifier_marker_0,
+            mint_address,
+        )?;
+
+        mark_nullifier_spent(
+            &mut ctx.accounts.nullifier_marker_1,
+            &mut ctx.accounts.nullifiers,
+            input_nullifiers[1],
+            ctx.bumps.nullifier_marker_1,
+            mint_address,
+        )?;
+
+        // 9. Insert both output commitments into tree
+        let mut tree = ctx.accounts.note_tree.load_mut()?;
+        let leaf_index_0 = tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *tree)?;
+        let leaf_index_1 = tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *tree)?;
+        let new_root = tree.root;
+
+        drop(tree); // Release mutable borrow
+
+        // Emit commitment events for both outputs
+        let timestamp = Clock::get()?.unix_timestamp;
+        emit!(CommitmentEvent {
+            commitment: output_commitments[0],
+            leaf_index: leaf_index_0,
+            new_root,
+            timestamp,
+            mint_address,
+        });
+        emit!(CommitmentEvent {
+            commitment: output_commitments[1],
+            leaf_index: leaf_index_1,
+            new_root,
+            timestamp,
+            mint_address,
+        });
+
+        // 10. Handle public amount (deposits/withdrawals)
+        handle_public_amount(
+            cfg,
+            &ctx.accounts.vault,
+            &ctx.accounts.recipient,
+            &ctx.accounts.relayer,
+            &ctx.accounts.system_program,
+            public_amount,
+            &ext_data,
+            &ctx.accounts.vault_token_account,
+            &ctx.accounts.user_token_account,
+            &ctx.accounts.recipient_token_account,
+            &ctx.accounts.relayer_token_account,
+            &ctx.accounts.token_program,
+        )?;
+
         Ok(())
     }
+}
+
+// ---- Helper Functions ----
+
+/// Mark a nullifier as spent
+fn mark_nullifier_spent(
+    marker: &mut Account<NullifierMarker>,
+    nullifier_set: &mut Account<NullifierSet>,
+    nullifier: [u8; 32],
+    bump: u8,
+    mint_address: Pubkey,
+) -> Result<()> {
+    let timestamp = Clock::get()?.unix_timestamp;
+
+    marker.nullifier = nullifier;
+    marker.timestamp = timestamp;
+    marker.withdrawal_index = nullifier_set.count;
+    marker.bump = bump;
+
+    nullifier_set.count = nullifier_set
+        .count
+        .checked_add(1)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    // Emit event when nullifier is spent
+    emit!(NullifierSpent {
+        nullifier,
+        timestamp,
+        mint_address,
+    });
+
+    Ok(())
+}
+
+/// Handle lamport/token flows based on public_amount
+///
+/// public_amount < 0: Deposit (user -> vault)
+/// public_amount > 0: Withdrawal (vault -> recipient + relayer)
+/// public_amount = 0: Private transfer (no SOL/token movement)
+fn handle_public_amount<'info>(
+    config: &mut PrivacyConfig,
+    vault: &Account<'info, Vault>,
+    recipient: &SystemAccount<'info>,
+    relayer: &Signer<'info>,
+    system_program: &Program<'info, System>,
+    public_amount: i64,
+    ext_data: &ExtData,
+    vault_token_account: &UncheckedAccount<'info>,
+    user_token_account: &UncheckedAccount<'info>,
+    recipient_token_account: &UncheckedAccount<'info>,
+    relayer_token_account: &UncheckedAccount<'info>,
+    token_program: &UncheckedAccount<'info>,
+) -> Result<()> {
+    // Validate ext_data values are non-negative
+    require!(
+        ext_data.fee < i64::MAX as u64,
+        PrivacyError::InvalidFeeAmount
+    );
+    require!(
+        ext_data.refund < i64::MAX as u64,
+        PrivacyError::InvalidPublicAmount
+    );
+
+    // Circuit convention: sumIns + publicAmount = sumOuts
+    // - Positive publicAmount = DEPOSIT (adding to pool: 0 + amount = outputs)
+    // - Negative publicAmount = WITHDRAWAL (removing from pool: inputs + negative = 0)
+
+    // Determine if using SPL tokens or native SOL
+    let is_token = is_token_mint(&config.mint_address);
+
+    if public_amount > 0 {
+        // DEPOSIT: user deposits public_amount lamports/tokens
+        let deposit_amount = public_amount as u64;
+
+        // For deposits, fee and refund should be zero
+        require!(
+            ext_data.fee == 0 && ext_data.refund == 0,
+            PrivacyError::InvalidPublicAmount
+        );
+
+        // Check deposit limit
+        require!(
+            deposit_amount <= config.max_deposit_amount,
+            PrivacyError::DepositLimitExceeded
+        );
+
+        if is_token {
+            // SPL Token deposit: user -> vault ATA
+            token::transfer(
+                CpiContext::new(
+                    token_program.to_account_info(),
+                    token::Transfer {
+                        from: user_token_account.to_account_info(),
+                        to: vault_token_account.to_account_info(),
+                        authority: relayer.to_account_info(),
+                    },
+                ),
+                deposit_amount,
+            )?;
+        } else {
+            // Native SOL deposit
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: relayer.to_account_info(),
+                        to: vault.to_account_info(),
+                    },
+                ),
+                deposit_amount,
+            )?;
+        }
+
+        // Update TVL
+        config.total_tvl = config
+            .total_tvl
+            .checked_add(deposit_amount)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+    } else if public_amount < 0 {
+        // WITHDRAWAL: vault pays out |public_amount| lamports
+        let withdrawal_amount = public_amount.abs() as u64;
+
+        // Validate that fee + refund doesn't exceed withdrawal amount
+        let fee = ext_data.fee;
+        let refund = ext_data.refund;
+        let fee_plus_refund = fee
+            .checked_add(refund)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        require!(
+            fee_plus_refund <= withdrawal_amount,
+            PrivacyError::InvalidPublicAmount
+        );
+
+        // Calculate amount to recipient
+        let to_recipient = withdrawal_amount
+            .checked_sub(fee)
+            .and_then(|x| x.checked_sub(refund))
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        // Verify fee is within acceptable range
+        // 1. Check minimum fee to ensure relayer compensation
+        require!(
+            fee >= config.min_withdrawal_fee,
+            PrivacyError::InsufficientFee
+        );
+
+        // 2. Check maximum fee (prevent malicious relayer from overcharging)
+        let max_fee = withdrawal_amount
+            .checked_mul(config.fee_bps as u64)
+            .ok_or(PrivacyError::ArithmeticOverflow)?
+            / 10_000;
+        require!(fee <= max_fee, PrivacyError::ExcessiveFee);
+
+        if is_token {
+            // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
+            // Deserialize vault token account to check balance
+            let vault_token_data =
+                deserialize_token_account(&vault_token_account.to_account_info())?;
+
+            // Check vault has sufficient tokens
+            require!(
+                vault_token_data.amount >= withdrawal_amount,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
+
+            // Transfer to recipient
+            token::transfer(
+                CpiContext::new_with_signer(
+                    token_program.to_account_info(),
+                    token::Transfer {
+                        from: vault_token_account.to_account_info(),
+                        to: recipient_token_account.to_account_info(),
+                        authority: vault.to_account_info(),
+                    },
+                    &[&[
+                        b"privacy_vault_v3",
+                        config.mint_address.as_ref(),
+                        &[vault.bump],
+                    ]],
+                ),
+                to_recipient,
+            )?;
+
+            // Transfer fee + refund to relayer
+            let to_relayer = fee
+                .checked_add(refund)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            if to_relayer > 0 {
+                token::transfer(
+                    CpiContext::new_with_signer(
+                        token_program.to_account_info(),
+                        token::Transfer {
+                            from: vault_token_account.to_account_info(),
+                            to: relayer_token_account.to_account_info(),
+                            authority: vault.to_account_info(),
+                        },
+                        &[&[
+                            b"privacy_vault_v3",
+                            config.mint_address.as_ref(),
+                            &[vault.bump],
+                        ]],
+                    ),
+                    to_relayer,
+                )?;
+            }
+        } else {
+            // Native SOL withdrawal (existing logic)
+            let vault_ai = vault.to_account_info();
+            let rent = Rent::get()?;
+            let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
+
+            let total_required = withdrawal_amount
+                .checked_add(rent_exempt_minimum)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            require!(
+                vault_ai.lamports() >= total_required,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
+
+            // Transfer lamports using manual manipulation (vault is a PDA we control)
+            let recipient_ai = recipient.to_account_info();
+            let relayer_ai = relayer.to_account_info();
+
+            **vault_ai.try_borrow_mut_lamports()? = vault_ai
+                .lamports()
+                .checked_sub(withdrawal_amount)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            **recipient_ai.try_borrow_mut_lamports()? = recipient_ai
+                .lamports()
+                .checked_add(to_recipient)
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+            **relayer_ai.try_borrow_mut_lamports()? = relayer_ai
+                .lamports()
+                .checked_add(fee)
+                .and_then(|x| x.checked_add(refund))
+                .ok_or(PrivacyError::ArithmeticOverflow)?;
+        }
+
+        // Update TVL
+        config.total_tvl = config
+            .total_tvl
+            .checked_sub(withdrawal_amount)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+    }
+    // else: public_amount == 0, no lamport/token movement (pure private transfer)
+
+    Ok(())
 }
 
 // ---- Events ----
@@ -717,8 +1159,16 @@ pub mod privacy_pool {
 pub struct CommitmentEvent {
     pub commitment: [u8; 32],
     pub leaf_index: u64,
-    pub denom_index: u8,
     pub new_root: [u8; 32],
+    pub timestamp: i64,
+    pub mint_address: Pubkey,
+}
+
+#[event]
+pub struct NullifierSpent {
+    pub nullifier: [u8; 32],
+    pub timestamp: i64,
+    pub mint_address: Pubkey,
 }
 
 // ---- Errors ----
@@ -755,12 +1205,37 @@ pub enum PrivacyError {
     MerkleTreeFull,
     #[msg("Merkle hash failed")]
     MerkleHashFailed,
-    #[msg("Deposit amount too small")]
-    DepositTooSmall,
-    #[msg("Deposit amount too large")]
-    DepositTooLarge,
-    #[msg("Withdraw amount too small")]
-    WithdrawTooSmall,
-    #[msg("Relayers are disabled")]
-    RelayerDisabled,
+    // New UTXO errors
+    #[msg("Invalid external data hash")]
+    InvalidExtData,
+    #[msg("Recipient mismatch")]
+    RecipientMismatch,
+    #[msg("Invalid mint address")]
+    InvalidMintAddress,
+    #[msg("Excessive fee")]
+    ExcessiveFee,
+    #[msg("Fee below minimum required for withdrawal")]
+    InsufficientFee,
+    #[msg("Arithmetic overflow/underflow occurred")]
+    ArithmeticOverflow,
+    #[msg("Insufficient funds for withdrawal (including rent exemption)")]
+    InsufficientFundsForWithdrawal,
+    #[msg("Insufficient funds for fee payment")]
+    InsufficientFundsForFee,
+    #[msg("Deposit limit exceeded")]
+    DepositLimitExceeded,
+    #[msg("Invalid public amount data")]
+    InvalidPublicAmount,
+    #[msg("Invalid fee amount")]
+    InvalidFeeAmount,
+    #[msg("Duplicate nullifiers detected")]
+    DuplicateNullifiers,
+    #[msg("Duplicate output commitments detected")]
+    DuplicateCommitments,
+    #[msg("Token account required for SPL token operations")]
+    MissingTokenAccount,
+    #[msg("Token program required for SPL token operations")]
+    MissingTokenProgram,
+    #[msg("Invalid token account authority")]
+    InvalidTokenAuthority,
 }

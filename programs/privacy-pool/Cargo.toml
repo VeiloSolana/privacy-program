@@ -20,6 +20,7 @@ idl-build = ["anchor-lang/idl-build"]
 [dependencies]
 indexmap = { workspace = true }
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = "0.32.1"
 
 light-hasher = { version = "5", default-features = false }
 bytemuck = { version = "1.20.0", features = ["min_const_generics"] }

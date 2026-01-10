@@ -5,12 +5,20 @@ use num_bigint::BigUint;
 use std::ops::Neg;
 
 use crate::groth16::Groth16Verifier;
-use crate::vk_constants::WITHDRAW_VK;
-use crate::{PrivacyError, WithdrawPublicInputs};
+use crate::vk_constants::TRANSACTION_VK;
+use crate::{PrivacyError, TransactionPublicInputs};
 
-/// Proof broken into (a, b, c) parts.
+/// Proof broken into (a, b, c) parts - for legacy withdraw
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct WithdrawProof {
+    pub proof_a: [u8; 64],
+    pub proof_b: [u8; 128],
+    pub proof_c: [u8; 64],
+}
+
+/// Proof for new UTXO transaction circuit (same structure, different VK)
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct TransactionProof {
     pub proof_a: [u8; 64],
     pub proof_b: [u8; 128],
     pub proof_c: [u8; 64],
@@ -93,38 +101,117 @@ fn subtract_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     result
 }
 
-/// Verify withdraw Groth16 proof.
+// ============================================================================
+// Legacy withdraw verification - DEPRECATED
+// ============================================================================
+// The old withdraw circuit used 4 public inputs (root, nullifier, denomIndex, recipient)
+// This has been replaced by the Transaction circuit with 8 public inputs
+//
+// pub fn verify_withdraw_groth16(proof: WithdrawProof, inputs: &WithdrawPublicInputs) -> Result<()> {
+//     // ... deprecated implementation ...
+// }
+
+/// Convert i64 to field element (handles negative values)
+/// Negative values use field arithmetic: -x ≡ Fr - x (mod Fr)
+fn i64_to_field_be(value: i64) -> [u8; 32] {
+    const FR_MODULUS: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x01,
+    ];
+
+    let mut bytes = [0u8; 32];
+    if value >= 0 {
+        // Positive: just encode as big-endian
+        bytes[24..].copy_from_slice(&(value as u64).to_be_bytes());
+    } else {
+        // Negative: compute Fr - |value|
+        let abs_val = value.abs() as u64;
+        let mut abs_bytes = [0u8; 32];
+        abs_bytes[24..].copy_from_slice(&abs_val.to_be_bytes());
+
+        // Compute Fr - abs_val using BigUint
+        let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+        let abs = BigUint::from_bytes_be(&abs_bytes);
+        let result = modulus - abs;
+
+        let result_bytes = result.to_bytes_be();
+        let start = 32 - result_bytes.len();
+        bytes[start..].copy_from_slice(&result_bytes);
+    }
+    bytes
+}
+
+/// Verify transaction Groth16 proof (2-in-2-out UTXO model)
 ///
-/// CRITICAL: Public inputs are reduced mod Fr to match Circom's behavior.
-/// Solana public keys (256 bits) can exceed BN254 Fr modulus (~254 bits).
-pub fn verify_withdraw_groth16(proof: WithdrawProof, inputs: &WithdrawPublicInputs) -> Result<()> {
-    // ----- 1. Build public input array -----
-    // Apply modular reduction to ensure all values are valid field elements
-    let mut public_inputs: [[u8; 32]; 4] = [[0u8; 32]; 4];
+/// Public inputs (8 total):
+/// 1. root
+/// 2. publicAmount (i64 - can be negative)
+/// 3. extDataHash
+/// 4. mintAddress
+/// 5. inputNullifiers[0]
+/// 6. inputNullifiers[1]
+/// 7. outputCommitments[0]
+/// 8. outputCommitments[1]
+pub fn verify_transaction_groth16(
+    proof: TransactionProof,
+    inputs: &TransactionPublicInputs,
+) -> Result<()> {
+    // ----- 1. Build public input array (8 inputs) -----
+    let mut public_inputs: [[u8; 32]; 8] = [[0u8; 32]; 8];
 
-    // root, nullifier - reduce mod Fr for safety (Poseidon output should already be < Fr)
+    // 1. root - reduce mod Fr for safety
     public_inputs[0] = reduce_to_field_be(inputs.root);
-    public_inputs[1] = reduce_to_field_be(inputs.nullifier);
 
-    // denom_index -> Fr element encoded as BE: put u8 in the last byte (u8 always < Fr)
-    let mut denom_bytes = [0u8; 32];
-    denom_bytes[31] = inputs.denom_index;
-    public_inputs[2] = denom_bytes;
+    // 2. publicAmount (i64 -> field element, handle negative)
+    public_inputs[1] = i64_to_field_be(inputs.public_amount);
 
-    // recipient Pubkey - MUST reduce as public keys can exceed Fr modulus
-    public_inputs[3] = reduce_to_field_be(inputs.recipient.to_bytes());
+    // 3. extDataHash
+    public_inputs[2] = reduce_to_field_be(inputs.ext_data_hash);
 
-    // DEBUG: Convert bytes to hex for comparison with TypeScript
-    use num_bigint::BigUint;
-    let root_bigint = BigUint::from_bytes_be(&public_inputs[0]);
-    let nullifier_bigint = BigUint::from_bytes_be(&public_inputs[1]);
-    let denom_bigint = BigUint::from_bytes_be(&public_inputs[2]);
-    let recipient_bigint = BigUint::from_bytes_be(&public_inputs[3]);
-    msg!("[DEBUG] Rust public inputs as BigInt:");
-    msg!("  root: {}", root_bigint);
-    msg!("  nullifier: {}", nullifier_bigint);
-    msg!("  denomIndex: {}", denom_bigint);
-    msg!("  recipient: {}", recipient_bigint);
+    // 4. mintAddress
+    public_inputs[3] = reduce_to_field_be(inputs.mint_address.to_bytes());
+
+    // 5-6. inputNullifiers[2]
+    public_inputs[4] = reduce_to_field_be(inputs.input_nullifiers[0]);
+    public_inputs[5] = reduce_to_field_be(inputs.input_nullifiers[1]);
+
+    // 7-8. outputCommitments[2]
+    public_inputs[6] = reduce_to_field_be(inputs.output_commitments[0]);
+    public_inputs[7] = reduce_to_field_be(inputs.output_commitments[1]);
+
+    // DEBUG logging
+    msg!("[DEBUG] Transaction proof public inputs:");
+    msg!("  root: {}", BigUint::from_bytes_be(&public_inputs[0]));
+    msg!(
+        "  publicAmount: {} -> {}",
+        inputs.public_amount,
+        BigUint::from_bytes_be(&public_inputs[1])
+    );
+    msg!(
+        "  extDataHash: {}",
+        BigUint::from_bytes_be(&public_inputs[2])
+    );
+    msg!(
+        "  mintAddress: {}",
+        BigUint::from_bytes_be(&public_inputs[3])
+    );
+    msg!(
+        "  inputNullifier[0]: {}",
+        BigUint::from_bytes_be(&public_inputs[4])
+    );
+    msg!(
+        "  inputNullifier[1]: {}",
+        BigUint::from_bytes_be(&public_inputs[5])
+    );
+    msg!(
+        "  outputCommitment[0]: {}",
+        BigUint::from_bytes_be(&public_inputs[6])
+    );
+    msg!(
+        "  outputCommitment[1]: {}",
+        BigUint::from_bytes_be(&public_inputs[7])
+    );
 
     // ----- 2. Re-encode proof_a: G1 -> 64-byte alt_bn128 layout -----
     let g1_point = G1::deserialize_with_mode(
@@ -135,7 +222,7 @@ pub fn verify_withdraw_groth16(proof: WithdrawProof, inputs: &WithdrawPublicInpu
     .map_err(|_| PrivacyError::InvalidProof)?;
 
     let g1_neg = g1_point.neg();
-    let mut proof_a_neg = [0u8; 65]; // 32 x, 32 y, 1 dummy
+    let mut proof_a_neg = [0u8; 65];
     g1_neg
         .x
         .serialize_with_mode(&mut proof_a_neg[..32], Compress::No)
@@ -149,12 +236,13 @@ pub fn verify_withdraw_groth16(proof: WithdrawProof, inputs: &WithdrawPublicInpu
         .try_into()
         .map_err(|_| PrivacyError::InvalidProof)?;
 
-    let mut verifier = Groth16Verifier::<4>::new(
+    // ----- 3. Verify with Groth16Verifier<8> -----
+    let mut verifier = Groth16Verifier::<8>::new(
         &proof_a,
         &proof.proof_b,
         &proof.proof_c,
         &public_inputs,
-        &WITHDRAW_VK,
+        &TRANSACTION_VK,
     )
     .map_err(|_| PrivacyError::InvalidProof)?;
 

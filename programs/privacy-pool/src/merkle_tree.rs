@@ -1,6 +1,6 @@
+use crate::PrivacyError;
 use anchor_lang::prelude::*;
 use light_hasher::Hasher;
-use crate::PrivacyError;
 
 pub const MERKLE_TREE_HEIGHT: usize = 16;
 pub const ROOT_HISTORY_SIZE: usize = 32;
@@ -38,10 +38,7 @@ impl MerkleTree {
         let zeros = H::zero_bytes(); // usually length = height+1
 
         // Defensive: Poseidon::zero_bytes must give us at least height+1 entries
-        require!(
-            height < zeros.len(),
-            PrivacyError::MerkleHashFailed
-        );
+        require!(height < zeros.len(), PrivacyError::MerkleHashFailed);
 
         // fill subtrees
         for i in 0..height {
@@ -50,6 +47,9 @@ impl MerkleTree {
 
         // set initial root
         let initial_root = zeros[height];
+        msg!("Initial root: {:?}", initial_root);
+        msg!("Zeros[0]: {:?}", zeros[0]);
+        msg!("Zeros[1]: {:?}", zeros[1]);
         tree.root = initial_root;
         tree.root_history[0] = initial_root;
         tree.root_index = 0;
@@ -58,29 +58,20 @@ impl MerkleTree {
         Ok(())
     }
 
-    pub fn append<H: Hasher>(
-        leaf: [u8; 32],
-        tree: &mut MerkleTreeAccount,
-    ) -> Result<()> {
+    pub fn append<H: Hasher>(leaf: [u8; 32], tree: &mut MerkleTreeAccount) -> Result<()> {
         let height = tree.height as usize;
         let root_history_size = tree.root_history_size as usize;
 
         // 2^height capacity
         let max_capacity = 1u64 << height;
-        require!(
-            tree.next_index < max_capacity,
-            PrivacyError::MerkleTreeFull
-        );
+        require!(tree.next_index < max_capacity, PrivacyError::MerkleTreeFull);
 
         let mut current_index = tree.next_index as usize;
         let mut current = leaf;
         let zeros = H::zero_bytes();
 
         // same sanity check here
-        require!(
-            height <= zeros.len(),
-            PrivacyError::MerkleHashFailed
-        );
+        require!(height <= zeros.len(), PrivacyError::MerkleHashFailed);
 
         for level in 0..height {
             let subtree = &mut tree.subtrees[level];
@@ -94,8 +85,8 @@ impl MerkleTree {
             };
 
             // ✅ new: map Poseidon error into an Anchor error
-            current = H::hashv(&[&left, &right])
-                .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+            current =
+                H::hashv(&[&left, &right]).map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
             current_index /= 2;
         }
