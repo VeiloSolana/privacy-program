@@ -50,15 +50,6 @@ pub struct PrivacyConfig {
     /// Relayer registry
     pub num_relayers: u8,
     pub relayers: [Pubkey; MAX_RELAYERS],
-
-    /// Minimum deposit amount
-    pub min_deposit: u64,
-    /// Maximum deposit amount
-    pub max_deposit: u64,
-    /// Minimum withdraw amount
-    pub min_withdraw: u64,
-    /// Are relayers enabled?
-    pub relayer_enabled: bool,
 }
 
 impl PrivacyConfig {
@@ -73,11 +64,7 @@ impl PrivacyConfig {
         32 +  // mint_address
         8 +   // max_deposit_amount
         1 +   // num_relayers
-        32 * MAX_RELAYERS + // relayers
-        8 +   // min_deposit
-        8 +   // max_deposit
-        8 +   // min_withdraw
-        1; // relayer_enabled
+        32 * MAX_RELAYERS; // relayers
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
@@ -251,19 +238,6 @@ pub struct WithdrawPublicInputs {
     pub recipient: Pubkey,
 }
 
-#[account]
-pub struct NoteHint {
-    pub bump: u8,
-    pub commitment: [u8; 32],
-    pub owner_hint: [u8; 32],
-    pub encrypted_note: Vec<u8>,
-    pub leaf_index: u64,
-}
-
-impl NoteHint {
-    pub const MAX_LEN: usize = 8 + 1 + 32 + 32 + (4 + 256) + 4;
-}
-
 // ---- Instruction contexts ----
 
 #[derive(Accounts)]
@@ -349,15 +323,6 @@ pub struct DepositFixed<'info> {
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    #[account(
-        init,
-        payer = depositor,
-        space = NoteHint::MAX_LEN,
-        seeds = [b"privacy_note_hint_v3", commitment.as_ref()],
-        bump
-    )]
-    pub note_hint: Account<'info, NoteHint>,
 
     #[account(mut)]
     pub depositor: Signer<'info>,
@@ -560,19 +525,10 @@ pub struct PrivateTransfer<'info> {
 
     #[account(mut)]
     pub sender: Signer<'info>, // Could be relayer
-    #[account(
-        init,
-        payer = sender,
-        space = NoteHint::MAX_LEN,
-        seeds = [b"transfer_note_hint_v3", new_commitment.as_ref()],
-        bump
-    )]
-    pub transfer_hint: Account<'info, TransferHint>,
 
     pub system_program: Program<'info, System>,
 }
 
-#[account]
 pub struct TransferHint {
     pub old_root: [u8; 32],
     pub old_nullifier: [u8; 32],
@@ -662,33 +618,6 @@ pub mod privacy_pool {
         require!(n < MAX_RELAYERS, PrivacyError::TooManyRelayers);
         cfg.relayers[n] = new_relayer;
         cfg.num_relayers += 1;
-        Ok(())
-    }
-
-    pub fn update_config(
-        ctx: Context<ConfigAdmin>,
-        min_deposit: Option<u64>,
-        max_deposit: Option<u64>,
-        min_withdraw: Option<u64>,
-        relayer_enabled: Option<bool>,
-        fee_bps: Option<u16>,
-    ) -> Result<()> {
-        let cfg = &mut ctx.accounts.config;
-        if let Some(val) = min_deposit {
-            cfg.min_deposit = val;
-        }
-        if let Some(val) = max_deposit {
-            cfg.max_deposit = val;
-        }
-        if let Some(val) = min_withdraw {
-            cfg.min_withdraw = val;
-        }
-        if let Some(val) = relayer_enabled {
-            cfg.relayer_enabled = val;
-        }
-        if let Some(val) = fee_bps {
-            cfg.fee_bps = val;
-        }
         Ok(())
     }
 
