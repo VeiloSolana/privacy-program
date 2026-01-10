@@ -1,0 +1,17 @@
+{
+  "name": "Veilo",
+  "symbol": "VEILO",
+  "uri": "https://veilo.network/token-metadata.json",
+  "mintAddress": "A4jyQhHNRW5kFAdGN8ZnXB8HHW5kXJU4snGddS5UpdSq",
+  "decimals": 6,
+  "authority": "H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP",
+  "adminTokenAccount": "AwcauZnKuz9GY9HTNP4oZGSNFkqb37gmPoH9VrFHuMUt",
+  "recipientWallet": "9pGueGVFMcYnNJFG9jiBzBg9D1S7G5EnebgdwaDnT3Qt",
+  "recipientTokenAccount": "2ojRuGha6ftq4yqBf9UfUuv5iSBZu5TQv7KW5QbQh517",
+  "adminSupply": 1000000000000,
+  "recipientSupply": 500000000000,
+  "totalSupply": 1500000000000,
+  "createdAt": "2026-01-09T20:14:21.908Z",
+  "network": "devnet",
+  "description": "Veilo Privacy Token - Test token for Veilo privacy pool on Solana devnet"
+}
