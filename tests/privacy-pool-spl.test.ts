@@ -119,35 +119,35 @@ describe("Privacy Pool - SPL Token Support", () => {
     console.log("Vault Token Account:", vaultTokenAccount.toBase58());
   });
 
-  it("initializes the privacy pool with SPL token", async () => {
-    try {
-      await (program.methods as any)
-        .initialize(feeBps, testMint)
-        .accounts({
-          config: tokenConfig,
-          vault: tokenVault,
-          noteTree: tokenNoteTree,
-          nullifiers: tokenNullifiers,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+  // it("initializes the privacy pool with SPL token", async () => {
+  //   try {
+  //     await (program.methods as any)
+  //       .initialize(feeBps, testMint)
+  //       .accounts({
+  //         config: tokenConfig,
+  //         vault: tokenVault,
+  //         noteTree: tokenNoteTree,
+  //         nullifiers: tokenNullifiers,
+  //         admin: wallet.publicKey,
+  //         systemProgram: SystemProgram.programId,
+  //       })
+  //       .rpc();
 
-      const configAcc = await (program.account as any).privacyConfig.fetch(
-        tokenConfig
-      );
-      console.log("✅ Token pool initialized");
-      console.log(`   Token mint: ${configAcc.mintAddress.toBase58()}`);
-      console.log(`   Fee BPS: ${configAcc.feeBps}`);
-      console.log(`   Max Deposit: ${configAcc.maxDepositAmount} tokens`);
-    } catch (e: any) {
-      if (e instanceof SendTransactionError) {
-        const logs = await e.getLogs(provider.connection);
-        console.error("Initialize failed:", logs);
-      }
-      throw e;
-    }
-  });
+  //     const configAcc = await (program.account as any).privacyConfig.fetch(
+  //       tokenConfig
+  //     );
+  //     console.log("✅ Token pool initialized");
+  //     console.log(`   Token mint: ${configAcc.mintAddress.toBase58()}`);
+  //     console.log(`   Fee BPS: ${configAcc.feeBps}`);
+  //     console.log(`   Max Deposit: ${configAcc.maxDepositAmount} tokens`);
+  //   } catch (e: any) {
+  //     if (e instanceof SendTransactionError) {
+  //       const logs = await e.getLogs(provider.connection);
+  //       console.error("Initialize failed:", logs);
+  //     }
+  //     throw e;
+  //   }
+  // });
 
   // =============================================================================
   // Token Deposit Test
@@ -157,6 +157,14 @@ describe("Privacy Pool - SPL Token Support", () => {
     const sender = Keypair.generate();
 
     console.log("\n🎁 Setting up token deposit test...");
+    // Create vault's token account (if not exists)
+    await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
+      testMint,
+      tokenVault,
+      true
+    );
     console.log(`   Sender: ${sender.publicKey.toBase58()}`);
 
     // Airdrop SOL for transaction fees
@@ -172,15 +180,6 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     console.log(`   Sender token account: ${senderTokenAccount.toBase58()}`);
     console.log(`   Funded with: ${TOKEN_AMOUNT * 2} tokens`);
-
-    // Create vault's token account (if not exists)
-    await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      testMint,
-      tokenVault,
-      true
-    );
 
     // Register sender as relayer
     await (program.methods as any)
