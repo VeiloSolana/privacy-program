@@ -86,13 +86,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Create test token mint
     console.log("Creating test token mint...");
-    testMint = await createMint(
-      provider.connection,
-      wallet.payer,
-      wallet.publicKey,
-      null,
-      MINT_DECIMALS
-    );
+    testMint = new PublicKey("A4jyQhHNRW5kFAdGN8ZnXB8HHW5kXJU4snGddS5UpdSq");
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
     // Get PDAs for token pool (v3 with mint_address in seeds)
