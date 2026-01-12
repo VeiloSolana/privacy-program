@@ -664,7 +664,6 @@ pub mod privacy_pool {
         );
 
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
-        // For deposits (public_amount < 0), anyone can deposit without being a relayer
         if public_amount <= 0 {
             require!(
                 cfg.is_relayer(&ctx.accounts.relayer.key()),
