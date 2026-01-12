@@ -1,8 +1,14 @@
 {
   "scripts": {
     "build:anchor": "anchor build",
-    "test": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool.test.ts'",
-    "test:spl": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool-spl.test.ts'"
+    "test": "mocha -r ts-node/register -t 1000000 'tests/**/*.test.ts'",
+    "test:sol": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool.test.ts'",
+    "test:spl": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool-spl.test.ts'",
+    "deploy:devnet": "ts-node scripts/deploy-devnet.ts",
+    "check-pool": "ts-node scripts/check-pool.ts",
+    "init-global-config": "ts-node scripts/initialize-global-config.ts",
+    "update-global-config": "ts-node scripts/update-global-config.ts",
+    "update-pool": "ts-node scripts/update-pool-config.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -12,6 +18,7 @@
     "@zkprivacysol/sdk-core": "^0.1.12",
     "bs58": "^6.0.0",
     "circomlibjs": "^0.1.7",
+    "commander": "^11.1.0",
     "snarkjs": "^0.7.5"
   },
   "devDependencies": {
