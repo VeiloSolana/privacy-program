@@ -21,7 +21,7 @@ url = "https://api.apr.dev"
 
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "/Users/admin/.config/solana/id.json"
 
 [test]
