@@ -175,31 +175,18 @@ describe("Privacy Pool - SPL Token Support", () => {
 
   it("initializes global config", async () => {
     try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
-          globalConfig,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
-        globalConfig
-      );
-      console.log("✅ Global config initialized");
-      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
-    } catch (e: any) {
-      if (e instanceof SendTransactionError) {
-        const logs = await e.getLogs(provider.connection);
-        console.error("Global config init failed:", logs);
+      // Check if global config already exists
+      try {
+        const existingConfig = await (
+          program.account as any
+        ).globalConfig.fetch(globalConfig);
+        console.log("✅ Global config already initialized");
+        console.log(`   Relayer enabled: ${existingConfig.relayerEnabled}`);
+        return;
+      } catch (e) {
+        // Account doesn't exist, proceed with initialization
       }
-      throw e;
-    }
-  });
 
-  it("initializes global config", async () => {
-    try {
       await (program.methods as any)
         .initializeGlobalConfig()
         .accounts({
@@ -391,7 +378,8 @@ describe("Privacy Pool - SPL Token Support", () => {
     let txSignature: string;
 
     try {
-      const tx = await (program.methods as any)
+      // Build instruction
+      const ix = await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
           new BN(depositAmount.toString()),
@@ -421,22 +409,26 @@ describe("Privacy Pool - SPL Token Support", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .signers([sender])
-        .transaction();
+        .instruction();
 
-      const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-        units: 1_400_000,
-      });
-      const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: 1,
-      });
+      // Use versioned transaction to avoid size limit
+      const { blockhash } = await provider.connection.getLatestBlockhash();
+      const messageV0 = new TransactionMessage({
+        payerKey: sender.publicKey,
+        recentBlockhash: blockhash,
+        instructions: [
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+          ix,
+        ],
+      }).compileToV0Message();
 
-      const transaction = new Transaction();
-      transaction.add(modifyComputeUnits);
-      transaction.add(addPriorityFee);
-      transaction.add(tx);
+      const versionedTx = new VersionedTransaction(messageV0);
+      versionedTx.sign([sender]);
 
-      txSignature = await provider.sendAndConfirm(transaction, [sender]);
+      txSignature = await provider.connection.sendTransaction(versionedTx);
+      await provider.connection.confirmTransaction(txSignature, "confirmed");
+
       console.log(`\n✅ Transaction signature: ${txSignature}`);
 
       // Verify events
@@ -1040,6 +1032,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       )
       .accounts({
         config: tokenConfig,
+        globalConfig,
         vault: tokenVault,
         noteTree: tokenNoteTree,
         nullifiers: tokenNullifiers,
@@ -1259,6 +1252,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         )
         .accounts({
           config: tokenConfig,
+          globalConfig,
           vault: tokenVault,
           noteTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
