@@ -125,8 +125,11 @@ pub struct TransactionPublicInputs {
     /// Merkle root (must be in root_history)
     pub root: [u8; 32],
 
-    /// Net public amount (i64 - can be negative for deposits)
-    /// Positive = withdrawal, Negative = deposit, Zero = private transfer
+    /// Net public amount (i64 - signed for deposits/withdrawals)
+    /// Circuit equation: sumIns + publicAmount = sumOuts
+    /// POSITIVE = DEPOSIT (adding to pool: 0 + amount = outputs)
+    /// NEGATIVE = WITHDRAWAL (removing from pool: inputs + negative = smaller outputs)
+    /// ZERO = PRIVATE TRANSFER (no value crossing pool boundary)
     pub public_amount: i64,
 
     /// Hash of external data: Poseidon(recipient, relayer, fee, refund)
@@ -622,7 +625,8 @@ pub mod privacy_pool {
     }
 
     /// Unified UTXO transaction instruction
-    /// Handles deposits (publicAmount < 0), withdrawals (publicAmount > 0), and transfers (publicAmount = 0)
+    /// Circuit equation: sumIns + publicAmount = sumOuts
+    /// Handles deposits (publicAmount > 0), withdrawals (publicAmount < 0), and transfers (publicAmount = 0)
     pub fn transact(
         ctx: Context<Transact>,
         root: [u8; 32],
@@ -664,7 +668,8 @@ pub mod privacy_pool {
         );
 
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
-        // For deposits (public_amount < 0), anyone can deposit without being a relayer
+        // For deposits (public_amount > 0), anyone can facilitate deposit without being authorized
+        // For withdrawals (public_amount < 0) and transfers (public_amount = 0), require authorized relayer
         if public_amount <= 0 {
             require!(
                 cfg.is_relayer(&ctx.accounts.relayer.key()),
@@ -730,6 +735,14 @@ pub mod privacy_pool {
                     cfg.mint_address,
                     PrivacyError::InvalidMintAddress
                 );
+
+                // [AUDIT-005 FIX] Validate user token account is owned/delegated to relayer
+                // Since relayer is the authority for the deposit CPI, they must control this account
+                require_keys_eq!(
+                    user_token.owner,
+                    ctx.accounts.relayer.key(),
+                    PrivacyError::DepositorTokenAccountMismatch
+                );
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -752,8 +765,15 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // [AUDIT-001 FIX] Verify relayer token account is owned by ext_data.relayer
-                // This prevents malicious relayers from redirecting fees to arbitrary accounts
+                // [AUDIT-005 FIX] Validate recipient token account is owned by ext_data.recipient
+                // This prevents withdrawals to token accounts not controlled by the intended recipient
+                require_keys_eq!(
+                    recipient_token.owner,
+                    ext_data.recipient,
+                    PrivacyError::RecipientTokenAccountMismatch
+                );
+
+                // [AUDIT-001 FIX] This prevents malicious relayers from redirecting fees to arbitrary accounts
                 require_keys_eq!(
                     relayer_token.owner,
                     ext_data.relayer,
@@ -881,9 +901,10 @@ fn mark_nullifier_spent(
 
 /// Handle lamport/token flows based on public_amount
 ///
-/// public_amount < 0: Deposit (user -> vault)
-/// public_amount > 0: Withdrawal (vault -> recipient + relayer)
-/// public_amount = 0: Private transfer (no SOL/token movement)
+/// Circuit equation: sumIns + publicAmount = sumOuts
+/// public_amount > 0: DEPOSIT (user -> vault, funds entering pool)
+/// public_amount < 0: WITHDRAWAL (vault -> recipient + relayer, funds leaving pool)
+/// public_amount = 0: PRIVATE TRANSFER (no SOL/token crosses pool boundary)
 fn handle_public_amount<'info>(
     config: &mut PrivacyConfig,
     vault: &Account<'info, Vault>,
@@ -1092,8 +1113,16 @@ fn handle_public_amount<'info>(
             .total_tvl
             .checked_sub(withdrawal_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
+    } else {
+        // PRIVATE TRANSFER: public_amount == 0, no value crosses pool boundary
+        // since no funds move on-chain. This prevents semantic inconsistency
+        // between ext_data (committed in proof) and actual on-chain effects.
+        require!(
+            ext_data.fee == 0 && ext_data.refund == 0,
+            PrivacyError::InvalidPrivateTransferFee
+        );
     }
-    // else: public_amount == 0, no lamport/token movement (pure private transfer)
+    // Note: When public_amount == 0, no lamport/token movement occurs
 
     Ok(())
 }
@@ -1187,4 +1216,10 @@ pub enum PrivacyError {
     RelayerMismatch,
     #[msg("Relayer token account not owned by ext_data.relayer")]
     RelayerTokenAccountMismatch,
+    #[msg("Recipient token account not owned by ext_data.recipient")]
+    RecipientTokenAccountMismatch,
+    #[msg("Depositor token account not owned/delegated to relayer")]
+    DepositorTokenAccountMismatch,
+    #[msg("Private transfer (public_amount == 0) must have fee == 0 and refund == 0")]
+    InvalidPrivateTransferFee,
 }

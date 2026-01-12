@@ -87,6 +87,18 @@ describe("Privacy Pool - SPL Token Support", () => {
     // Create test token mint
     console.log("Creating test token mint...");
     testMint = new PublicKey("A4jyQhHNRW5kFAdGN8ZnXB8HHW5kXJU4snGddS5UpdSq");
+    try {
+      testMint = await createMint(
+        provider.connection,
+        wallet.payer,
+        wallet.publicKey,
+        null,
+        MINT_DECIMALS
+      );
+    } catch (error) {
+      // Mint already exists, use the hardcoded address
+      console.log("Using existing test mint");
+    }
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
     // Get PDAs for token pool (v3 with mint_address in seeds)
@@ -119,35 +131,35 @@ describe("Privacy Pool - SPL Token Support", () => {
     console.log("Vault Token Account:", vaultTokenAccount.toBase58());
   });
 
-  // it("initializes the privacy pool with SPL token", async () => {
-  //   try {
-  //     await (program.methods as any)
-  //       .initialize(feeBps, testMint)
-  //       .accounts({
-  //         config: tokenConfig,
-  //         vault: tokenVault,
-  //         noteTree: tokenNoteTree,
-  //         nullifiers: tokenNullifiers,
-  //         admin: wallet.publicKey,
-  //         systemProgram: SystemProgram.programId,
-  //       })
-  //       .rpc();
+  it("initializes the privacy pool with SPL token", async () => {
+    try {
+      await (program.methods as any)
+        .initialize(feeBps, testMint)
+        .accounts({
+          config: tokenConfig,
+          vault: tokenVault,
+          noteTree: tokenNoteTree,
+          nullifiers: tokenNullifiers,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
 
-  //     const configAcc = await (program.account as any).privacyConfig.fetch(
-  //       tokenConfig
-  //     );
-  //     console.log("✅ Token pool initialized");
-  //     console.log(`   Token mint: ${configAcc.mintAddress.toBase58()}`);
-  //     console.log(`   Fee BPS: ${configAcc.feeBps}`);
-  //     console.log(`   Max Deposit: ${configAcc.maxDepositAmount} tokens`);
-  //   } catch (e: any) {
-  //     if (e instanceof SendTransactionError) {
-  //       const logs = await e.getLogs(provider.connection);
-  //       console.error("Initialize failed:", logs);
-  //     }
-  //     throw e;
-  //   }
-  // });
+      const configAcc = await (program.account as any).privacyConfig.fetch(
+        tokenConfig
+      );
+      console.log("✅ Token pool initialized");
+      console.log(`   Token mint: ${configAcc.mintAddress.toBase58()}`);
+      console.log(`   Fee BPS: ${configAcc.feeBps}`);
+      console.log(`   Max Deposit: ${configAcc.maxDepositAmount} tokens`);
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Initialize failed:", logs);
+      }
+      throw e;
+    }
+  });
 
   // =============================================================================
   // Token Deposit Test
@@ -538,7 +550,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     const [nullifierMarker0] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("nullifier_v4"),
+        Buffer.from("nullifier_v3"),
         testMint.toBuffer(),
         Buffer.from(depositNote.nullifier),
       ],
@@ -546,7 +558,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
     const [nullifierMarker1] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("nullifier_v4"),
+        Buffer.from("nullifier_v3"),
         testMint.toBuffer(),
         Buffer.from(dummyNullifier1),
       ],
@@ -933,7 +945,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     const [aliceNullifierMarker] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("nullifier_v4"),
+        Buffer.from("nullifier_v3"),
         testMint.toBuffer(),
         Buffer.from(aliceNullifier),
       ],
@@ -941,7 +953,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
     const [transferDummyNullifierMarker] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("nullifier_v4"),
+        Buffer.from("nullifier_v3"),
         testMint.toBuffer(),
         Buffer.from(transferDummyNullifier),
       ],

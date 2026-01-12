@@ -127,10 +127,12 @@ fn i64_to_field_be(value: i64) -> [u8; 32] {
     } else {
         // Negative: compute Fr - |value|
         let abs_val = value.abs() as u64;
+
+        // Create abs_bytes with value in last 8 bytes
         let mut abs_bytes = [0u8; 32];
         abs_bytes[24..].copy_from_slice(&abs_val.to_be_bytes());
 
-        // Compute Fr - abs_val using BigUint
+        // Compute Fr - abs_val using BigUint (necessary for field arithmetic)
         let modulus = BigUint::from_bytes_be(&FR_MODULUS);
         let abs = BigUint::from_bytes_be(&abs_bytes);
         let result = modulus - abs;
@@ -180,38 +182,42 @@ pub fn verify_transaction_groth16(
     public_inputs[6] = reduce_to_field_be(inputs.output_commitments[0]);
     public_inputs[7] = reduce_to_field_be(inputs.output_commitments[1]);
 
-    // DEBUG logging
-    msg!("[DEBUG] Transaction proof public inputs:");
-    msg!("  root: {}", BigUint::from_bytes_be(&public_inputs[0]));
-    msg!(
-        "  publicAmount: {} -> {}",
-        inputs.public_amount,
-        BigUint::from_bytes_be(&public_inputs[1])
-    );
-    msg!(
-        "  extDataHash: {}",
-        BigUint::from_bytes_be(&public_inputs[2])
-    );
-    msg!(
-        "  mintAddress: {}",
-        BigUint::from_bytes_be(&public_inputs[3])
-    );
-    msg!(
-        "  inputNullifier[0]: {}",
-        BigUint::from_bytes_be(&public_inputs[4])
-    );
-    msg!(
-        "  inputNullifier[1]: {}",
-        BigUint::from_bytes_be(&public_inputs[5])
-    );
-    msg!(
-        "  outputCommitment[0]: {}",
-        BigUint::from_bytes_be(&public_inputs[6])
-    );
-    msg!(
-        "  outputCommitment[1]: {}",
-        BigUint::from_bytes_be(&public_inputs[7])
-    );
+    // These logs create BigUint values just for display, burning compute units.
+    // Attackers can spam failing proofs to exhaust compute budget.
+    #[cfg(feature = "zk-verify-debug")]
+    {
+        msg!("[DEBUG] Transaction proof public inputs:");
+        msg!("  root: {}", BigUint::from_bytes_be(&public_inputs[0]));
+        msg!(
+            "  publicAmount: {} -> {}",
+            inputs.public_amount,
+            BigUint::from_bytes_be(&public_inputs[1])
+        );
+        msg!(
+            "  extDataHash: {}",
+            BigUint::from_bytes_be(&public_inputs[2])
+        );
+        msg!(
+            "  mintAddress: {}",
+            BigUint::from_bytes_be(&public_inputs[3])
+        );
+        msg!(
+            "  inputNullifier[0]: {}",
+            BigUint::from_bytes_be(&public_inputs[4])
+        );
+        msg!(
+            "  inputNullifier[1]: {}",
+            BigUint::from_bytes_be(&public_inputs[5])
+        );
+        msg!(
+            "  outputCommitment[0]: {}",
+            BigUint::from_bytes_be(&public_inputs[6])
+        );
+        msg!(
+            "  outputCommitment[1]: {}",
+            BigUint::from_bytes_be(&public_inputs[7])
+        );
+    }
 
     // ----- 2. Re-encode proof_a: G1 -> 64-byte alt_bn128 layout -----
     let g1_point = G1::deserialize_with_mode(
