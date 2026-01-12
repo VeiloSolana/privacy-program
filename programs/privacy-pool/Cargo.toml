@@ -15,6 +15,7 @@ no-log-ix-name = []
 default = []
 cpi = []
 zk-verify = []
+zk-verify-debug = []
 idl-build = ["anchor-lang/idl-build"]
 
 [dependencies]
