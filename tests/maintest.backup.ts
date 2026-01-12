@@ -746,6 +746,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   let vault: PublicKey;
   let noteTree: PublicKey;
   let nullifiers: PublicKey;
+  let globalConfig: PublicKey;
 
   const SOL_MINT = PublicKey.default;
   const feeBps = 50; // 0.5%
@@ -787,6 +788,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       [Buffer.from("privacy_nullifiers_v3"), SOL_MINT.toBuffer()],
       program.programId
     );
+    [globalConfig] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global_config_v1")],
+      program.programId
+    );
 
     console.log("Program ID:", program.programId.toBase58());
     console.log("Config PDA:", config.toBase58());
@@ -799,7 +804,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   it("initializes the privacy pool (UTXO model)", async () => {
     try {
       await (program.methods as any)
-        .initialize(feeBps, SOL_MINT)
+        .initialize(
+          feeBps,
+          SOL_MINT,
+          new BN(1_000_000), // min_deposit_amount: 0.001 SOL
+          new BN(1_000_000_000_000), // max_deposit_amount: 1000 SOL
+          new BN(1_000_000), // min_withdraw_amount: 0.001 SOL
+          new BN(1_000_000_000_000) // max_withdraw_amount: 1000 SOL
+        )
         .accounts({
           config,
           vault,
@@ -823,6 +835,31 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
         console.error("Initialize failed:", logs);
+      }
+      throw e;
+    }
+  });
+
+  it("initializes global config", async () => {
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
+        globalConfig
+      );
+      console.log("✅ Global config initialized");
+      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Global config init failed:", logs);
       }
       throw e;
     }
@@ -1042,6 +1079,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         )
         .accounts({
           config,
+          globalConfig,
           vault,
           noteTree,
           nullifiers,
@@ -1404,6 +1442,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         )
         .accounts({
           config,
+          globalConfig,
           vault,
           noteTree,
           nullifiers,
@@ -1693,6 +1732,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -1861,6 +1901,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -2054,6 +2095,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -2299,6 +2341,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         )
         .accounts({
           config,
+          globalConfig,
           vault,
           noteTree,
           nullifiers,
@@ -2822,6 +2865,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -3359,6 +3403,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -3429,6 +3474,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -3517,6 +3563,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -3763,6 +3810,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -3985,6 +4033,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
@@ -4394,6 +4443,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       )
       .accounts({
         config,
+        globalConfig,
         vault,
         noteTree,
         nullifiers,
