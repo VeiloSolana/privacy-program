@@ -61,6 +61,7 @@ describe("Privacy Pool - SPL Token Support", () => {
   let tokenVault: PublicKey;
   let tokenNoteTree: PublicKey;
   let tokenNullifiers: PublicKey;
+  let globalConfig: PublicKey;
 
   let testMint: PublicKey;
   let vaultTokenAccount: PublicKey;
@@ -118,6 +119,10 @@ describe("Privacy Pool - SPL Token Support", () => {
       [Buffer.from("privacy_nullifiers_v3"), testMint.toBuffer()],
       program.programId
     );
+    [globalConfig] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global_config_v1")],
+      program.programId
+    );
 
     // Create vault's token account (ATA)
     vaultTokenAccount = await getAssociatedTokenAddress(
@@ -134,7 +139,14 @@ describe("Privacy Pool - SPL Token Support", () => {
   it("initializes the privacy pool with SPL token", async () => {
     try {
       await (program.methods as any)
-        .initialize(feeBps, testMint)
+        .initialize(
+          feeBps,
+          testMint,
+          new BN(1_000_000), // min_deposit_amount
+          new BN(1_000_000_000_000), // max_deposit_amount
+          new BN(1_000_000), // min_withdraw_amount
+          new BN(1_000_000_000_000) // max_withdraw_amount
+        )
         .accounts({
           config: tokenConfig,
           vault: tokenVault,
@@ -156,6 +168,56 @@ describe("Privacy Pool - SPL Token Support", () => {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
         console.error("Initialize failed:", logs);
+      }
+      throw e;
+    }
+  });
+
+  it("initializes global config", async () => {
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
+        globalConfig
+      );
+      console.log("✅ Global config initialized");
+      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Global config init failed:", logs);
+      }
+      throw e;
+    }
+  });
+
+  it("initializes global config", async () => {
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
+        globalConfig
+      );
+      console.log("✅ Global config initialized");
+      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
+    } catch (e: any) {
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Global config init failed:", logs);
       }
       throw e;
     }
@@ -344,6 +406,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         )
         .accounts({
           config: tokenConfig,
+          globalConfig,
           vault: tokenVault,
           noteTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
@@ -588,6 +651,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         )
         .accounts({
           config: tokenConfig,
+          globalConfig,
           vault: tokenVault,
           noteTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
@@ -802,6 +866,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       )
       .accounts({
         config: tokenConfig,
+        globalConfig,
         vault: tokenVault,
         noteTree: tokenNoteTree,
         nullifiers: tokenNullifiers,
