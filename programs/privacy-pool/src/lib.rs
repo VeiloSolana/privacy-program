@@ -672,6 +672,14 @@ pub mod privacy_pool {
             );
         }
 
+        // 2a. Bind relayer account to ext_data.relayer to prevent fee theft
+        // This ensures the relayer submitting the transaction is the one entitled to fees
+        require_keys_eq!(
+            ctx.accounts.relayer.key(),
+            ext_data.relayer,
+            PrivacyError::RelayerMismatch
+        );
+
         // 3. Verify recipient matches ext_data
         require_keys_eq!(
             ctx.accounts.recipient.key(),
@@ -742,6 +750,14 @@ pub mod privacy_pool {
                     relayer_token.mint,
                     cfg.mint_address,
                     PrivacyError::InvalidMintAddress
+                );
+
+                // [AUDIT-001 FIX] Verify relayer token account is owned by ext_data.relayer
+                // This prevents malicious relayers from redirecting fees to arbitrary accounts
+                require_keys_eq!(
+                    relayer_token.owner,
+                    ext_data.relayer,
+                    PrivacyError::RelayerTokenAccountMismatch
                 );
             }
         }
@@ -1167,4 +1183,8 @@ pub enum PrivacyError {
     MissingTokenProgram,
     #[msg("Invalid token account authority")]
     InvalidTokenAuthority,
+    #[msg("Relayer account does not match ext_data.relayer")]
+    RelayerMismatch,
+    #[msg("Relayer token account not owned by ext_data.relayer")]
+    RelayerTokenAccountMismatch,
 }
