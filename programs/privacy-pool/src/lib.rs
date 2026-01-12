@@ -9,7 +9,7 @@ pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
-declare_id!("25nWpBnbvqh8mQ19SpnkVcDnmm72m3R7YCSh2RAEpLQF");
+declare_id!("G4jVg1TydNuzQQZojYYVekaGYFZVMAuimC8KWVVKzWfa");
 
 // ---- Constants ----
 
