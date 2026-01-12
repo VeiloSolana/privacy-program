@@ -44,8 +44,17 @@ pub struct PrivacyConfig {
     /// Token mint address (for now: SOL, future: multi-token support)
     pub mint_address: Pubkey,
 
+    /// Minimum amount allowed per deposit (in lamports/token units)
+    pub min_deposit_amount: u64,
+
     /// Maximum amount allowed per deposit (in lamports/token units)
     pub max_deposit_amount: u64,
+
+    /// Minimum amount allowed per withdrawal (in lamports/token units)
+    pub min_withdraw_amount: u64,
+
+    /// Maximum amount allowed per withdrawal (in lamports/token units)
+    pub max_withdraw_amount: u64,
 
     /// Relayer registry
     pub num_relayers: u8,
@@ -62,14 +71,33 @@ impl PrivacyConfig {
         8 +   // min_withdrawal_fee
         8 +   // total_tvl
         32 +  // mint_address
+        8 +   // min_deposit_amount
         8 +   // max_deposit_amount
+        8 +   // min_withdraw_amount
+        8 +   // max_withdraw_amount
         1 +   // num_relayers
-        32 * MAX_RELAYERS; // relayers
+        32 * MAX_RELAYERS; // relayers (646 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
         self.relayers[..n].iter().any(|k| k == key)
     }
+}
+
+#[account]
+pub struct GlobalConfig {
+    /// PDA bump
+    pub bump: u8,
+
+    /// Admin who can configure global settings
+    pub admin: Pubkey,
+
+    /// Global relayer toggle (emergency kill switch)
+    pub relayer_enabled: bool,
+}
+
+impl GlobalConfig {
+    pub const LEN: usize = 8 + 1 + 32 + 1; // 42 bytes
 }
 
 #[account]
@@ -246,7 +274,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump,
         space = PrivacyConfig::LEN
     )]
@@ -290,7 +318,7 @@ pub struct Initialize<'info> {
 pub struct ConfigAdmin<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump = config.bump,
         has_one = admin
     )]
@@ -302,10 +330,54 @@ pub struct ConfigAdmin<'info> {
 
 #[derive(Accounts)]
 #[instruction(mint_address: Pubkey)]
+pub struct UpdatePoolConfig<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
+        bump = config.bump,
+        has_one = admin
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeGlobalConfig<'info> {
+    #[account(
+        init,
+        payer = admin,
+        seeds = [b"global_config_v1"],
+        bump,
+        space = GlobalConfig::LEN
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GlobalConfigAdmin<'info> {
+    #[account(
+        mut,
+        seeds = [b"global_config_v1"],
+        bump = global_config.bump,
+        has_one = admin
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
 pub struct DepositFixed<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
@@ -346,10 +418,16 @@ pub struct DepositFixed<'info> {
 pub struct Transact<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
+
+    #[account(
+        seeds = [b"global_config_v1"],
+        bump = global_config.bump
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
 
     #[account(
         mut,
@@ -435,7 +513,7 @@ pub struct Transact<'info> {
 pub struct Withdraw<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
@@ -494,7 +572,7 @@ pub struct TransferPublicInputs {
 pub struct PrivateTransfer<'info> {
     #[account(
         mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        seeds = [b"privacy_config_v5", mint_address.as_ref()],
         bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
@@ -556,7 +634,15 @@ fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
 pub mod privacy_pool {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, fee_bps: u16, mint_address: Pubkey) -> Result<()> {
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        fee_bps: u16,
+        mint_address: Pubkey,
+        min_deposit_amount: Option<u64>,
+        max_deposit_amount: Option<u64>,
+        min_withdraw_amount: Option<u64>,
+        max_withdraw_amount: Option<u64>,
+    ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -584,7 +670,22 @@ pub mod privacy_pool {
         // UTXO model: no fixed denominations
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
-        cfg.max_deposit_amount = 1_000_000_000_000; // Default: 1000 SOL/tokens
+
+        // Set deposit/withdraw limits with sensible defaults
+        cfg.min_deposit_amount = min_deposit_amount.unwrap_or(1_000_000); // Default: 0.001 SOL
+        cfg.max_deposit_amount = max_deposit_amount.unwrap_or(1_000_000_000_000); // Default: 1000 SOL
+        cfg.min_withdraw_amount = min_withdraw_amount.unwrap_or(1_000_000); // Default: 0.001 SOL
+        cfg.max_withdraw_amount = max_withdraw_amount.unwrap_or(1_000_000_000_000); // Default: 1000 SOL
+
+        // Validate ranges
+        require!(
+            cfg.min_deposit_amount <= cfg.max_deposit_amount,
+            PrivacyError::InvalidPoolConfigRange
+        );
+        require!(
+            cfg.min_withdraw_amount <= cfg.max_withdraw_amount,
+            PrivacyError::InvalidPoolConfigRange
+        );
 
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
@@ -618,6 +719,75 @@ pub mod privacy_pool {
         require!(n < MAX_RELAYERS, PrivacyError::TooManyRelayers);
         cfg.relayers[n] = new_relayer;
         cfg.num_relayers += 1;
+        Ok(())
+    }
+
+    pub fn update_pool_config(
+        ctx: Context<UpdatePoolConfig>,
+        _mint_address: Pubkey,
+        min_deposit_amount: Option<u64>,
+        max_deposit_amount: Option<u64>,
+        min_withdraw_amount: Option<u64>,
+        max_withdraw_amount: Option<u64>,
+        fee_bps: Option<u16>,
+        min_withdrawal_fee: Option<u64>,
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+
+        if let Some(val) = min_deposit_amount {
+            cfg.min_deposit_amount = val;
+        }
+        if let Some(val) = max_deposit_amount {
+            cfg.max_deposit_amount = val;
+        }
+        if let Some(val) = min_withdraw_amount {
+            cfg.min_withdraw_amount = val;
+        }
+        if let Some(val) = max_withdraw_amount {
+            cfg.max_withdraw_amount = val;
+        }
+        if let Some(val) = fee_bps {
+            cfg.fee_bps = val;
+        }
+        if let Some(val) = min_withdrawal_fee {
+            cfg.min_withdrawal_fee = val;
+        }
+
+        // Validate ranges after updates
+        require!(
+            cfg.min_deposit_amount <= cfg.max_deposit_amount,
+            PrivacyError::InvalidPoolConfigRange
+        );
+        require!(
+            cfg.min_withdraw_amount <= cfg.max_withdraw_amount,
+            PrivacyError::InvalidPoolConfigRange
+        );
+
+        Ok(())
+    }
+
+    pub fn initialize_global_config(
+        ctx: Context<InitializeGlobalConfig>,
+    ) -> Result<()> {
+        let global_cfg = &mut ctx.accounts.global_config;
+
+        global_cfg.bump = ctx.bumps.global_config;
+        global_cfg.admin = ctx.accounts.admin.key();
+        global_cfg.relayer_enabled = true;
+
+        Ok(())
+    }
+
+    pub fn update_global_config(
+        ctx: Context<GlobalConfigAdmin>,
+        relayer_enabled: Option<bool>,
+    ) -> Result<()> {
+        let global_cfg = &mut ctx.accounts.global_config;
+
+        if let Some(val) = relayer_enabled {
+            global_cfg.relayer_enabled = val;
+        }
+
         Ok(())
     }
 
@@ -666,6 +836,13 @@ pub mod privacy_pool {
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
         // For deposits (public_amount < 0), anyone can deposit without being a relayer
         if public_amount <= 0 {
+            // Check if relayers are globally enabled
+            require!(
+                ctx.accounts.global_config.relayer_enabled,
+                PrivacyError::RelayersDisabledGlobally
+            );
+
+            // Check if this specific relayer is authorized
             require!(
                 cfg.is_relayer(&ctx.accounts.relayer.key()),
                 PrivacyError::RelayerNotAllowed
@@ -814,6 +991,7 @@ pub mod privacy_pool {
         // 10. Handle public amount (deposits/withdrawals)
         handle_public_amount(
             cfg,
+            &ctx.accounts.global_config,
             &ctx.accounts.vault,
             &ctx.accounts.recipient,
             &ctx.accounts.relayer,
@@ -870,6 +1048,7 @@ fn mark_nullifier_spent(
 /// public_amount = 0: Private transfer (no SOL/token movement)
 fn handle_public_amount<'info>(
     config: &mut PrivacyConfig,
+    _global_config: &GlobalConfig,
     vault: &Account<'info, Vault>,
     recipient: &SystemAccount<'info>,
     relayer: &Signer<'info>,
@@ -909,7 +1088,11 @@ fn handle_public_amount<'info>(
             PrivacyError::InvalidPublicAmount
         );
 
-        // Check deposit limit
+        // Check PrivacyConfig pool-specific limits
+        require!(
+            deposit_amount >= config.min_deposit_amount,
+            PrivacyError::DepositBelowMinimum
+        );
         require!(
             deposit_amount <= config.max_deposit_amount,
             PrivacyError::DepositLimitExceeded
@@ -950,6 +1133,16 @@ fn handle_public_amount<'info>(
     } else if public_amount < 0 {
         // WITHDRAWAL: vault pays out |public_amount| lamports
         let withdrawal_amount = public_amount.abs() as u64;
+
+        // Check PrivacyConfig pool-specific limits
+        require!(
+            withdrawal_amount >= config.min_withdraw_amount,
+            PrivacyError::WithdrawalBelowMinimum
+        );
+        require!(
+            withdrawal_amount <= config.max_withdraw_amount,
+            PrivacyError::WithdrawalLimitExceeded
+        );
 
         // Validate that fee + refund doesn't exceed withdrawal amount
         let fee = ext_data.fee;
@@ -1151,8 +1344,6 @@ pub enum PrivacyError {
     InsufficientFundsForWithdrawal,
     #[msg("Insufficient funds for fee payment")]
     InsufficientFundsForFee,
-    #[msg("Deposit limit exceeded")]
-    DepositLimitExceeded,
     #[msg("Invalid public amount data")]
     InvalidPublicAmount,
     #[msg("Invalid fee amount")]
@@ -1167,4 +1358,16 @@ pub enum PrivacyError {
     MissingTokenProgram,
     #[msg("Invalid token account authority")]
     InvalidTokenAuthority,
+    #[msg("Deposit amount below pool minimum")]
+    DepositBelowMinimum,
+    #[msg("Deposit amount exceeds pool maximum")]
+    DepositLimitExceeded,
+    #[msg("Withdrawal amount below pool minimum")]
+    WithdrawalBelowMinimum,
+    #[msg("Withdrawal amount exceeds pool maximum")]
+    WithdrawalLimitExceeded,
+    #[msg("Invalid PoolConfig range (min > max)")]
+    InvalidPoolConfigRange,
+    #[msg("Relayers are globally disabled")]
+    RelayersDisabledGlobally,
 }
