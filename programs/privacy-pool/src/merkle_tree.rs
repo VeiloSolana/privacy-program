@@ -6,6 +6,7 @@ pub const MERKLE_TREE_HEIGHT: usize = 26;
 pub const ROOT_HISTORY_SIZE: usize = 256;
 
 #[account(zero_copy(unsafe))]
+#[repr(C)]
 #[derive(Debug)]
 pub struct MerkleTreeAccount {
     /// Authority allowed to manage the tree (config admin)
