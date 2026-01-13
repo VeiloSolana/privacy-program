@@ -83,7 +83,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Initialize Poseidon
     poseidon = await buildPoseidon();
-    offchainTokenTree = new OffchainMerkleTree(16, poseidon);
+    offchainTokenTree = new OffchainMerkleTree(26, poseidon);
 
     // Create test token mint
     console.log("Creating test token mint...");
@@ -334,7 +334,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Generate proof
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -349,8 +349,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],
@@ -579,7 +579,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -595,7 +595,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [depositNote.blinding, dummyBlinding1],
       inputMerklePaths: [
         updatedMerklePath,
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       outputAmounts: [0n, 0n],
@@ -804,7 +804,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     let onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const depositProof = await generateTransactionProof({
       root: onchainRoot,
@@ -818,8 +818,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [aliceDepositAmount, 0n],
       outputOwners: [alicePublicKey, aliceDummyPubKey],
@@ -992,7 +992,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [aliceBlinding, transferDummyBlinding],
       inputMerklePaths: [
         aliceUpdatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       outputAmounts: [transferAmount, changeAmount],
@@ -1195,7 +1195,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -1210,8 +1210,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],

@@ -48,9 +48,6 @@ impl MerkleTree {
 
         // set initial root
         let initial_root = zeros[height];
-        msg!("Initial root: {:?}", initial_root);
-        msg!("Zeros[0]: {:?}", zeros[0]);
-        msg!("Zeros[1]: {:?}", zeros[1]);
         tree.root = initial_root;
         tree.root_history[0] = initial_root;
         tree.root_index = 0;
@@ -119,9 +116,15 @@ impl MerkleTree {
         let current_root_index = tree.root_index as usize;
 
         let mut i = current_root_index;
+        let mut checks = 0;
         loop {
             if root == tree.root_history[i] {
                 return true;
+            }
+
+            checks += 1;
+            if checks > root_history_size {
+                break;
             }
 
             if i == 0 {
@@ -136,5 +139,22 @@ impl MerkleTree {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use light_hasher::Hasher;
+    use light_hasher::Poseidon;
+
+    #[test]
+    fn print_zero_bytes() {
+        let zeros = Poseidon::zero_bytes();
+        println!("Rust Level 0 zero: {:?}", zeros[0]);
+        println!("Rust Level 1 zero: {:?}", zeros[1]);
+        if zeros.len() > 26 {
+            println!("Rust Level 26 zero: {:?}", zeros[26]);
+        }
     }
 }
