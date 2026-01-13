@@ -276,7 +276,7 @@ function createDummyInput(
   const amount = 0n;
   const blinding = new Uint8Array(32).fill(0);
   const privateKey = new Uint8Array(32).fill(0);
-  const pathIndices = new Array(16).fill(0);
+  const pathIndices = new Array(26).fill(0);
 
   const commitment = computeCommitment(
     poseidon,
@@ -308,13 +308,40 @@ function createDummyNote(): { commitment: Uint8Array; nullifier: Uint8Array } {
 
 // Helper: Extract root from MerkleTreeAccount
 function extractRootFromAccount(acc: any): Uint8Array {
-  const rootIndex = acc.rootIndex;
-  const rootHistory = acc.rootHistory;
-  if (!rootHistory || rootHistory.length === 0) {
-    throw new Error("Root history is empty");
+  // Anchor's zero-copy deserialization doesn't account for #[repr(C)] padding in Rust,
+  // causing acc.root to have 5 leading zero bytes. We fix this by reading from acc.subtrees
+  // to get the missing last 5 bytes.
+
+  const root = acc.root;
+  if (!root) {
+    throw new Error("Root is undefined in account");
   }
-  const root = rootHistory[rootIndex];
-  return new Uint8Array(root);
+
+  const rootBytes = new Uint8Array(root);
+
+  // Check if we have the deserialization bug (5 leading zeros)
+  const hasLeadingZeros =
+    rootBytes[0] === 0 &&
+    rootBytes[1] === 0 &&
+    rootBytes[2] === 0 &&
+    rootBytes[3] === 0 &&
+    rootBytes[4] === 0 &&
+    rootBytes[5] !== 0;
+
+  if (hasLeadingZeros) {
+    // The root field is shifted by 5 bytes due to struct padding.
+    // Actual root bytes 0-26 are at positions 5-31 of rootBytes,
+    // and the missing last 5 bytes are at the start of acc.subtrees[0]
+    const subtree0 = new Uint8Array(acc.subtrees[0]);
+
+    const corrected = new Uint8Array(32);
+    corrected.set(rootBytes.slice(5, 32), 0); // Bytes 0-26 of root
+    corrected.set(subtree0.slice(0, 5), 27); // Bytes 27-31 of root
+
+    return corrected;
+  }
+
+  return rootBytes;
 }
 
 // Helper: Fetch and display events from a transaction
@@ -769,7 +796,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Initialize Poseidon
     poseidon = await buildPoseidon();
-    offchainTree = new OffchainMerkleTree(16, poseidon);
+    offchainTree = new OffchainMerkleTree(26, poseidon);
 
     // Get PDAs (v3 with mint_address in seeds)
     [config] = PublicKey.findProgramAddressSync(
@@ -803,24 +830,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
   it("initializes the privacy pool (UTXO model)", async () => {
     try {
-      // Check if pool already exists
-      try {
-        const existingConfig = await (
-          program.account as any
-        ).privacyConfig.fetch(config);
-        console.log("✅ Pool already initialized");
-        console.log(`   Fee BPS: ${existingConfig.feeBps}`);
-        console.log(
-          `   Min Withdrawal Fee: ${existingConfig.minWithdrawalFee} lamports`
-        );
-        console.log(
-          `   Max Deposit: ${existingConfig.maxDepositAmount} lamports`
-        );
-        return;
-      } catch (e) {
-        // Account doesn't exist, proceed with initialization
-      }
-
       await (program.methods as any)
         .initialize(
           feeBps,
@@ -860,18 +869,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
   it("initializes global config", async () => {
     try {
-      // Check if global config already exists
-      try {
-        const existingConfig = await (
-          program.account as any
-        ).globalConfig.fetch(globalConfig);
-        console.log("✅ Global config already initialized");
-        console.log(`   Relayer enabled: ${existingConfig.relayerEnabled}`);
-        return;
-      } catch (e) {
-        // Account doesn't exist, proceed with initialization
-      }
-
       await (program.methods as any)
         .initializeGlobalConfig()
         .accounts({
@@ -1042,7 +1039,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Generate real proof
     const zeros = offchainTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -1060,11 +1057,11 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputMerklePaths: [
         {
           pathElements: zeroPathElements,
-          pathIndices: new Array(16).fill(0),
+          pathIndices: new Array(26).fill(0),
         },
         {
           pathElements: zeroPathElements,
-          pathIndices: new Array(16).fill(0),
+          pathIndices: new Array(26).fill(0),
         },
       ],
 
@@ -1410,7 +1407,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Get zero path for dummy input
     const zeros = offchainTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     // Generate real proof
     const proof = await generateTransactionProof({
@@ -1430,7 +1427,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         updatedMerklePath,
         {
           pathElements: zeroPathElements,
-          pathIndices: new Array(16).fill(0),
+          pathIndices: new Array(26).fill(0),
         },
       ],
 
@@ -1708,7 +1705,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     let onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const deposit1Proof = await generateTransactionProof({
       root: onchainRoot,
@@ -1722,8 +1719,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [deposit1Amount, 0n],
       outputOwners: [deposit1PublicKey, deposit1DummyPubKey],
@@ -1891,8 +1888,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPublicKeys: [dummyPubKey2, dummyPubKey3],
       inputBlindings: [dummyBlinding2, dummyBlinding3],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [deposit2Amount, 0n],
       outputOwners: [deposit2PublicKey, deposit2DummyPubKey],
@@ -2310,7 +2307,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
       const zeros = offchainTree.getZeros();
       const zeroPathElements = zeros
-        .slice(0, 16)
+        .slice(0, 26)
         .map((z) => bytesToBigIntBE(z));
 
       const proof = await generateTransactionProof({
@@ -2327,11 +2324,11 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         inputMerklePaths: [
           {
             pathElements: zeroPathElements,
-            pathIndices: new Array(16).fill(0),
+            pathIndices: new Array(26).fill(0),
           },
           {
             pathElements: zeroPathElements,
-            pathIndices: new Array(16).fill(0),
+            pathIndices: new Array(26).fill(0),
           },
         ],
         outputAmounts: [amount, 0n],
@@ -3178,7 +3175,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const initialRoot = extractRootFromAccount(noteTreeAcc); // Save initial root for ALL deposits
 
     const zeros = offchainTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     console.log("   📝 Generating Deposit Proof #1...");
     const deposit1Proof = await generateTransactionProof({
@@ -3193,8 +3190,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPublicKeys: [dummyIn0.publicKey, dummyIn1.publicKey],
       inputBlindings: [dummyIn0.blinding, dummyIn1.blinding],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [userNote1.amount, 0n],
       outputOwners: [userNote1.publicKey, dummyDeposit1PubKey],
@@ -3216,8 +3213,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPublicKeys: [dummyIn2.publicKey, dummyIn3.publicKey],
       inputBlindings: [dummyIn2.blinding, dummyIn3.blinding],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [userNote2.amount, 0n],
       outputOwners: [userNote2.publicKey, dummyDeposit2PubKey],
@@ -3786,7 +3783,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     let onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 16).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
 
     const depositProof = await generateTransactionProof({
       root: onchainRoot,
@@ -3800,8 +3797,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
       outputAmounts: [aliceDepositAmount, 0n],
       outputOwners: [alicePublicKey, aliceDummyPubKey],
@@ -4020,7 +4017,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputBlindings: [aliceBlinding, transferDummyBlinding],
       inputMerklePaths: [
         aliceUpdatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       // Output UTXOs: Bob gets transferAmount, Alice gets change
@@ -4241,7 +4238,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           bobPathForAliceAttempt,
           {
             pathElements: zeroPathElements,
-            pathIndices: new Array(16).fill(0),
+            pathIndices: new Array(26).fill(0),
           },
         ],
         outputAmounts: [0n, 0n],
@@ -4419,7 +4416,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       inputBlindings: [bobBlinding, bobDummyBlinding],
       inputMerklePaths: [
         bobUpdatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(16).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
       outputAmounts: [0n, 0n],

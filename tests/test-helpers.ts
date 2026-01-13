@@ -4,20 +4,9 @@
 // Contains interfaces, classes, helper functions, and proof generation logic
 //
 
-import {
-  AnchorProvider,
-  BN,
-  Wallet,
-} from "@coral-xyz/anchor";
-import {
-  PublicKey,
-  Keypair,
-  Connection,
-} from "@solana/web3.js";
-import {
-  getOrCreateAssociatedTokenAccount,
-  mintTo,
-} from "@solana/spl-token";
+import { AnchorProvider, BN, Wallet } from "@coral-xyz/anchor";
+import { PublicKey, Keypair, Connection } from "@solana/web3.js";
+import { getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -281,22 +270,63 @@ export function createDummyInput(
 }
 
 // Helper: Create dummy note
-export function createDummyNote(): { commitment: Uint8Array; nullifier: Uint8Array } {
+export function createDummyNote(): {
+  commitment: Uint8Array;
+  nullifier: Uint8Array;
+} {
   return {
     commitment: randomBytes32(),
     nullifier: randomBytes32(),
   };
 }
 
+// // Helper: Extract root from MerkleTreeAccount
+// export function extractRootFromAccount(acc: any): Uint8Array {
+//   const rootIndex = acc.rootIndex;
+//   const rootHistory = acc.rootHistory;
+//   if (!rootHistory || rootHistory.length === 0) {
+//     throw new Error("Root history is empty");
+//   }
+//   const root = rootHistory[rootIndex];
+//   return new Uint8Array(root);
+// }
+
 // Helper: Extract root from MerkleTreeAccount
 export function extractRootFromAccount(acc: any): Uint8Array {
-  const rootIndex = acc.rootIndex;
-  const rootHistory = acc.rootHistory;
-  if (!rootHistory || rootHistory.length === 0) {
-    throw new Error("Root history is empty");
+  // Anchor's zero-copy deserialization doesn't account for #[repr(C)] padding in Rust,
+  // causing acc.root to have 5 leading zero bytes. We fix this by reading from acc.subtrees
+  // to get the missing last 5 bytes.
+
+  const root = acc.root;
+  if (!root) {
+    throw new Error("Root is undefined in account");
   }
-  const root = rootHistory[rootIndex];
-  return new Uint8Array(root);
+
+  const rootBytes = new Uint8Array(root);
+
+  // Check if we have the deserialization bug (5 leading zeros)
+  const hasLeadingZeros =
+    rootBytes[0] === 0 &&
+    rootBytes[1] === 0 &&
+    rootBytes[2] === 0 &&
+    rootBytes[3] === 0 &&
+    rootBytes[4] === 0 &&
+    rootBytes[5] !== 0;
+
+  if (hasLeadingZeros) {
+    // The root field is shifted by 5 bytes due to struct padding.
+    // Actual root bytes 0-26 are at positions 5-31 of rootBytes,
+    // and the missing last 5 bytes are at the start of acc.subtrees[0]
+    const subtree0 = new Uint8Array(acc.subtrees[0]);
+
+    const corrected = new Uint8Array(32);
+    corrected.set(rootBytes.slice(5, 32), 0); // Bytes 0-26 of root
+    corrected.set(subtree0.slice(0, 5), 27); // Bytes 27-31 of root
+
+    return corrected;
+  }
+
+  return rootBytes;
 }
 
 // =============================================================================
@@ -582,8 +612,8 @@ export async function fetchAndDisplayEvents(
   expectedMintAddress: PublicKey
 ): Promise<number> {
   const tx = await connection.getTransaction(txSignature, {
-    commitment: 'confirmed',
-    maxSupportedTransactionVersion: 0
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0,
   });
 
   if (!tx || !tx.meta) {
@@ -595,7 +625,7 @@ export async function fetchAndDisplayEvents(
   console.log("\n=== Transaction Events ===");
 
   // Filter for event logs (Anchor emits as "Program data: <base64>")
-  const eventLogs = logs.filter(log => log.includes('Program data:'));
+  const eventLogs = logs.filter((log) => log.includes("Program data:"));
   console.log(`📊 Found ${eventLogs.length} event log entries`);
 
   // Event discriminators (first 8 bytes of event data)
@@ -608,11 +638,11 @@ export async function fetchAndDisplayEvents(
 
   eventLogs.forEach((log, i) => {
     // Extract base64 data from "Program data: <base64>"
-    const parts = log.split('Program data: ');
+    const parts = log.split("Program data: ");
     if (parts.length < 2) return;
 
     const base64Data = parts[1].trim();
-    const eventData = Buffer.from(base64Data, 'base64');
+    const eventData = Buffer.from(base64Data, "base64");
 
     if (eventData.length < 8) return;
 
@@ -621,7 +651,7 @@ export async function fetchAndDisplayEvents(
 
     // CommitmentEvent: commitment[32] + leaf_index[8] + new_root[32] + timestamp[8] + mint_address[32]
     // Total: 8 (discriminator) + 32 + 8 + 32 + 8 + 32 = 120 bytes
-    if (discriminator.join(',') === '89,205,140,111,36,129,217,125') {
+    if (discriminator.join(",") === "89,205,140,111,36,129,217,125") {
       commitmentEventCount++;
       console.log(`\nEvent ${i + 1}: CommitmentEvent`);
 
@@ -630,7 +660,12 @@ export async function fetchAndDisplayEvents(
         const mintAddressBytes = eventData.subarray(88, 120);
         const mintAddress = new PublicKey(mintAddressBytes);
 
-        console.log(`   Commitment: ${eventData.subarray(8, 40).toString('hex').slice(0, 20)}...`);
+        console.log(
+          `   Commitment: ${eventData
+            .subarray(8, 40)
+            .toString("hex")
+            .slice(0, 20)}...`
+        );
         console.log(`   Leaf Index: ${eventData.readBigUInt64LE(40)}`);
         console.log(`   Mint Address: ${mintAddress.toString()}`);
 
@@ -641,14 +676,16 @@ export async function fetchAndDisplayEvents(
           console.log(`   ❌ Mint address MISMATCH!`);
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
-          throw new Error(`Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`);
+          throw new Error(
+            `Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+          );
         }
       }
     }
 
     // NullifierSpent: nullifier[32] + timestamp[8] + mint_address[32]
     // Total: 8 (discriminator) + 32 + 8 + 32 = 80 bytes
-    else if (discriminator.join(',') === '166,111,130,54,212,115,152,215') {
+    else if (discriminator.join(",") === "166,111,130,54,212,115,152,215") {
       nullifierSpentCount++;
       console.log(`\nEvent ${i + 1}: NullifierSpent`);
 
@@ -657,7 +694,12 @@ export async function fetchAndDisplayEvents(
         const mintAddressBytes = eventData.subarray(48, 80);
         const mintAddress = new PublicKey(mintAddressBytes);
 
-        console.log(`   Nullifier: ${eventData.subarray(8, 40).toString('hex').slice(0, 20)}...`);
+        console.log(
+          `   Nullifier: ${eventData
+            .subarray(8, 40)
+            .toString("hex")
+            .slice(0, 20)}...`
+        );
         console.log(`   Mint Address: ${mintAddress.toString()}`);
 
         if (mintAddress.equals(expectedMintAddress)) {
@@ -667,7 +709,9 @@ export async function fetchAndDisplayEvents(
           console.log(`   ❌ Mint address MISMATCH!`);
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
-          throw new Error(`Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`);
+          throw new Error(
+            `Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+          );
         }
       }
     }
@@ -676,7 +720,11 @@ export async function fetchAndDisplayEvents(
   console.log(`\n📊 Event Summary:`);
   console.log(`   CommitmentEvent count: ${commitmentEventCount}`);
   console.log(`   NullifierSpent count: ${nullifierSpentCount}`);
-  console.log(`   Mint addresses verified: ${mintAddressMatches}/${commitmentEventCount + nullifierSpentCount}`);
+  console.log(
+    `   Mint addresses verified: ${mintAddressMatches}/${
+      commitmentEventCount + nullifierSpentCount
+    }`
+  );
   console.log(`   Expected mint_address: ${expectedMintAddress.toString()}`);
 
   // Assert that we found the expected events and all mint addresses match
@@ -686,7 +734,9 @@ export async function fetchAndDisplayEvents(
   }
 
   if (mintAddressMatches !== totalEvents) {
-    throw new Error(`Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`);
+    throw new Error(
+      `Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`
+    );
   }
 
   console.log(`✅ All event mint_address fields verified successfully!`);
