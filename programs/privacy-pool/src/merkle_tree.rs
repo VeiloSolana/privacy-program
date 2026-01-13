@@ -2,8 +2,8 @@ use crate::PrivacyError;
 use anchor_lang::prelude::*;
 use light_hasher::Hasher;
 
-pub const MERKLE_TREE_HEIGHT: usize = 16;
-pub const ROOT_HISTORY_SIZE: usize = 32;
+pub const MERKLE_TREE_HEIGHT: usize = 26;
+pub const ROOT_HISTORY_SIZE: usize = 256;
 
 #[account(zero_copy(unsafe))]
 #[derive(Debug)]

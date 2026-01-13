@@ -13,12 +13,16 @@ declare_id!("G4jVg1TydNuzQQZojYYVekaGYFZVMAuimC8KWVVKzWfa");
 
 // ---- Constants ----
 
+/// Authorized admin address that can initialize pools
+/// This should be set to your deployment wallet address
+pub const AUTHORIZED_ADMIN: Pubkey = pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP");
+
 pub type PoseidonHasher = Poseidon;
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
 
-/// Only kept as a conceptual cap on leaves in the old design.
-pub const TREE_DEPTH: usize = 32;
+/// Maximum fee basis points: 100 = 1%
+pub const MAX_FEE_BPS: u16 = 100;
 
 // ---- Accounts ----
 
@@ -30,8 +34,6 @@ pub struct PrivacyConfig {
     pub vault_bump: u8,
     /// Admin who can configure pool and relayers
     pub admin: Pubkey,
-    /// Is pool paused?
-    pub paused: bool,
     /// Fee in basis points (0–10_000) for withdrawals
     pub fee_bps: u16,
 
@@ -66,7 +68,6 @@ impl PrivacyConfig {
         1 +   // bump
         1 +   // vault_bump
         32 +  // admin
-        1 +   // paused
         2 +   // fee_bps
         8 +   // min_withdrawal_fee
         8 +   // total_tvl
@@ -76,7 +77,7 @@ impl PrivacyConfig {
         8 +   // min_withdraw_amount
         8 +   // max_withdraw_amount
         1 +   // num_relayers
-        32 * MAX_RELAYERS; // relayers (646 bytes total)
+        32 * MAX_RELAYERS; // relayers (645 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
@@ -91,13 +92,10 @@ pub struct GlobalConfig {
 
     /// Admin who can configure global settings
     pub admin: Pubkey,
-
-    /// Global relayer toggle (emergency kill switch)
-    pub relayer_enabled: bool,
 }
 
 impl GlobalConfig {
-    pub const LEN: usize = 8 + 1 + 32 + 1; // 42 bytes
+    pub const LEN: usize = 8 + 1 + 32; // 41 bytes
 }
 
 #[account]
@@ -310,7 +308,7 @@ pub struct Initialize<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    #[account(mut)]
+    #[account(mut, address = AUTHORIZED_ADMIN @ PrivacyError::UnauthorizedAdmin)]
     pub admin: Signer<'info>,
 
     pub system_program: Program<'info, System>,
@@ -356,7 +354,7 @@ pub struct InitializeGlobalConfig<'info> {
     )]
     pub global_config: Account<'info, GlobalConfig>,
 
-    #[account(mut)]
+    #[account(mut, address = AUTHORIZED_ADMIN @ PrivacyError::UnauthorizedAdmin)]
     pub admin: Signer<'info>,
 
     pub system_program: Program<'info, System>,
@@ -666,7 +664,10 @@ pub mod privacy_pool {
         nulls.bump = ctx.bumps.nullifiers;
 
         cfg.admin = ctx.accounts.admin.key();
-        cfg.paused = false;
+
+        // Validate fee_bps does not exceed 100%
+        require!(fee_bps <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
+
         cfg.fee_bps = fee_bps;
         cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
 
@@ -696,16 +697,6 @@ pub mod privacy_pool {
         // ---- Nullifier set init ----
         nulls.count = 0;
 
-        Ok(())
-    }
-
-    pub fn set_paused(
-        ctx: Context<ConfigAdmin>,
-        _mint_address: Pubkey,
-        paused: bool,
-    ) -> Result<()> {
-        let cfg = &mut ctx.accounts.config;
-        cfg.paused = paused;
         Ok(())
     }
 
@@ -750,6 +741,8 @@ pub mod privacy_pool {
             cfg.max_withdraw_amount = val;
         }
         if let Some(val) = fee_bps {
+            // Validate fee_bps does not exceed 100%
+            require!(val <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
             cfg.fee_bps = val;
         }
         if let Some(val) = min_withdrawal_fee {
@@ -774,21 +767,13 @@ pub mod privacy_pool {
 
         global_cfg.bump = ctx.bumps.global_config;
         global_cfg.admin = ctx.accounts.admin.key();
-        global_cfg.relayer_enabled = true;
 
         Ok(())
     }
 
-    pub fn update_global_config(
-        ctx: Context<GlobalConfigAdmin>,
-        relayer_enabled: Option<bool>,
-    ) -> Result<()> {
-        let global_cfg = &mut ctx.accounts.global_config;
-
-        if let Some(val) = relayer_enabled {
-            global_cfg.relayer_enabled = val;
-        }
-
+    pub fn update_global_config(_ctx: Context<GlobalConfigAdmin>) -> Result<()> {
+        // Reserved for future global configuration updates
+        // Currently no mutable global settings
         Ok(())
     }
 
@@ -814,8 +799,6 @@ pub mod privacy_pool {
         let cfg = &mut ctx.accounts.config;
         let tree = ctx.accounts.note_tree.load()?;
 
-        require!(!cfg.paused, PrivacyError::Paused);
-
         // Validate no duplicate nullifiers (prevents trying to spend same note twice in one tx)
         require!(
             input_nullifiers[0] != input_nullifiers[1],
@@ -839,12 +822,6 @@ pub mod privacy_pool {
         // For deposits (public_amount > 0), anyone can facilitate deposit without being authorized
         // For withdrawals (public_amount < 0) and transfers (public_amount = 0), require authorized relayer
         if public_amount <= 0 {
-            // Check if relayers are globally enabled
-            require!(
-                ctx.accounts.global_config.relayer_enabled,
-                PrivacyError::RelayersDisabledGlobally
-            );
-
             // Check if this specific relayer is authorized
             require!(
                 cfg.is_relayer(&ctx.accounts.relayer.key()),
@@ -911,11 +888,19 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // [AUDIT-005 FIX] Validate user token account is owned/delegated to relayer
-                // Since relayer is the authority for the deposit CPI, they must control this account
-                require_keys_eq!(
-                    user_token.owner,
-                    ctx.accounts.relayer.key(),
+                // For deposits, the signer (user/relayer) must own or have delegation over the token account
+                // This allows users to deposit their own tokens directly
+                let is_owner = user_token.owner == ctx.accounts.relayer.key();
+                let is_delegated =
+                    if let Some(delegate) = Option::<Pubkey>::from(user_token.delegate) {
+                        delegate == *ctx.accounts.relayer.key
+                            && user_token.delegated_amount >= public_amount as u64
+                    } else {
+                        false
+                    };
+
+                require!(
+                    is_owner || is_delegated,
                     PrivacyError::DepositorTokenAccountMismatch
                 );
             }
@@ -940,7 +925,6 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // [AUDIT-005 FIX] Validate recipient token account is owned by ext_data.recipient
                 // This prevents withdrawals to token accounts not controlled by the intended recipient
                 require_keys_eq!(
                     recipient_token.owner,
@@ -948,7 +932,6 @@ pub mod privacy_pool {
                     PrivacyError::RecipientTokenAccountMismatch
                 );
 
-                // [AUDIT-001 FIX] This prevents malicious relayers from redirecting fees to arbitrary accounts
                 require_keys_eq!(
                     relayer_token.owner,
                     ext_data.relayer,
@@ -1167,7 +1150,8 @@ fn handle_public_amount<'info>(
             .ok_or(PrivacyError::ArithmeticOverflow)?;
     } else if public_amount < 0 {
         // WITHDRAWAL: vault pays out |public_amount| lamports
-        let withdrawal_amount = public_amount.abs() as u64;
+        // Use unsigned_abs() to safely handle i64::MIN without overflow
+        let withdrawal_amount = public_amount.unsigned_abs();
 
         // Check PrivacyConfig pool-specific limits
         require!(
@@ -1421,6 +1405,8 @@ pub enum PrivacyError {
     WithdrawalLimitExceeded,
     #[msg("Invalid PoolConfig range (min > max)")]
     InvalidPoolConfigRange,
-    #[msg("Relayers are globally disabled")]
-    RelayersDisabledGlobally,
+    #[msg("Fee basis points exceeds maximum (100 = 1%)")]
+    ExcessiveFeeBps,
+    #[msg("Only authorized admin can initialize")]
+    UnauthorizedAdmin,
 }

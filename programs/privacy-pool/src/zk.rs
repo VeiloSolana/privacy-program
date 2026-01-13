@@ -126,7 +126,8 @@ fn i64_to_field_be(value: i64) -> [u8; 32] {
         bytes[24..].copy_from_slice(&(value as u64).to_be_bytes());
     } else {
         // Negative: compute Fr - |value|
-        let abs_val = value.abs() as u64;
+        // Use unsigned_abs() to safely handle i64::MIN without overflow
+        let abs_val = value.unsigned_abs();
 
         // Create abs_bytes with value in last 8 bytes
         let mut abs_bytes = [0u8; 32];
