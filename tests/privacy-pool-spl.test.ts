@@ -112,7 +112,11 @@ describe("Privacy Pool - SPL Token Support", () => {
       program.programId
     );
     [tokenNoteTree] = PublicKey.findProgramAddressSync(
-      [Buffer.from("privacy_note_tree_v3"), testMint.toBuffer()],
+      [
+        Buffer.from("privacy_note_tree_v3"),
+        testMint.toBuffer(),
+        Buffer.from([0]),
+      ],
       program.programId
     );
     [tokenNullifiers] = PublicKey.findProgramAddressSync(
@@ -334,7 +338,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Generate proof
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 20).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -349,8 +353,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],
@@ -382,6 +386,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       const ix = await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
+          0, // input_tree_id
+          0, // output_tree_id
           new BN(depositAmount.toString()),
           Array.from(extDataHash),
           testMint,
@@ -396,7 +402,8 @@ describe("Privacy Pool - SPL Token Support", () => {
           config: tokenConfig,
           globalConfig,
           vault: tokenVault,
-          noteTree: tokenNoteTree,
+          inputTree: tokenNoteTree,
+          outputTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
           nullifierMarker0,
           nullifierMarker1,
@@ -579,7 +586,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 20).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -595,7 +602,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [depositNote.blinding, dummyBlinding1],
       inputMerklePaths: [
         updatedMerklePath,
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
       ],
 
       outputAmounts: [0n, 0n],
@@ -631,6 +638,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       const ix = await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
+          0, // input_tree_id
+          0, // output_tree_id
           new BN(-withdrawAmount.toString()),
           Array.from(extDataHash),
           testMint,
@@ -645,7 +654,8 @@ describe("Privacy Pool - SPL Token Support", () => {
           config: tokenConfig,
           globalConfig,
           vault: tokenVault,
-          noteTree: tokenNoteTree,
+          inputTree: tokenNoteTree,
+          outputTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
           nullifierMarker0,
           nullifierMarker1,
@@ -804,7 +814,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     let onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 20).map((z) => bytesToBigIntBE(z));
 
     const depositProof = await generateTransactionProof({
       root: onchainRoot,
@@ -818,8 +828,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
       ],
       outputAmounts: [aliceDepositAmount, 0n],
       outputOwners: [alicePublicKey, aliceDummyPubKey],
@@ -846,6 +856,8 @@ describe("Privacy Pool - SPL Token Support", () => {
     const depositTx = await (program.methods as any)
       .transact(
         Array.from(onchainRoot),
+        0, // input_tree_id
+        0, // output_tree_id
         new BN(aliceDepositAmount.toString()),
         Array.from(extDataHashDeposit),
         testMint,
@@ -860,7 +872,8 @@ describe("Privacy Pool - SPL Token Support", () => {
         config: tokenConfig,
         globalConfig,
         vault: tokenVault,
-        noteTree: tokenNoteTree,
+        inputTree: tokenNoteTree,
+        outputTree: tokenNoteTree,
         nullifiers: tokenNullifiers,
         nullifierMarker0,
         nullifierMarker1,
@@ -992,7 +1005,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [aliceBlinding, transferDummyBlinding],
       inputMerklePaths: [
         aliceUpdatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
       ],
 
       outputAmounts: [transferAmount, changeAmount],
@@ -1020,6 +1033,8 @@ describe("Privacy Pool - SPL Token Support", () => {
     const transferTx = await (program.methods as any)
       .transact(
         Array.from(onchainRoot),
+        0, // input_tree_id
+        0, // output_tree_id
         new BN(0),
         Array.from(extDataHashTransfer),
         testMint,
@@ -1034,7 +1049,8 @@ describe("Privacy Pool - SPL Token Support", () => {
         config: tokenConfig,
         globalConfig,
         vault: tokenVault,
-        noteTree: tokenNoteTree,
+        inputTree: tokenNoteTree,
+        outputTree: tokenNoteTree,
         nullifiers: tokenNullifiers,
         nullifierMarker0: aliceNullifierMarker,
         nullifierMarker1: transferDummyNullifierMarker,
@@ -1195,7 +1211,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 20).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -1210,8 +1226,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(20).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],
@@ -1240,6 +1256,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       await (program.methods as any)
         .transact(
           Array.from(onchainRoot),
+          0, // input_tree_id
+          0, // output_tree_id
           new BN(depositAmount.toString()),
           Array.from(extDataHash),
           wrongMint, // Pass wrong mint!
@@ -1254,7 +1272,8 @@ describe("Privacy Pool - SPL Token Support", () => {
           config: tokenConfig,
           globalConfig,
           vault: tokenVault,
-          noteTree: tokenNoteTree,
+          inputTree: tokenNoteTree,
+          outputTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
           nullifierMarker0,
           nullifierMarker1,

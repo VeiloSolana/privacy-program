@@ -21,6 +21,11 @@ pub type PoseidonHasher = Poseidon;
 pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
 
+/// Maximum number of Merkle trees per pool
+/// Multiple trees improve performance through parallelism
+/// and reduce congestion on single tree updates
+pub const MAX_MERKLE_TREES: u8 = 16;
+
 /// Maximum fee basis points: 100 = 1%
 pub const MAX_FEE_BPS: u16 = 100;
 
@@ -61,6 +66,12 @@ pub struct PrivacyConfig {
     /// Relayer registry
     pub num_relayers: u8,
     pub relayers: [Pubkey; MAX_RELAYERS],
+
+    /// Multi-tree support: number of active Merkle trees
+    pub num_trees: u8,
+
+    /// Suggested tree index for next deposit (round-robin)
+    pub next_tree_index: u8,
 }
 
 impl PrivacyConfig {
@@ -77,11 +88,32 @@ impl PrivacyConfig {
         8 +   // min_withdraw_amount
         8 +   // max_withdraw_amount
         1 +   // num_relayers
-        32 * MAX_RELAYERS; // relayers (645 bytes total)
+        32 * MAX_RELAYERS +  // relayers
+        1 +   // num_trees
+        1; // next_tree_index (647 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
         self.relayers[..n].iter().any(|k| k == key)
+    }
+
+    /// Get the next suggested tree_id for deposits (round-robin distribution)
+    /// Updates next_tree_index for the next call
+    ///
+    /// Note: Clients should check tree capacity before submitting deposits.
+    /// If a tree is full (next_index + 2 >= 2^height), use a different tree_id
+    /// or call add_merkle_tree to create a new tree.
+    pub fn get_next_tree_id(&mut self) -> u8 {
+        let tree_id = self.next_tree_index;
+        self.next_tree_index = (self.next_tree_index + 1) % self.num_trees;
+        tree_id
+    }
+
+    /// Check if a specific tree has capacity for N new leaves
+    pub fn tree_has_capacity(tree: &MerkleTreeAccount, required_leaves: u64) -> bool {
+        let max_capacity = 1u64 << (tree.height as u64);
+        let remaining = max_capacity.saturating_sub(tree.next_index);
+        remaining >= required_leaves
     }
 }
 
@@ -259,14 +291,6 @@ impl ExtData {
 
 // ---- Legacy: Keep for backwards compatibility, will be removed ----
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct WithdrawPublicInputs {
-    pub root: [u8; 32],
-    pub nullifier: [u8; 32],
-    pub denom_index: u8,
-    pub recipient: Pubkey,
-}
-
 // ---- Instruction contexts ----
 
 #[derive(Accounts)]
@@ -290,10 +314,11 @@ pub struct Initialize<'info> {
     )]
     pub vault: Account<'info, Vault>,
 
+    /// Initial tree (tree_id = 0)
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[0u8]],
         bump,
         space = MerkleTreeAccount::LEN,
     )]
@@ -374,7 +399,33 @@ pub struct GlobalConfigAdmin<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, tree_id: u8)]
+pub struct AddMerkleTree<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        bump = config.bump,
+        has_one = admin
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(
+        init,
+        payer = admin,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[tree_id]],
+        bump,
+        space = MerkleTreeAccount::LEN,
+    )]
+    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, tree_id: u8)]
 pub struct DepositFixed<'info> {
     #[account(
         mut,
@@ -392,7 +443,7 @@ pub struct DepositFixed<'info> {
 
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[tree_id]],
         bump,
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
@@ -408,6 +459,8 @@ pub struct DepositFixed<'info> {
 #[derive(Accounts)]
 #[instruction(
     root: [u8; 32],
+    input_tree_id: u8,
+    output_tree_id: u8,
     public_amount: i64,
     ext_data_hash: [u8; 32],
     mint_address: Pubkey,
@@ -437,12 +490,21 @@ pub struct Transact<'info> {
     )]
     pub vault: Account<'info, Vault>,
 
+    /// Input tree - where input notes came from (for root validation)
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[input_tree_id]],
         bump,
     )]
-    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
+    pub input_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    /// Output tree - where new output commitments will be inserted
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[output_tree_id]],
+        bump,
+    )]
+    pub output_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         mut,
@@ -506,116 +568,6 @@ pub struct Transact<'info> {
 
     pub system_program: Program<'info, System>,
 }
-
-// ---- Legacy Withdraw (will be removed) ----
-
-#[derive(Accounts)]
-#[instruction(root: [u8; 32], nullifier: [u8; 32], denom_index: u8, recipient_pk: Pubkey, mint_address: Pubkey)]
-pub struct Withdraw<'info> {
-    #[account(
-        mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
-        bump = config.bump
-    )]
-    pub config: Account<'info, PrivacyConfig>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
-        bump = config.vault_bump
-    )]
-    pub vault: Account<'info, Vault>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
-        bump,
-    )]
-    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
-        bump = nullifiers.bump
-    )]
-    pub nullifiers: Account<'info, NullifierSet>,
-
-    /// Per-nullifier PDA marker (must not exist - ensures nullifier is fresh)
-    #[account(
-        init,
-        payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), nullifier.as_ref()],
-        bump,
-        space = NullifierMarker::LEN
-    )]
-    pub nullifier_marker: Account<'info, NullifierMarker>,
-
-    #[account(mut)]
-    pub relayer: Signer<'info>,
-
-    /// CHECK: Just a normal system-owned recipient account
-    #[account(mut)]
-    pub recipient: SystemAccount<'info>,
-
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct TransferPublicInputs {
-    pub old_root: [u8; 32],
-    pub old_nullifier: [u8; 32],
-    pub new_commitment: [u8; 32],
-    pub denom_index: u8,
-}
-
-#[derive(Accounts)]
-#[instruction(old_root: [u8; 32], old_nullifier: [u8; 32], new_commitment: [u8; 32], denom_index: u8, mint_address: Pubkey)]
-pub struct PrivateTransfer<'info> {
-    #[account(
-        mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
-        bump = config.bump
-    )]
-    pub config: Account<'info, PrivacyConfig>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref()],
-        bump,
-    )]
-    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
-        bump = nullifiers.bump
-    )]
-    pub nullifiers: Account<'info, NullifierSet>,
-
-    /// Per-nullifier PDA marker for old nullifier (must not exist)
-    #[account(
-        init,
-        payer = sender,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), old_nullifier.as_ref()],
-        bump,
-        space = NullifierMarker::LEN
-    )]
-    pub nullifier_marker: Account<'info, NullifierMarker>,
-
-    #[account(mut)]
-    pub sender: Signer<'info>, // Could be relayer
-
-    pub system_program: Program<'info, System>,
-}
-
-pub struct TransferHint {
-    pub old_root: [u8; 32],
-    pub old_nullifier: [u8; 32],
-    pub new_commitment: [u8; 32],
-    pub denom_index: u8,
-}
-
-// ---- Helper Functions ----
 
 /// Check if mint is a token (not native SOL)
 fn is_token_mint(mint: &Pubkey) -> bool {
@@ -694,8 +646,41 @@ pub mod privacy_pool {
         cfg.num_relayers = 0;
         cfg.relayers = [Pubkey::default(); MAX_RELAYERS];
 
+        // ---- Multi-tree initialization ----
+        cfg.num_trees = 1; // Start with one tree (tree_id = 0)
+        cfg.next_tree_index = 0;
+
         // ---- Nullifier set init ----
         nulls.count = 0;
+
+        Ok(())
+    }
+
+    pub fn add_merkle_tree(
+        ctx: Context<AddMerkleTree>,
+        _mint_address: Pubkey,
+        tree_id: u8,
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+
+        // Validate tree_id is sequential
+        require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
+
+        // Validate max trees not exceeded
+        require!(cfg.num_trees < MAX_MERKLE_TREES, PrivacyError::TooManyTrees);
+
+        // Initialize the new tree
+        let mut tree = ctx.accounts.note_tree.load_init()?;
+        tree.authority = cfg.admin;
+        tree.height = MERKLE_TREE_HEIGHT as u8;
+        tree.root_history_size = ROOT_HISTORY_SIZE as u16;
+        tree.next_index = 0;
+        tree.root_index = 0;
+
+        MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
+
+        // Update pool config
+        cfg.num_trees += 1;
 
         Ok(())
     }
@@ -780,9 +765,17 @@ pub mod privacy_pool {
     /// Unified UTXO transaction instruction
     /// Circuit equation: sumIns + publicAmount = sumOuts
     /// Handles deposits (publicAmount > 0), withdrawals (publicAmount < 0), and transfers (publicAmount = 0)
+    ///
+    /// Cross-tree transactions:
+    /// - input_tree_id: Tree containing input notes (for root validation)
+    /// - output_tree_id: Tree for new output commitments
+    /// - Can be the same tree or different trees
+    /// - Allows withdrawals even when input tree is full (outputs go to new tree)
     pub fn transact(
         ctx: Context<Transact>,
         root: [u8; 32],
+        input_tree_id: u8,
+        output_tree_id: u8,
         public_amount: i64,
         ext_data_hash: [u8; 32],
         mint_address: Pubkey,
@@ -797,7 +790,12 @@ pub mod privacy_pool {
         let input_nullifiers = [input_nullifier_0, input_nullifier_1];
         let output_commitments = [output_commitment_0, output_commitment_1];
         let cfg = &mut ctx.accounts.config;
-        let tree = ctx.accounts.note_tree.load()?;
+
+        // Validate both tree IDs are valid
+        require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+        require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+
+        let input_tree = ctx.accounts.input_tree.load()?;
 
         // Validate no duplicate nullifiers (prevents trying to spend same note twice in one tx)
         require!(
@@ -953,13 +951,13 @@ pub mod privacy_pool {
         // 6. Verify Groth16 proof
         zk::verify_transaction_groth16(proof, &public_inputs)?;
 
-        // 7. Check root is known in tree
+        // 7. Check root is known in input tree
         require!(
-            MerkleTree::is_known_root(&*tree, root),
+            MerkleTree::is_known_root(&*input_tree, root),
             PrivacyError::UnknownRoot
         );
 
-        drop(tree); // Release immutable borrow
+        drop(input_tree); // Release immutable borrow
 
         // 8. Mark both input nullifiers as spent
         mark_nullifier_spent(
@@ -978,15 +976,21 @@ pub mod privacy_pool {
             mint_address,
         )?;
 
-        // 9. Insert both output commitments into tree
-        let mut tree = ctx.accounts.note_tree.load_mut()?;
-        let leaf_index_0 = tree.next_index;
-        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *tree)?;
-        let leaf_index_1 = tree.next_index;
-        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *tree)?;
-        let new_root = tree.root;
+        // 9. Insert both output commitments into output tree
+        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
 
-        drop(tree); // Release mutable borrow
+        // Check if output tree has capacity for 2 new leaves
+        let max_capacity = 1u64 << (output_tree.height as u64);
+        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
+
+        let leaf_index_0 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
+        let leaf_index_1 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
+        let new_root = output_tree.root;
+
+        drop(output_tree); // Release mutable borrow
 
         // Emit commitment events for both outputs
         let timestamp = Clock::get()?.unix_timestamp;
@@ -996,6 +1000,7 @@ pub mod privacy_pool {
             new_root,
             timestamp,
             mint_address,
+            tree_id: output_tree_id,
         });
         emit!(CommitmentEvent {
             commitment: output_commitments[1],
@@ -1003,6 +1008,7 @@ pub mod privacy_pool {
             new_root,
             timestamp,
             mint_address,
+            tree_id: output_tree_id,
         });
 
         // 10. Handle public amount (deposits/withdrawals)
@@ -1311,6 +1317,7 @@ pub struct CommitmentEvent {
     pub new_root: [u8; 32],
     pub timestamp: i64,
     pub mint_address: Pubkey,
+    pub tree_id: u8,
 }
 
 #[event]
@@ -1350,7 +1357,7 @@ pub enum PrivacyError {
     InvalidProof,
     #[msg("Groth16 verification failed")]
     VerifyFailed,
-    #[msg("Merkle tree is full")]
+    #[msg("Merkle tree is full - use a different tree_id or add a new tree with add_merkle_tree")]
     MerkleTreeFull,
     #[msg("Merkle hash failed")]
     MerkleHashFailed,
@@ -1409,4 +1416,8 @@ pub enum PrivacyError {
     ExcessiveFeeBps,
     #[msg("Only authorized admin can initialize")]
     UnauthorizedAdmin,
+    #[msg("Invalid tree_id (tree does not exist or exceeds num_trees)")]
+    InvalidTreeId,
+    #[msg("Maximum number of Merkle trees reached for this pool")]
+    TooManyTrees,
 }
