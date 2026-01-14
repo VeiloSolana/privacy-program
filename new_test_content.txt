@@ -1,0 +1,444 @@
+  it("creates a second tree and uses cross-tree transactions", async () => {
+    console.log("\n🌳 Cross-Tree Transaction Test (Clean State Strategy):\n");
+    console.log("Testing multi-tree architecture with Fresh Input -> Fresh Output trees");
+    console.log(
+      "NOTE: Using a fresh input tree to ensure clean state and avoid synchronization issues with shared Tree 0"
+    );
+
+    // Step 1: Create Source Tree (Input)
+    let currentConfig = await program.account.privacyConfig.fetch(config);
+    const sourceTreeId = currentConfig.numTrees;
+    console.log(
+      `\n📥 Step 1: Adding fresh INPUT Merkle tree (tree_id = ${sourceTreeId})...`
+    );
+
+    const [noteTreeSource] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("privacy_note_tree_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from([sourceTreeId]),
+      ],
+      program.programId
+    );
+
+    await (program.methods as any)
+      .addMerkleTree(SOL_MINT, sourceTreeId)
+      .accounts({
+        config,
+        noteTree: noteTreeSource,
+        admin: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    console.log(`✅ Source tree created: ${noteTreeSource.toBase58()}`);
+
+    // Create local tracker for source tree
+    const offchainTreeSource = new OffchainMerkleTree(26, poseidon);
+
+    // Step 2: Create Destination Tree (Output)
+    currentConfig = await program.account.privacyConfig.fetch(config); // Re-fetch for next ID
+    const destinationTreeId = currentConfig.numTrees;
+    console.log(
+      `\n📥 Step 2: Adding fresh OUTPUT Merkle tree (tree_id = ${destinationTreeId})...`
+    );
+
+    const [noteTreeDestination] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("privacy_note_tree_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from([destinationTreeId]),
+      ],
+      program.programId
+    );
+
+    await (program.methods as any)
+      .addMerkleTree(SOL_MINT, destinationTreeId)
+      .accounts({
+        config,
+        noteTree: noteTreeDestination,
+        admin: wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    console.log(
+      `✅ Destination tree created: ${noteTreeDestination.toBase58()}`
+    );
+
+    const offchainTreeDestination = new OffchainMerkleTree(26, poseidon);
+
+    // Step 3: Deposit into Source Tree
+    console.log(`\n📥 Step 3: Depositing to Source Tree ${sourceTreeId}...`);
+
+    const depositAmount = BigInt(0.5 * LAMPORTS_PER_SOL);
+    const privateKey = randomBytes32();
+    const publicKey = derivePublicKey(poseidon, privateKey);
+    const blinding = randomBytes32();
+    const commitment = computeCommitment(
+      poseidon,
+      depositAmount,
+      publicKey,
+      blinding,
+      SOL_MINT
+    );
+
+    const dummyOutputPrivKey = randomBytes32();
+    const dummyOutputPubKey = derivePublicKey(poseidon, dummyOutputPrivKey);
+    const dummyOutputBlinding = randomBytes32();
+    const dummyOutputCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutputPubKey,
+      dummyOutputBlinding,
+      SOL_MINT
+    );
+
+    const commitmentLeafIndex = offchainTreeSource.nextIndex;
+    console.log(`\n📍 Predicted commitment leaf index: ${commitmentLeafIndex}`);
+
+    const nullifier = computeNullifier(
+      poseidon,
+      commitment,
+      commitmentLeafIndex,
+      privateKey
+    );
+
+    // Generate dummy inputs for deposit
+    const dummyPrivKey0 = randomBytes32();
+    const dummyPrivKey1 = randomBytes32();
+    const dummyBlinding0 = randomBytes32();
+    const dummyBlinding1 = randomBytes32();
+    const dummyPubKey0 = derivePublicKey(poseidon, dummyPrivKey0);
+    const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
+
+    const dummyCommitment0 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey0,
+      dummyBlinding0,
+      SOL_MINT
+    );
+    const dummyCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey1,
+      dummyBlinding1,
+      SOL_MINT
+    );
+
+    const dummyNullifier0 = computeNullifier(
+      poseidon,
+      dummyCommitment0,
+      0,
+      dummyPrivKey0
+    );
+    const dummyNullifier1 = computeNullifier(
+      poseidon,
+      dummyCommitment1,
+      0,
+      dummyPrivKey1
+    );
+
+    // Fetch current on-chain root of Source Tree
+    let noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTreeSource
+    );
+    let onchainRoot = extractRootFromAccount(noteTreeAcc);
+    console.log(
+      `🔍 Onchain Root (fetched): ${Buffer.from(onchainRoot).toString("hex")}`
+    );
+
+    // For deposit, we use zero-path elements
+    const zeros = offchainTreeSource.getZeros();
+    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+
+    const user = Keypair.generate();
+    await airdropAndConfirm(provider, user.publicKey, 2 * LAMPORTS_PER_SOL);
+
+    const extDataDeposit = {
+      recipient: user.publicKey,
+      relayer: user.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashDeposit = computeExtDataHash(poseidon, extDataDeposit);
+
+    const depositProof = await generateTransactionProof({
+      root: onchainRoot,
+      publicAmount: depositAmount,
+      extDataHash: extDataHashDeposit,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [dummyNullifier0, dummyNullifier1],
+      outputCommitments: [commitment, dummyOutputCommitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyPrivKey0, dummyPrivKey1],
+      inputPublicKeys: [dummyPubKey0, dummyPubKey1],
+      inputBlindings: [dummyBlinding0, dummyBlinding1],
+      inputMerklePaths: [
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+      ],
+      outputAmounts: [depositAmount, 0n],
+      outputOwners: [publicKey, dummyOutputPubKey],
+      outputBlindings: [blinding, dummyOutputBlinding],
+    });
+
+    // Insert into local source tree
+    offchainTreeSource.insert(commitment);
+    offchainTreeSource.insert(dummyOutputCommitment);
+    console.log(
+      `📍 Inserted commitments into offchain source tree at indices ${commitmentLeafIndex}, ${
+        commitmentLeafIndex + 1
+      }`
+    );
+
+    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier0),
+      ],
+      program.programId
+    );
+    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier1),
+      ],
+      program.programId
+    );
+
+    const depositTx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        sourceTreeId, // Input Pool
+        sourceTreeId, // Output Pool (same for deposit)
+        new BN(depositAmount.toString()),
+        Array.from(extDataHashDeposit),
+        SOL_MINT,
+        Array.from(dummyNullifier0),
+        Array.from(dummyNullifier1),
+        Array.from(commitment),
+        Array.from(dummyOutputCommitment),
+        extDataDeposit,
+        depositProof
+      )
+      .accounts({
+        config,
+        globalConfig,
+        vault,
+        inputTree: noteTreeSource,
+        outputTree: noteTreeSource,
+        nullifiers,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayer: user.publicKey,
+        recipient: user.publicKey,
+        vaultTokenAccount: user.publicKey,
+        userTokenAccount: user.publicKey,
+        recipientTokenAccount: user.publicKey,
+        relayerTokenAccount: user.publicKey,
+        tokenProgram: user.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([user])
+      .transaction();
+
+    const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: 1,
+    });
+
+    const transaction = new Transaction();
+    transaction.add(modifyComputeUnits, addPriorityFee, depositTx);
+    await provider.sendAndConfirm(transaction, [user]);
+
+    console.log(`✅ Deposit successful to Source Tree ${sourceTreeId}`);
+
+    // Verify roots match
+    noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTreeSource
+    );
+    onchainRoot = extractRootFromAccount(noteTreeAcc);
+    const offchainRootHex = Buffer.from(offchainTreeSource.getRoot()).toString(
+      "hex"
+    );
+    const onchainRootHex = Buffer.from(onchainRoot).toString("hex");
+
+    console.log(`\n🔍 Root Comparison:`);
+    console.log(`   Offchain Root: ${offchainRootHex}`);
+    console.log(`   Onchain Root:  ${onchainRootHex}`);
+
+    if (offchainRootHex !== onchainRootHex) {
+      throw new Error(
+        `CRITICAL: Roots mismatch in fresh separate tree! Offchain: ${offchainRootHex}, Onchain: ${onchainRootHex}`
+      );
+    } else {
+      console.log("✅ Roots match perfectly for Source Tree.");
+    }
+
+    // Step 3.5: Authorize Relayer
+    console.log("\n🔑 Authorizing relayer for internal transfers...");
+    await (program.methods as any)
+      .addRelayer(SOL_MINT, user.publicKey)
+      .accounts({
+        config,
+        admin: provider.wallet.publicKey,
+      })
+      .rpc();
+    console.log("✅ User added as authorized relayer");
+
+    // Step 4: Transfer from Source Tree -> Destination Tree
+    console.log(
+      `\n🔄 Step 4: Cross-tree transfer (Source ${sourceTreeId} -> Destination ${destinationTreeId})...`
+    );
+
+    const outputPrivKey = randomBytes32();
+    const outputPubKey = derivePublicKey(poseidon, outputPrivKey);
+    const outputBlinding = randomBytes32();
+    const outputCommitment = computeCommitment(
+      poseidon,
+      depositAmount,
+      outputPubKey,
+      outputBlinding,
+      SOL_MINT
+    );
+
+    const dummyOutput2PrivKey = randomBytes32();
+    const dummyOutput2PubKey = derivePublicKey(poseidon, dummyOutput2PrivKey);
+    const dummyOutput2Blinding = randomBytes32();
+    const dummyOutput2Commitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyOutput2PubKey,
+      dummyOutput2Blinding,
+      SOL_MINT
+    );
+
+    const dummyPrivKey2 = randomBytes32();
+    const dummyPubKey2 = derivePublicKey(poseidon, dummyPrivKey2);
+    const dummyBlinding2 = randomBytes32();
+    const dummyCommitment2 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey2,
+      dummyBlinding2,
+      SOL_MINT
+    );
+    const dummyNullifier2 = computeNullifier(
+      poseidon,
+      dummyCommitment2,
+      0,
+      dummyPrivKey2
+    );
+
+    // Get merkle path from Source Tree (which is clean and synced)
+    const updatedPath = offchainTreeSource.getMerkleProof(commitmentLeafIndex);
+
+    const extDataTransfer = {
+      recipient: user.publicKey,
+      relayer: user.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
+
+    const transferProof = await generateTransactionProof({
+      root: onchainRoot, // Root of Source Tree
+      publicAmount: 0n, // Internal transfer
+      extDataHash: extDataHashTransfer,
+      mintAddress: SOL_MINT,
+      inputNullifiers: [nullifier, dummyNullifier2],
+      outputCommitments: [outputCommitment, dummyOutput2Commitment],
+      inputAmounts: [depositAmount, 0n],
+      inputPrivateKeys: [privateKey, dummyPrivKey2],
+      inputPublicKeys: [publicKey, dummyPubKey2],
+      inputBlindings: [blinding, dummyBlinding2],
+      inputMerklePaths: [
+        updatedPath,
+        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+      ],
+      outputAmounts: [depositAmount, 0n],
+      outputOwners: [outputPubKey, dummyOutput2PubKey],
+      outputBlindings: [outputBlinding, dummyOutput2Blinding],
+    });
+
+    const [inputNullifierMarker] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(nullifier),
+      ],
+      program.programId
+    );
+    const [dummyNullifierMarker] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("nullifier_v3"),
+        SOL_MINT.toBuffer(),
+        Buffer.from(dummyNullifier2),
+      ],
+      program.programId
+    );
+
+    const crossTreeTx = await (program.methods as any)
+      .transact(
+        Array.from(onchainRoot),
+        sourceTreeId, // Input: Source
+        destinationTreeId, // Output: Destination
+        new BN(0),
+        Array.from(extDataHashTransfer),
+        SOL_MINT,
+        Array.from(nullifier),
+        Array.from(dummyNullifier2),
+        Array.from(outputCommitment),
+        Array.from(dummyOutput2Commitment),
+        extDataTransfer,
+        transferProof
+      )
+      .accounts({
+        config,
+        globalConfig,
+        vault,
+        inputTree: noteTreeSource,
+        outputTree: noteTreeDestination,
+        nullifiers,
+        nullifierMarker0: inputNullifierMarker,
+        nullifierMarker1: dummyNullifierMarker,
+        relayer: user.publicKey,
+        recipient: user.publicKey,
+        vaultTokenAccount: user.publicKey,
+        userTokenAccount: user.publicKey,
+        recipientTokenAccount: user.publicKey,
+        relayerTokenAccount: user.publicKey,
+        tokenProgram: user.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([user])
+      .transaction();
+
+    const crossTransaction = new Transaction();
+    crossTransaction.add(modifyComputeUnits, addPriorityFee, crossTreeTx);
+    await provider.sendAndConfirm(crossTransaction, [user]);
+
+    // Track output in offchainTreeDestination just for checking
+    offchainTreeDestination.insert(outputCommitment);
+    offchainTreeDestination.insert(dummyOutput2Commitment);
+
+    console.log("✅ Cross-tree transaction successful!");
+
+    // Verify leaves in output tree (Destination)
+    const destTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
+      noteTreeDestination
+    );
+    // Tree should now have 2 leaves (0 and 1)
+    if (destTreeAcc.nextIndex.toNumber() !== 2) {
+      throw new Error(
+        `Expected destination tree to have 2 leaves, but got ${destTreeAcc.nextIndex.toNumber()}`
+      );
+    }
+    console.log(
+      `   Destination Tree ${destinationTreeId} correctly has 2 new leaves.`
+    );
+  });

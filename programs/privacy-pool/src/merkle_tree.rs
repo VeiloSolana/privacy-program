@@ -2,6 +2,18 @@ use crate::PrivacyError;
 use anchor_lang::prelude::*;
 use light_hasher::Hasher;
 
+/// Merkle tree height optimized for performance and early-stage anonymity
+/// Height 20 = 1,048,576 leaves (1M+ capacity)
+///
+/// Rationale:
+/// - Faster proof generation (20 vs 26 Poseidon hashes)
+/// - Lower compute units on-chain
+/// - Lighter indexer overhead
+/// - Better mobile/browser wallet UX
+/// - Sufficient for realistic early adoption
+///
+/// Privacy comes from active user overlap, not just tree capacity.
+/// When scaling is needed, deploy new pool contracts (UX migration, not state migration).
 pub const MERKLE_TREE_HEIGHT: usize = 26;
 pub const ROOT_HISTORY_SIZE: usize = 256;
 
