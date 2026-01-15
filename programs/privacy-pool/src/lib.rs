@@ -19,7 +19,6 @@ declare_id!("G4jVg1TydNuzQQZojYYVekaGYFZVMAuimC8KWVVKzWfa");
 pub const AUTHORIZED_ADMIN: Pubkey = pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP");
 
 pub type PoseidonHasher = Poseidon;
-pub const MAX_DENOMS: usize = 4;
 pub const MAX_RELAYERS: usize = 16;
 
 /// Maximum number of Merkle trees per pool
@@ -436,37 +435,6 @@ pub struct AddMerkleTree<'info> {
 
     pub system_program: Program<'info, System>,
 }
-
-#[derive(Accounts)]
-#[instruction(mint_address: Pubkey, tree_id: u8)]
-pub struct DepositFixed<'info> {
-    #[account(
-        mut,
-        seeds = [b"privacy_config_v3", mint_address.as_ref()],
-        bump = config.bump
-    )]
-    pub config: Account<'info, PrivacyConfig>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
-        bump = config.vault_bump
-    )]
-    pub vault: Account<'info, Vault>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[tree_id]],
-        bump,
-    )]
-    pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    #[account(mut)]
-    pub depositor: Signer<'info>,
-
-    pub system_program: Program<'info, System>,
-}
-
 // ---- New UTXO Transaction Instruction ----
 
 #[derive(Accounts)]
