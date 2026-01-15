@@ -3935,9 +3935,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     const transaction = new Transaction();
     transaction.add(modifyComputeUnits, addPriorityFee, depositTx);
-    await provider.sendAndConfirm(transaction, [user]);
+    const depositSignature = await provider.sendAndConfirm(transaction, [user]);
 
     console.log("✅ Deposit successful to Tree 0");
+    console.log(`   📝 Transaction signature: ${depositSignature}`);
 
     // Fetch updated root from Tree 0
     const noteTreeAccAfterDeposit = await (
@@ -4106,13 +4107,16 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     const crossTransaction = new Transaction();
     crossTransaction.add(modifyComputeUnits, addPriorityFee, crossTreeTx);
-    await provider.sendAndConfirm(crossTransaction, [user]);
+    const crossTreeSignature = await provider.sendAndConfirm(crossTransaction, [
+      user,
+    ]);
 
     // Track output in offchainTreeDestination just for checking
     offchainTreeDestination.insert(outputCommitment);
     offchainTreeDestination.insert(dummyOutput2Commitment);
 
     console.log("✅ Cross-tree transaction successful!");
+    console.log(`   📝 Transaction signature: ${crossTreeSignature}`);
 
     // Verify leaves in output tree (Destination)
     const destTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
