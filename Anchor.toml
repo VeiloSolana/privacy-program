@@ -28,4 +28,4 @@ wallet = "/Users/admin/.config/solana/id.json"
 startup_wait = 15000
 
 [scripts]
-test = "npm run test:spl"
+test = "npm run test:sol"
