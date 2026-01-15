@@ -49,6 +49,26 @@ import {
   fetchAndDisplayEvents,
 } from "./test-helpers";
 
+// Helper function to derive nullifier marker PDA with tree_id
+// New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
+function deriveNullifierMarkerPDA(
+  programId: PublicKey,
+  mintAddress: PublicKey,
+  treeId: number,
+  nullifier: Uint8Array
+): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("nullifier_v3"),
+      mintAddress.toBuffer(),
+      Buffer.from([treeId]),
+      Buffer.from(nullifier),
+    ],
+    programId
+  );
+  return pda;
+}
+
 describe("Privacy Pool - SPL Token Support", () => {
   const provider = makeProvider();
   setProvider(provider);
@@ -362,21 +382,18 @@ describe("Privacy Pool - SPL Token Support", () => {
       outputBlindings: [blinding, dummyOutputBlinding],
     });
 
-    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier0),
-      ],
-      program.programId
+    const depositInputTreeId = 0;
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      depositInputTreeId,
+      dummyNullifier0
     );
-    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier1),
-      ],
-      program.programId
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      depositInputTreeId,
+      dummyNullifier1
     );
 
     let txSignature: string;
@@ -523,9 +540,11 @@ describe("Privacy Pool - SPL Token Support", () => {
       .accounts({ config: tokenConfig, admin: wallet.publicKey })
       .rpc();
 
-    const withdrawAmount = depositNote.amount;
-    const fee = (depositNote.amount * BigInt(feeBps)) / 10_000n;
-    const toRecipient = depositNote.amount - fee;
+    // Create change output to satisfy circuit balance constraint
+    const changeAmount = 1000n; // Small amount stays as change
+    const withdrawAmount = depositNote.amount - changeAmount;
+    const fee = (withdrawAmount * BigInt(feeBps)) / 10_000n;
+    const toRecipient = withdrawAmount - fee;
 
     const extData = {
       recipient: recipient.publicKey,
@@ -562,15 +581,15 @@ describe("Privacy Pool - SPL Token Support", () => {
       dummyPrivKey1
     );
 
-    // Create dummy outputs
-    const dummyOutputPrivKey0 = randomBytes32();
-    const dummyOutputPubKey0 = derivePublicKey(poseidon, dummyOutputPrivKey0);
-    const dummyOutputBlinding0 = randomBytes32();
-    const dummyOutputCommitment0 = computeCommitment(
+    // Create change output (to satisfy balance constraint: sum(inputs) = sum(outputs) + |publicAmount|)
+    const changePrivKey = randomBytes32();
+    const changePubKey = derivePublicKey(poseidon, changePrivKey);
+    const changeBlinding = randomBytes32();
+    const changeCommitment = computeCommitment(
       poseidon,
-      0n,
-      dummyOutputPubKey0,
-      dummyOutputBlinding0,
+      changeAmount,
+      changePubKey,
+      changeBlinding,
       testMint
     );
 
@@ -594,7 +613,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       extDataHash,
       mintAddress: testMint,
       inputNullifiers: [depositNote.nullifier, dummyNullifier1],
-      outputCommitments: [dummyOutputCommitment0, dummyOutputCommitment1],
+      outputCommitments: [changeCommitment, dummyOutputCommitment1],
 
       inputAmounts: [depositNote.amount, 0n],
       inputPrivateKeys: [depositNote.privateKey, dummyPrivKey1],
@@ -605,26 +624,23 @@ describe("Privacy Pool - SPL Token Support", () => {
         { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
       ],
 
-      outputAmounts: [0n, 0n],
-      outputOwners: [dummyOutputPubKey0, dummyOutputPubKey1],
-      outputBlindings: [dummyOutputBlinding0, dummyOutputBlinding1],
+      outputAmounts: [changeAmount, 0n],
+      outputOwners: [changePubKey, dummyOutputPubKey1],
+      outputBlindings: [changeBlinding, dummyOutputBlinding1],
     });
 
-    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(depositNote.nullifier),
-      ],
-      program.programId
+    const withdrawInputTreeId = 0;
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      withdrawInputTreeId,
+      depositNote.nullifier
     );
-    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier1),
-      ],
-      program.programId
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      withdrawInputTreeId,
+      dummyNullifier1
     );
 
     try {
@@ -643,7 +659,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           testMint,
           Array.from(depositNote.nullifier),
           Array.from(dummyNullifier1),
-          Array.from(dummyOutputCommitment0),
+          Array.from(changeCommitment),
           Array.from(dummyOutputCommitment1),
           extData,
           proof
@@ -688,7 +704,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       });
 
       // Insert outputs into offchain tree
-      offchainTokenTree.insert(dummyOutputCommitment0);
+      offchainTokenTree.insert(changeCommitment);
       offchainTokenTree.insert(dummyOutputCommitment1);
 
       console.log("\n✅ Token withdrawal successful");
@@ -840,21 +856,18 @@ describe("Privacy Pool - SPL Token Support", () => {
       outputBlindings: [aliceBlinding, aliceDummyBlinding],
     });
 
-    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier0),
-      ],
-      program.programId
+    const aliceDepositInputTreeId = 0;
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      aliceDepositInputTreeId,
+      dummyNullifier0
     );
-    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier1),
-      ],
-      program.programId
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      aliceDepositInputTreeId,
+      dummyNullifier1
     );
 
     const depositTx = await (program.methods as any)
@@ -1017,21 +1030,18 @@ describe("Privacy Pool - SPL Token Support", () => {
       outputBlindings: [bobBlinding, aliceChangeBlinding],
     });
 
-    const [aliceNullifierMarker] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(aliceNullifier),
-      ],
-      program.programId
+    const transferInputTreeId = 0;
+    const aliceNullifierMarker = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      transferInputTreeId,
+      aliceNullifier
     );
-    const [transferDummyNullifierMarker] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(transferDummyNullifier),
-      ],
-      program.programId
+    const transferDummyNullifierMarker = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      transferInputTreeId,
+      transferDummyNullifier
     );
 
     const transferTx = await (program.methods as any)
@@ -1289,21 +1299,18 @@ describe("Privacy Pool - SPL Token Support", () => {
     offchainTokenTree.insert(commitment);
     offchainTokenTree.insert(dummyOutputCommitment);
 
-    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier0),
-      ],
-      program.programId
+    const relayerDepositInputTreeId = 0;
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      relayerDepositInputTreeId,
+      dummyNullifier0
     );
-    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier1),
-      ],
-      program.programId
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      relayerDepositInputTreeId,
+      dummyNullifier1
     );
 
     const depositTx = await (program.methods as any)
@@ -1442,21 +1449,18 @@ describe("Privacy Pool - SPL Token Support", () => {
       outputBlindings: [outputBlinding, dummyOutput2Blinding],
     });
 
-    const [inputNullifierMarker] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(nullifier),
-      ],
-      program.programId
+    const crossTreeInputTreeId = 0;
+    const inputNullifierMarker = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      crossTreeInputTreeId,
+      nullifier
     );
-    const [dummyNullifierMarker] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier2),
-      ],
-      program.programId
+    const dummyNullifierMarker = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      crossTreeInputTreeId,
+      dummyNullifier2
     );
 
     const crossTreeTx = await (program.methods as any)
@@ -1790,21 +1794,18 @@ describe("Privacy Pool - SPL Token Support", () => {
       outputBlindings: [blinding, dummyOutputBlinding],
     });
 
-    const [nullifierMarker0] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier0),
-      ],
-      program.programId
+    const wrongMintInputTreeId = 0;
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      wrongMintInputTreeId,
+      dummyNullifier0
     );
-    const [nullifierMarker1] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("nullifier_v3"),
-        testMint.toBuffer(),
-        Buffer.from(dummyNullifier1),
-      ],
-      program.programId
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      testMint,
+      wrongMintInputTreeId,
+      dummyNullifier1
     );
 
     try {

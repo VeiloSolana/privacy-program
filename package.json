@@ -2,7 +2,7 @@
   "scripts": {
     "build:anchor": "anchor build",
     "test:all": "mocha -r ts-node/register -t 1000000 'tests/**/*.test.ts'",
-    "test": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool.test.ts'",
+    "test:sol": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool.test.ts'",
     "test:spl": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool-spl.test.ts'",
     "deploy:devnet": "ts-node scripts/deploy-devnet.ts",
     "check-pool": "ts-node scripts/check-pool.ts",
