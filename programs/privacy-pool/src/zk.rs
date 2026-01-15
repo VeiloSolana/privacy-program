@@ -183,42 +183,10 @@ pub fn verify_transaction_groth16(
     public_inputs[6] = reduce_to_field_be(inputs.output_commitments[0]);
     public_inputs[7] = reduce_to_field_be(inputs.output_commitments[1]);
 
-    // These logs create BigUint values just for display, burning compute units.
-    // Attackers can spam failing proofs to exhaust compute budget.
-    #[cfg(feature = "zk-verify-debug")]
-    {
-        msg!("[DEBUG] Transaction proof public inputs:");
-        msg!("  root: {}", BigUint::from_bytes_be(&public_inputs[0]));
-        msg!(
-            "  publicAmount: {} -> {}",
-            inputs.public_amount,
-            BigUint::from_bytes_be(&public_inputs[1])
-        );
-        msg!(
-            "  extDataHash: {}",
-            BigUint::from_bytes_be(&public_inputs[2])
-        );
-        msg!(
-            "  mintAddress: {}",
-            BigUint::from_bytes_be(&public_inputs[3])
-        );
-        msg!(
-            "  inputNullifier[0]: {}",
-            BigUint::from_bytes_be(&public_inputs[4])
-        );
-        msg!(
-            "  inputNullifier[1]: {}",
-            BigUint::from_bytes_be(&public_inputs[5])
-        );
-        msg!(
-            "  outputCommitment[0]: {}",
-            BigUint::from_bytes_be(&public_inputs[6])
-        );
-        msg!(
-            "  outputCommitment[1]: {}",
-            BigUint::from_bytes_be(&public_inputs[7])
-        );
-    }
+    // AUDIT-008 FIX: Debug logging removed to prevent compute budget exhaustion
+    // The zk-verify-debug feature was removed as compile-time debug flags can be
+    // accidentally enabled in production, allowing attackers to spam failed proofs
+    // and exhaust compute budget. For debugging, use off-chain verification tools instead.
 
     // ----- 2. Re-encode proof_a: G1 -> 64-byte alt_bn128 layout -----
     let g1_point = G1::deserialize_with_mode(

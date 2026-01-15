@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{self, TokenAccount};
 use light_hasher::Poseidon;
 
@@ -293,6 +294,15 @@ impl ExtData {
 
 // ---- Instruction contexts ----
 
+/// AUDIT-010 NOTE: Initialize instruction security
+/// The `address = AUTHORIZED_ADMIN` constraint below is validated by Anchor's framework
+/// BEFORE any account initialization begins. Anchor's constraint validation is atomic:
+/// 1. All #[account(...)] constraints are checked first
+/// 2. Only if ALL constraints pass does account initialization proceed
+/// 3. The function body executes last
+/// This means AUTHORIZED_ADMIN is verified before any `init` accounts are created,
+/// preventing unauthorized initialization. The `init` constraints additionally prevent
+/// reentrancy by failing if accounts already exist. Both protections work together.
 #[derive(Accounts)]
 #[instruction(fee_bps: u16, mint_address: Pubkey)]
 pub struct Initialize<'info> {
@@ -513,21 +523,25 @@ pub struct Transact<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    /// First nullifier marker (must not exist - ensures nullifier is fresh)
+    /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
+    /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// AUDIT-003 FIX: Includes input_tree_id to prevent cross-tree nullifier reuse
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), &[input_tree_id], input_nullifier_0.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
     pub nullifier_marker_0: Account<'info, NullifierMarker>,
 
-    /// Second nullifier marker (must not exist - ensures nullifier is fresh)
+    /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
+    /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// AUDIT-003 FIX: Includes input_tree_id to prevent cross-tree nullifier reuse
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), &[input_tree_id], input_nullifier_1.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -574,8 +588,18 @@ fn is_token_mint(mint: &Pubkey) -> bool {
     mint != &Pubkey::default()
 }
 
-/// Safely deserialize a token account
+/// Safely deserialize a token account with owner validation
+/// Prevents malicious programs from passing fake token accounts
 fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
+    // AUDIT-002 FIX: Verify account is owned by SPL Token Program
+    // This prevents attackers from passing accounts owned by malicious programs
+    // that return crafted TokenAccount structs
+    require_keys_eq!(
+        *account.owner,
+        token::ID,
+        PrivacyError::InvalidTokenAccountOwner
+    );
+
     let data = account.try_borrow_data()?;
     TokenAccount::try_deserialize(&mut &data[..])
         .map_err(|_| error!(PrivacyError::MissingTokenAccount))
@@ -596,6 +620,12 @@ pub mod privacy_pool {
         min_withdraw_amount: Option<u64>,
         max_withdraw_amount: Option<u64>,
     ) -> Result<()> {
+        // AUDIT-010 NOTE: At this point, Anchor has already validated:
+        // - admin signer matches AUTHORIZED_ADMIN (from #[account] constraint)
+        // - All accounts with `init` constraint do not yet exist (prevents reentrancy)
+        // - All PDA derivations match expected seeds and bumps
+        // Therefore, this function body is only reachable by authorized admin on first initialization.
+
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -797,11 +827,40 @@ pub mod privacy_pool {
 
         let input_tree = ctx.accounts.input_tree.load()?;
 
-        // Validate no duplicate nullifiers (prevents trying to spend same note twice in one tx)
-        require!(
-            input_nullifiers[0] != input_nullifiers[1],
-            PrivacyError::DuplicateNullifiers
-        );
+        // For deposits (public_amount > 0), no notes are consumed - require zero nullifiers
+        // This prevents rent griefing where attackers spam deposits with fake nullifiers
+        // forcing relayers to pay rent for markers that don't correspond to real notes
+        let zero_nullifier = [0u8; 32];
+        if public_amount > 0 {
+            require!(
+                input_nullifiers[0] == zero_nullifier && input_nullifiers[1] == zero_nullifier,
+                PrivacyError::InvalidNullifiersForDeposit
+            );
+            // AUDIT-001 FIX: Validate that nullifier marker accounts correspond to zero nullifiers
+            // This ensures deposits reuse the same marker accounts instead of creating new ones
+            require!(
+                ctx.accounts.nullifier_marker_0.nullifier == zero_nullifier
+                    || ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
+                PrivacyError::InvalidNullifierMarkerForDeposit
+            );
+            require!(
+                ctx.accounts.nullifier_marker_1.nullifier == zero_nullifier
+                    || ctx.accounts.nullifier_marker_1.nullifier == [0u8; 32],
+                PrivacyError::InvalidNullifierMarkerForDeposit
+            );
+        } else {
+            // For withdrawals/transfers, validate no duplicate nullifiers
+            require!(
+                input_nullifiers[0] != input_nullifiers[1],
+                PrivacyError::DuplicateNullifiers
+            );
+
+            // Also ensure neither nullifier is zero (must be real notes)
+            require!(
+                input_nullifiers[0] != zero_nullifier && input_nullifiers[1] != zero_nullifier,
+                PrivacyError::ZeroNullifier
+            );
+        }
 
         // Validate no duplicate output commitments (prevents creating identical notes)
         require!(
@@ -862,6 +921,17 @@ pub mod privacy_pool {
             let vault_token =
                 deserialize_token_account(&ctx.accounts.vault_token_account.to_account_info())?;
 
+            // AUDIT-005 FIX: Verify vault_token_account is the canonical ATA
+            // This prevents funds from accumulating in non-standard accounts that could be
+            // vulnerable to closure, authority changes, or becoming untracked
+            let expected_vault_ata =
+                get_associated_token_address(&ctx.accounts.vault.key(), &cfg.mint_address);
+            require_keys_eq!(
+                ctx.accounts.vault_token_account.key(),
+                expected_vault_ata,
+                PrivacyError::VaultTokenAccountNotATA
+            );
+
             // Verify vault token account mint matches config
             require_keys_eq!(
                 vault_token.mint,
@@ -889,18 +959,25 @@ pub mod privacy_pool {
                 // For deposits, the signer (user/relayer) must own or have delegation over the token account
                 // This allows users to deposit their own tokens directly
                 let is_owner = user_token.owner == ctx.accounts.relayer.key();
-                let is_delegated =
-                    if let Some(delegate) = Option::<Pubkey>::from(user_token.delegate) {
-                        delegate == *ctx.accounts.relayer.key
-                            && user_token.delegated_amount >= public_amount as u64
-                    } else {
-                        false
-                    };
 
-                require!(
-                    is_owner || is_delegated,
-                    PrivacyError::DepositorTokenAccountMismatch
-                );
+                // AUDIT-007 FIX: Explicit delegation validation with clear error messages
+                if !is_owner {
+                    // If not the owner, must be delegated
+                    let delegate = Option::<Pubkey>::from(user_token.delegate)
+                        .ok_or(PrivacyError::DepositorTokenAccountMismatch)?;
+
+                    require_keys_eq!(
+                        delegate,
+                        *ctx.accounts.relayer.key,
+                        PrivacyError::DepositorTokenAccountMismatch
+                    );
+
+                    // Check delegated amount is sufficient for deposit
+                    require!(
+                        user_token.delegated_amount >= public_amount as u64,
+                        PrivacyError::InsufficientDelegation
+                    );
+                }
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -959,22 +1036,38 @@ pub mod privacy_pool {
 
         drop(input_tree); // Release immutable borrow
 
-        // 8. Mark both input nullifiers as spent
-        mark_nullifier_spent(
-            &mut ctx.accounts.nullifier_marker_0,
-            &mut ctx.accounts.nullifiers,
-            input_nullifiers[0],
-            ctx.bumps.nullifier_marker_0,
-            mint_address,
-        )?;
+        // 8. Mark both input nullifiers as spent (only for withdrawals/transfers)
+        // AUDIT-001 FIX: Skip nullifier marking for deposits to prevent rent griefing
+        // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
+        if public_amount <= 0 {
+            // Check that nullifier markers don't already exist (prevents double-spend)
+            require!(
+                ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
+                PrivacyError::NullifierAlreadyUsed
+            );
+            require!(
+                ctx.accounts.nullifier_marker_1.nullifier == [0u8; 32],
+                PrivacyError::NullifierAlreadyUsed
+            );
 
-        mark_nullifier_spent(
-            &mut ctx.accounts.nullifier_marker_1,
-            &mut ctx.accounts.nullifiers,
-            input_nullifiers[1],
-            ctx.bumps.nullifier_marker_1,
-            mint_address,
-        )?;
+            mark_nullifier_spent(
+                &mut ctx.accounts.nullifier_marker_0,
+                &mut ctx.accounts.nullifiers,
+                input_nullifiers[0],
+                ctx.bumps.nullifier_marker_0,
+                mint_address,
+                input_tree_id,
+            )?;
+
+            mark_nullifier_spent(
+                &mut ctx.accounts.nullifier_marker_1,
+                &mut ctx.accounts.nullifiers,
+                input_nullifiers[1],
+                ctx.bumps.nullifier_marker_1,
+                mint_address,
+                input_tree_id,
+            )?;
+        }
 
         // 9. Insert both output commitments into output tree
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
@@ -1035,12 +1128,14 @@ pub mod privacy_pool {
 // ---- Helper Functions ----
 
 /// Mark a nullifier as spent
+/// AUDIT-003 FIX: tree_id parameter ensures nullifiers are tree-specific
 fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
     nullifier: [u8; 32],
     bump: u8,
     mint_address: Pubkey,
+    tree_id: u8,
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
@@ -1059,6 +1154,7 @@ fn mark_nullifier_spent(
         nullifier,
         timestamp,
         mint_address,
+        tree_id,
     });
 
     Ok(())
@@ -1187,6 +1283,28 @@ fn handle_public_amount<'info>(
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         // Verify fee is within acceptable range
+        // AUDIT-006 FIX: Calculate max_fee first to ensure withdrawal is large enough
+        // to support minimum fee without truncation issues
+        // AUDIT-004 FIX: Use u128 for intermediate calculation to prevent overflow
+        // on large withdrawals (e.g., i64::MIN = 9.2e18, which overflows u64 when
+        // multiplied by fee_bps >= 20). This allows withdrawals of any valid amount.
+        let max_fee_u128 = (withdrawal_amount as u128)
+            .checked_mul(config.fee_bps as u128)
+            .ok_or(PrivacyError::ArithmeticOverflow)?
+            / 10_000;
+
+        // Ensure the result fits in u64 (should always be true since withdrawal_amount is u64)
+        require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+        let max_fee = max_fee_u128 as u64;
+
+        // Ensure withdrawal amount is large enough that max_fee >= min_withdrawal_fee
+        // This prevents fee evasion via small withdrawals where truncation would
+        // make max_fee < min_withdrawal_fee, creating an impossible fee range
+        require!(
+            max_fee >= config.min_withdrawal_fee,
+            PrivacyError::WithdrawalTooSmallForMinFee
+        );
+
         // 1. Check minimum fee to ensure relayer compensation
         require!(
             fee >= config.min_withdrawal_fee,
@@ -1194,10 +1312,6 @@ fn handle_public_amount<'info>(
         );
 
         // 2. Check maximum fee (prevent malicious relayer from overcharging)
-        let max_fee = withdrawal_amount
-            .checked_mul(config.fee_bps as u64)
-            .ok_or(PrivacyError::ArithmeticOverflow)?
-            / 10_000;
         require!(fee <= max_fee, PrivacyError::ExcessiveFee);
 
         if is_token {
@@ -1325,6 +1439,8 @@ pub struct NullifierSpent {
     pub nullifier: [u8; 32],
     pub timestamp: i64,
     pub mint_address: Pubkey,
+    /// AUDIT-003 FIX: Track which tree the nullifier belongs to
+    pub tree_id: u8,
 }
 
 // ---- Errors ----
@@ -1420,4 +1536,18 @@ pub enum PrivacyError {
     InvalidTreeId,
     #[msg("Maximum number of Merkle trees reached for this pool")]
     TooManyTrees,
+    #[msg("Deposits must use zero nullifiers (no notes consumed)")]
+    InvalidNullifiersForDeposit,
+    #[msg("Nullifier cannot be zero for withdrawals/transfers")]
+    ZeroNullifier,
+    #[msg("Token account must be owned by SPL Token Program")]
+    InvalidTokenAccountOwner,
+    #[msg("Vault token account must be the canonical Associated Token Account")]
+    VaultTokenAccountNotATA,
+    #[msg("Withdrawal amount too small: max fee based on fee_bps would be less than min_withdrawal_fee")]
+    WithdrawalTooSmallForMinFee,
+    #[msg("Nullifier marker account does not correspond to zero nullifier for deposits")]
+    InvalidNullifierMarkerForDeposit,
+    #[msg("Token account delegation amount insufficient for deposit")]
+    InsufficientDelegation,
 }
