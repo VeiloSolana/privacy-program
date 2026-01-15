@@ -166,8 +166,7 @@ pub struct NullifierMarker {
     pub timestamp: i64,
     /// Sequential withdrawal index
     pub withdrawal_index: u32,
-    /// AUDIT-H01 FIX: Track which tree this nullifier belongs to
-    /// Prevents cross-tree nullifier reuse (double-spend across different trees)
+    /// Tree ID this nullifier belongs to (prevents cross-tree double-spend)
     pub tree_id: u8,
     /// PDA bump
     pub bump: u8,
@@ -302,15 +301,6 @@ impl ExtData {
 
 // ---- Instruction contexts ----
 
-/// AUDIT-010 NOTE: Initialize instruction security
-/// The `address = AUTHORIZED_ADMIN` constraint below is validated by Anchor's framework
-/// BEFORE any account initialization begins. Anchor's constraint validation is atomic:
-/// 1. All #[account(...)] constraints are checked first
-/// 2. Only if ALL constraints pass does account initialization proceed
-/// 3. The function body executes last
-/// This means AUTHORIZED_ADMIN is verified before any `init` accounts are created,
-/// preventing unauthorized initialization. The `init` constraints additionally prevent
-/// reentrancy by failing if accounts already exist. Both protections work together.
 #[derive(Accounts)]
 #[instruction(fee_bps: u16, mint_address: Pubkey)]
 pub struct Initialize<'info> {
@@ -502,7 +492,6 @@ pub struct Transact<'info> {
 
     /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
-    /// AUDIT-003 FIX: Includes input_tree_id to prevent cross-tree nullifier reuse
     #[account(
         init_if_needed,
         payer = relayer,
@@ -514,7 +503,6 @@ pub struct Transact<'info> {
 
     /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
-    /// AUDIT-003 FIX: Includes input_tree_id to prevent cross-tree nullifier reuse
     #[account(
         init_if_needed,
         payer = relayer,
@@ -568,9 +556,7 @@ fn is_token_mint(mint: &Pubkey) -> bool {
 /// Safely deserialize a token account with owner validation
 /// Prevents malicious programs from passing fake token accounts
 fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
-    // AUDIT-002 FIX: Verify account is owned by SPL Token Program
-    // This prevents attackers from passing accounts owned by malicious programs
-    // that return crafted TokenAccount structs
+    // Verify account is owned by SPL Token Program
     require_keys_eq!(
         *account.owner,
         token::ID,
@@ -597,12 +583,6 @@ pub mod privacy_pool {
         min_withdraw_amount: Option<u64>,
         max_withdraw_amount: Option<u64>,
     ) -> Result<()> {
-        // AUDIT-010 NOTE: At this point, Anchor has already validated:
-        // - admin signer matches AUTHORIZED_ADMIN (from #[account] constraint)
-        // - All accounts with `init` constraint do not yet exist (prevents reentrancy)
-        // - All PDA derivations match expected seeds and bumps
-        // Therefore, this function body is only reachable by authorized admin on first initialization.
-
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -899,9 +879,7 @@ pub mod privacy_pool {
             let vault_token =
                 deserialize_token_account(&ctx.accounts.vault_token_account.to_account_info())?;
 
-            // AUDIT-005 FIX: Verify vault_token_account is the canonical ATA
-            // This prevents funds from accumulating in non-standard accounts that could be
-            // vulnerable to closure, authority changes, or becoming untracked
+            // Verify vault_token_account is the canonical ATA
             let expected_vault_ata =
                 get_associated_token_address(&ctx.accounts.vault.key(), &cfg.mint_address);
             require_keys_eq!(
@@ -934,10 +912,7 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // AUDIT-C02 FIX: For deposits, ONLY the owner can authorize transfers
-                // Delegation is explicitly NOT allowed to prevent exploitation where
-                // an attacker with minimal delegation drains the entire token balance
-                // by repeatedly calling transact with the victim's token account.
+                // For deposits, only the owner can authorize transfers (no delegation)
                 require_keys_eq!(
                     user_token.owner,
                     ctx.accounts.relayer.key(),
@@ -1002,11 +977,9 @@ pub mod privacy_pool {
         drop(input_tree); // Release immutable borrow
 
         // 8. Mark both input nullifiers as spent (only for withdrawals/transfers)
-        // AUDIT-001 FIX: Skip nullifier marking for deposits to prevent rent griefing
         // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
         if public_amount <= 0 {
-            // AUDIT-H01 FIX: Verify marker accounts match the input tree to prevent cross-tree reuse
-            // Check tree_id == 0 allows for uninitialized markers, tree_id == input_tree_id validates existing markers
+            // Verify marker accounts match the input tree to prevent cross-tree reuse
             require!(
                 ctx.accounts.nullifier_marker_0.tree_id == 0
                     || ctx.accounts.nullifier_marker_0.tree_id == input_tree_id,
@@ -1105,9 +1078,7 @@ pub mod privacy_pool {
 
 // ---- Helper Functions ----
 
-/// Mark a nullifier as spent
-/// AUDIT-003 FIX: tree_id parameter ensures nullifiers are tree-specific
-/// AUDIT-H01 FIX: Store tree_id in marker to track which tree nullifier belongs to
+/// Mark a nullifier as spent (tree-specific to prevent cross-tree reuse)
 fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
@@ -1121,7 +1092,7 @@ fn mark_nullifier_spent(
     marker.nullifier = nullifier;
     marker.timestamp = timestamp;
     marker.withdrawal_index = nullifier_set.count;
-    marker.tree_id = tree_id; // AUDIT-H01: Store tree_id to prevent cross-tree reuse
+    marker.tree_id = tree_id;
     marker.bump = bump;
 
     nullifier_set.count = nullifier_set
@@ -1262,16 +1233,8 @@ fn handle_public_amount<'info>(
             .and_then(|x| x.checked_sub(refund))
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        // SECURITY: Fee validation with error margin for timing attack protection
-        // Without variance, all withdrawals have exactly fee_bps% fee, making it easier
-        // to correlate deposits/withdrawals by matching exact amounts. The error margin
-        // allows some variance (e.g., ±5%) to obscure these correlations.
-        //
-        // AUDIT-006 FIX: Calculate max_fee first to ensure withdrawal is large enough
-        // to support minimum fee without truncation issues
-        // AUDIT-004 FIX: Use u128 for intermediate calculation to prevent overflow
-        // on large withdrawals (e.g., i64::MIN = 9.2e18, which overflows u64 when
-        // multiplied by fee_bps >= 20). This allows withdrawals of any valid amount.
+        // Fee validation with error margin for timing attack protection
+        // Use u128 for intermediate calculation to prevent overflow on large withdrawals
         let max_fee_u128 = (withdrawal_amount as u128)
             .checked_mul(config.fee_bps as u128)
             .ok_or(PrivacyError::ArithmeticOverflow)?
@@ -1365,10 +1328,7 @@ fn handle_public_amount<'info>(
             let rent = Rent::get()?;
             let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
 
-            // AUDIT-C01 FIX: Ensure vault maintains operational buffer above rent exemption
-            // Without this, attackers can drain vault to exactly rent_exempt_minimum through
-            // repeated withdrawals, leaving no funds for legitimate users and causing DoS.
-            // The +1 lamport ensures vault always has MORE than bare minimum rent exemption.
+            // Ensure vault maintains operational buffer above rent exemption
             let total_required = withdrawal_amount
                 .checked_add(rent_exempt_minimum)
                 .and_then(|x| x.checked_add(1))
@@ -1436,7 +1396,6 @@ pub struct NullifierSpent {
     pub nullifier: [u8; 32],
     pub timestamp: i64,
     pub mint_address: Pubkey,
-    /// AUDIT-003 FIX: Track which tree the nullifier belongs to
     pub tree_id: u8,
 }
 
