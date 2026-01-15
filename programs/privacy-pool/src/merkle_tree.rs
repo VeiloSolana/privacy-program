@@ -2,7 +2,7 @@ use crate::PrivacyError;
 use anchor_lang::prelude::*;
 use light_hasher::Hasher;
 
-pub const MERKLE_TREE_HEIGHT: usize = 26;
+pub const MERKLE_TREE_HEIGHT: usize = 22;
 pub const ROOT_HISTORY_SIZE: usize = 256;
 
 /// Layout tests verify 9107 bytes total with 1-byte alignment. Breaking this corrupts all accounts.

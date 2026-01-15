@@ -49,6 +49,13 @@ import {
   fetchAndDisplayEvents,
 } from "./test-helpers";
 
+// Helper: Encode tree_id as 2-byte little-endian (u16)
+function encodeTreeId(treeId: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(treeId, 0);
+  return buffer;
+}
+
 // Helper function to derive nullifier marker PDA with tree_id
 // New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
 function deriveNullifierMarkerPDA(
@@ -61,7 +68,7 @@ function deriveNullifierMarkerPDA(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      Buffer.from([treeId]),
+      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId
@@ -88,7 +95,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
   const feeBps = 50; // 0.5%
   const MINT_DECIMALS = 6;
-  const TOKEN_AMOUNT = 260_000_000; // 260 tokens with 6 decimals (ensures 0.5% fee meets 1M minimum)
+  const TOKEN_AMOUNT = 220_000_000; // 220 tokens with 6 decimals (ensures 0.5% fee meets 1M minimum)
 
   let offchainTokenTree: OffchainMerkleTree;
   const tokenNoteStorage = new InMemoryNoteStorage();
@@ -103,7 +110,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Initialize Poseidon
     poseidon = await buildPoseidon();
-    offchainTokenTree = new OffchainMerkleTree(26, poseidon);
+    offchainTokenTree = new OffchainMerkleTree(22, poseidon);
 
     // Create test token mint
     console.log("Creating test token mint...");
@@ -135,7 +142,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       [
         Buffer.from("privacy_note_tree_v3"),
         testMint.toBuffer(),
-        Buffer.from([0]),
+        encodeTreeId(0),
       ],
       program.programId
     );
@@ -358,7 +365,7 @@ describe("Privacy Pool - SPL Token Support", () => {
 
     // Generate proof
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 22).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -373,8 +380,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],
@@ -605,7 +612,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 22).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -621,7 +628,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [depositNote.blinding, dummyBlinding1],
       inputMerklePaths: [
         updatedMerklePath,
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
 
       outputAmounts: [changeAmount, 0n],
@@ -834,7 +841,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     let onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 22).map((z) => bytesToBigIntBE(z));
 
     const depositProof = await generateTransactionProof({
       root: onchainRoot,
@@ -848,8 +855,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
       outputAmounts: [aliceDepositAmount, 0n],
       outputOwners: [alicePublicKey, aliceDummyPubKey],
@@ -1022,7 +1029,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [aliceBlinding, transferDummyBlinding],
       inputMerklePaths: [
         aliceUpdatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
 
       outputAmounts: [transferAmount, changeAmount],
@@ -1145,7 +1152,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       [
         Buffer.from("privacy_note_tree_v3"),
         testMint.toBuffer(),
-        Buffer.from([destinationTreeId]),
+        encodeTreeId(destinationTreeId),
       ],
       program.programId
     );
@@ -1169,7 +1176,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     }
 
     // Create local offchain tree to track this fresh tree
-    const offchainTokenTreeDestination = new OffchainMerkleTree(26, poseidon);
+    const offchainTokenTreeDestination = new OffchainMerkleTree(22, poseidon);
 
     // Step 2: Make a deposit to Token Tree 0
     console.log(`\n📥 Step 2: Depositing SPL tokens to Tree 0...`);
@@ -1266,7 +1273,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 22).map((z) => bytesToBigIntBE(z));
 
     const extDataDeposit = {
       recipient: user.publicKey,
@@ -1288,8 +1295,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
       outputAmounts: [depositAmount, 0n],
       outputOwners: [publicKey, dummyOutputPubKey],
@@ -1366,7 +1373,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     versionedTx.sign([user]);
 
     await provider.connection.sendTransaction(versionedTx);
-    await new Promise((resolve) => setTimeout(resolve, 2600));
+    await new Promise((resolve) => setTimeout(resolve, 2200));
 
     console.log("✅ Deposit successful to SPL Token Tree 0");
 
@@ -1442,7 +1449,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputBlindings: [blinding, dummyBlinding2],
       inputMerklePaths: [
         updatedPath,
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
       outputAmounts: [depositAmount, 0n],
       outputOwners: [outputPubKey, dummyOutput2PubKey],
@@ -1509,7 +1516,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     versionedTx.sign([user]);
 
     await provider.connection.sendTransaction(versionedTx);
-    await new Promise((resolve) => setTimeout(resolve, 2600));
+    await new Promise((resolve) => setTimeout(resolve, 2200));
 
     offchainTokenTreeDestination.insert(outputCommitment);
     offchainTokenTreeDestination.insert(dummyOutput2Commitment);
@@ -1625,7 +1632,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           destTreePath,
           {
             pathElements: zeroPathElements,
-            pathIndices: new Array(26).fill(0),
+            pathIndices: new Array(22).fill(0),
           },
         ],
         outputAmounts: [0n, 0n],
@@ -1770,7 +1777,7 @@ describe("Privacy Pool - SPL Token Support", () => {
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     const zeros = offchainTokenTree.getZeros();
-    const zeroPathElements = zeros.slice(0, 26).map((z) => bytesToBigIntBE(z));
+    const zeroPathElements = zeros.slice(0, 22).map((z) => bytesToBigIntBE(z));
 
     const proof = await generateTransactionProof({
       root: onchainRoot,
@@ -1785,8 +1792,8 @@ describe("Privacy Pool - SPL Token Support", () => {
       inputPublicKeys: [dummyPubKey0, dummyPubKey1],
       inputBlindings: [dummyBlinding0, dummyBlinding1],
       inputMerklePaths: [
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
-        { pathElements: zeroPathElements, pathIndices: new Array(26).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
+        { pathElements: zeroPathElements, pathIndices: new Array(22).fill(0) },
       ],
 
       outputAmounts: [depositAmount, 0n],
