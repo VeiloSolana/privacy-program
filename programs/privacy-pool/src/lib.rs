@@ -45,6 +45,11 @@ pub struct PrivacyConfig {
     /// Minimum fee for withdrawals (in lamports) to ensure relayer compensation
     pub min_withdrawal_fee: u64,
 
+    /// Fee error margin in basis points (e.g., 500 = 5%)
+    /// Allows fee variance to prevent timing attacks where identical fees
+    /// could correlate deposits/withdrawals
+    pub fee_error_margin_bps: u16,
+
     /// Total value locked (all deposits combined)
     pub total_tvl: u64,
 
@@ -81,6 +86,7 @@ impl PrivacyConfig {
         32 +  // admin
         2 +   // fee_bps
         8 +   // min_withdrawal_fee
+        2 +   // fee_error_margin_bps
         8 +   // total_tvl
         32 +  // mint_address
         8 +   // min_deposit_amount
@@ -623,6 +629,7 @@ pub mod privacy_pool {
 
         cfg.fee_bps = fee_bps;
         cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
+        cfg.fee_error_margin_bps = 500; // Default: 5% margin to prevent timing attacks
 
         // UTXO model: no fixed denominations
         cfg.total_tvl = 0;
@@ -711,6 +718,7 @@ pub mod privacy_pool {
         max_withdraw_amount: Option<u64>,
         fee_bps: Option<u16>,
         min_withdrawal_fee: Option<u64>,
+        fee_error_margin_bps: Option<u16>,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
 
@@ -733,6 +741,11 @@ pub mod privacy_pool {
         }
         if let Some(val) = min_withdrawal_fee {
             cfg.min_withdrawal_fee = val;
+        }
+        if let Some(val) = fee_error_margin_bps {
+            // Validate fee_error_margin_bps is reasonable (max 50% = 5000 bps)
+            require!(val <= 5000, PrivacyError::ExcessiveFeeMargin);
+            cfg.fee_error_margin_bps = val;
         }
 
         // Validate ranges after updates
@@ -822,6 +835,15 @@ pub mod privacy_pool {
         require!(
             output_commitments[0] != output_commitments[1],
             PrivacyError::DuplicateCommitments
+        );
+
+        // SECURITY: Validate output commitments are not zero
+        // Zero commitments could break privacy (trivially identifiable notes)
+        // and cause issues with note recovery/indexing
+        let zero_commitment = [0u8; 32];
+        require!(
+            output_commitments[0] != zero_commitment && output_commitments[1] != zero_commitment,
+            PrivacyError::ZeroCommitment
         );
 
         // 1. Verify ext_data_hash matches provided ext_data
@@ -1240,7 +1262,11 @@ fn handle_public_amount<'info>(
             .and_then(|x| x.checked_sub(refund))
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        // Verify fee is within acceptable range
+        // SECURITY: Fee validation with error margin for timing attack protection
+        // Without variance, all withdrawals have exactly fee_bps% fee, making it easier
+        // to correlate deposits/withdrawals by matching exact amounts. The error margin
+        // allows some variance (e.g., ±5%) to obscure these correlations.
+        //
         // AUDIT-006 FIX: Calculate max_fee first to ensure withdrawal is large enough
         // to support minimum fee without truncation issues
         // AUDIT-004 FIX: Use u128 for intermediate calculation to prevent overflow
@@ -1254,6 +1280,13 @@ fn handle_public_amount<'info>(
         // Ensure the result fits in u64 (should always be true since withdrawal_amount is u64)
         require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
         let max_fee = max_fee_u128 as u64;
+
+        // Apply fee error margin: allow fees up to max_fee * (1 + margin)
+        // This provides flexibility for timing attack resistance while capping maximum fee
+        let max_fee_with_margin = max_fee
+            .checked_mul(10_000u64.saturating_add(config.fee_error_margin_bps as u64))
+            .map(|x| x / 10_000)
+            .unwrap_or(max_fee);
 
         // Ensure withdrawal amount is large enough that max_fee >= min_withdrawal_fee
         // This prevents fee evasion via small withdrawals where truncation would
@@ -1269,8 +1302,9 @@ fn handle_public_amount<'info>(
             PrivacyError::InsufficientFee
         );
 
-        // 2. Check maximum fee (prevent malicious relayer from overcharging)
-        require!(fee <= max_fee, PrivacyError::ExcessiveFee);
+        // 2. Check maximum fee with margin (prevent malicious relayer from overcharging)
+        // The margin allows variance for timing attack protection
+        require!(fee <= max_fee_with_margin, PrivacyError::ExcessiveFee);
 
         if is_token {
             // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
@@ -1493,6 +1527,8 @@ pub enum PrivacyError {
     InvalidPoolConfigRange,
     #[msg("Fee basis points exceeds maximum (100 = 1%)")]
     ExcessiveFeeBps,
+    #[msg("Fee error margin exceeds maximum (5000 = 50%)")]
+    ExcessiveFeeMargin,
     #[msg("Only authorized admin can initialize")]
     UnauthorizedAdmin,
     #[msg("Invalid tree_id (tree does not exist or exceeds num_trees)")]
@@ -1503,6 +1539,8 @@ pub enum PrivacyError {
     InvalidNullifiersForDeposit,
     #[msg("Nullifier cannot be zero for withdrawals/transfers")]
     ZeroNullifier,
+    #[msg("Output commitment cannot be zero")]
+    ZeroCommitment,
     #[msg("Token account must be owned by SPL Token Program")]
     InvalidTokenAccountOwner,
     #[msg("Vault token account must be the canonical Associated Token Account")]
