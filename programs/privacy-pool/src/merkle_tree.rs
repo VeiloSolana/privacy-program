@@ -15,7 +15,7 @@ use light_hasher::Hasher;
 /// Privacy comes from active user overlap, not just tree capacity.
 /// When scaling is needed, deploy new pool contracts (UX migration, not state migration).
 pub const MERKLE_TREE_HEIGHT: usize = 26;
-pub const ROOT_HISTORY_SIZE: usize = 256;
+pub const ROOT_HISTORY_SIZE: usize = 512;
 
 #[account(zero_copy(unsafe))]
 #[repr(C)]
