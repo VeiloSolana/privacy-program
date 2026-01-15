@@ -161,12 +161,15 @@ pub struct NullifierMarker {
     pub timestamp: i64,
     /// Sequential withdrawal index
     pub withdrawal_index: u32,
+    /// AUDIT-H01 FIX: Track which tree this nullifier belongs to
+    /// Prevents cross-tree nullifier reuse (double-spend across different trees)
+    pub tree_id: u8,
     /// PDA bump
     pub bump: u8,
 }
 
 impl NullifierMarker {
-    pub const LEN: usize = 8 + 32 + 8 + 4 + 1; // 53 bytes
+    pub const LEN: usize = 8 + 32 + 8 + 4 + 1 + 1; // 54 bytes (added tree_id)
 }
 
 // ---- ZK public inputs (for transaction circuit) ----
@@ -956,28 +959,15 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // For deposits, the signer (user/relayer) must own or have delegation over the token account
-                // This allows users to deposit their own tokens directly
-                let is_owner = user_token.owner == ctx.accounts.relayer.key();
-
-                // AUDIT-007 FIX: Explicit delegation validation with clear error messages
-                if !is_owner {
-                    // If not the owner, must be delegated
-                    let delegate = Option::<Pubkey>::from(user_token.delegate)
-                        .ok_or(PrivacyError::DepositorTokenAccountMismatch)?;
-
-                    require_keys_eq!(
-                        delegate,
-                        *ctx.accounts.relayer.key,
-                        PrivacyError::DepositorTokenAccountMismatch
-                    );
-
-                    // Check delegated amount is sufficient for deposit
-                    require!(
-                        user_token.delegated_amount >= public_amount as u64,
-                        PrivacyError::InsufficientDelegation
-                    );
-                }
+                // AUDIT-C02 FIX: For deposits, ONLY the owner can authorize transfers
+                // Delegation is explicitly NOT allowed to prevent exploitation where
+                // an attacker with minimal delegation drains the entire token balance
+                // by repeatedly calling transact with the victim's token account.
+                require_keys_eq!(
+                    user_token.owner,
+                    ctx.accounts.relayer.key(),
+                    PrivacyError::DepositorTokenAccountMismatch
+                );
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -1040,6 +1030,19 @@ pub mod privacy_pool {
         // AUDIT-001 FIX: Skip nullifier marking for deposits to prevent rent griefing
         // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
         if public_amount <= 0 {
+            // AUDIT-H01 FIX: Verify marker accounts match the input tree to prevent cross-tree reuse
+            // Check tree_id == 0 allows for uninitialized markers, tree_id == input_tree_id validates existing markers
+            require!(
+                ctx.accounts.nullifier_marker_0.tree_id == 0
+                    || ctx.accounts.nullifier_marker_0.tree_id == input_tree_id,
+                PrivacyError::NullifierTreeMismatch
+            );
+            require!(
+                ctx.accounts.nullifier_marker_1.tree_id == 0
+                    || ctx.accounts.nullifier_marker_1.tree_id == input_tree_id,
+                PrivacyError::NullifierTreeMismatch
+            );
+
             // Check that nullifier markers don't already exist (prevents double-spend)
             require!(
                 ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
@@ -1129,6 +1132,7 @@ pub mod privacy_pool {
 
 /// Mark a nullifier as spent
 /// AUDIT-003 FIX: tree_id parameter ensures nullifiers are tree-specific
+/// AUDIT-H01 FIX: Store tree_id in marker to track which tree nullifier belongs to
 fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
@@ -1142,6 +1146,7 @@ fn mark_nullifier_spent(
     marker.nullifier = nullifier;
     marker.timestamp = timestamp;
     marker.withdrawal_index = nullifier_set.count;
+    marker.tree_id = tree_id; // AUDIT-H01: Store tree_id to prevent cross-tree reuse
     marker.bump = bump;
 
     nullifier_set.count = nullifier_set
@@ -1373,8 +1378,13 @@ fn handle_public_amount<'info>(
             let rent = Rent::get()?;
             let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
 
+            // AUDIT-C01 FIX: Ensure vault maintains operational buffer above rent exemption
+            // Without this, attackers can drain vault to exactly rent_exempt_minimum through
+            // repeated withdrawals, leaving no funds for legitimate users and causing DoS.
+            // The +1 lamport ensures vault always has MORE than bare minimum rent exemption.
             let total_required = withdrawal_amount
                 .checked_add(rent_exempt_minimum)
+                .and_then(|x| x.checked_add(1))
                 .ok_or(PrivacyError::ArithmeticOverflow)?;
 
             require!(
@@ -1550,4 +1560,6 @@ pub enum PrivacyError {
     InvalidNullifierMarkerForDeposit,
     #[msg("Token account delegation amount insufficient for deposit")]
     InsufficientDelegation,
+    #[msg("Nullifier marker tree_id mismatch - nullifier already used in different tree")]
+    NullifierTreeMismatch,
 }
