@@ -183,11 +183,6 @@ pub fn verify_transaction_groth16(
     public_inputs[6] = reduce_to_field_be(inputs.output_commitments[0]);
     public_inputs[7] = reduce_to_field_be(inputs.output_commitments[1]);
 
-    // AUDIT-008 FIX: Debug logging removed to prevent compute budget exhaustion
-    // The zk-verify-debug feature was removed as compile-time debug flags can be
-    // accidentally enabled in production, allowing attackers to spam failed proofs
-    // and exhaust compute budget. For debugging, use off-chain verification tools instead.
-
     // ----- 2. Re-encode proof_a: G1 -> 64-byte alt_bn128 layout -----
     let g1_point = G1::deserialize_with_mode(
         &*[&change_endianness(&proof.proof_a[..]), &[0u8][..]].concat(),
