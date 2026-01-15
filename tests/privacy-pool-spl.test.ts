@@ -49,6 +49,13 @@ import {
   fetchAndDisplayEvents,
 } from "./test-helpers";
 
+// Helper: Encode tree_id as 2-byte little-endian (u16)
+function encodeTreeId(treeId: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(treeId, 0);
+  return buffer;
+}
+
 // Helper function to derive nullifier marker PDA with tree_id
 // New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
 function deriveNullifierMarkerPDA(
@@ -61,7 +68,7 @@ function deriveNullifierMarkerPDA(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      Buffer.from([treeId]),
+      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId
@@ -1145,7 +1152,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       [
         Buffer.from("privacy_note_tree_v3"),
         testMint.toBuffer(),
-        Buffer.from([destinationTreeId]),
+        encodeTreeId(destinationTreeId),
       ],
       program.programId
     );

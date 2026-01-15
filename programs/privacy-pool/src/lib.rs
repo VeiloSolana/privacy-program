@@ -24,7 +24,7 @@ pub const MAX_RELAYERS: usize = 16;
 /// Maximum number of Merkle trees per pool
 /// Multiple trees improve performance through parallelism
 /// and reduce congestion on single tree updates
-pub const MAX_MERKLE_TREES: u8 = 16;
+pub const MAX_MERKLE_TREES: u16 = 10000;
 
 /// Maximum fee basis points: 100 = 1%
 pub const MAX_FEE_BPS: u16 = 100;
@@ -73,10 +73,10 @@ pub struct PrivacyConfig {
     pub relayers: [Pubkey; MAX_RELAYERS],
 
     /// Multi-tree support: number of active Merkle trees
-    pub num_trees: u8,
+    pub num_trees: u16,
 
     /// Suggested tree index for next deposit (round-robin)
-    pub next_tree_index: u8,
+    pub next_tree_index: u16,
 }
 
 impl PrivacyConfig {
@@ -95,8 +95,8 @@ impl PrivacyConfig {
         8 +   // max_withdraw_amount
         1 +   // num_relayers
         32 * MAX_RELAYERS +  // relayers
-        1 +   // num_trees
-        1; // next_tree_index (647 bytes total)
+        2 +   // num_trees (u16)
+        2; // next_tree_index (u16) (649 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
@@ -109,7 +109,7 @@ impl PrivacyConfig {
     /// Note: Clients should check tree capacity before submitting deposits.
     /// If a tree is full (next_index + 2 >= 2^height), use a different tree_id
     /// or call add_merkle_tree to create a new tree.
-    pub fn get_next_tree_id(&mut self) -> u8 {
+    pub fn get_next_tree_id(&mut self) -> u16 {
         let tree_id = self.next_tree_index;
         self.next_tree_index = (self.next_tree_index + 1) % self.num_trees;
         tree_id
@@ -167,13 +167,13 @@ pub struct NullifierMarker {
     /// Sequential withdrawal index
     pub withdrawal_index: u32,
     /// Tree ID this nullifier belongs to (prevents cross-tree double-spend)
-    pub tree_id: u8,
+    pub tree_id: u16,
     /// PDA bump
     pub bump: u8,
 }
 
 impl NullifierMarker {
-    pub const LEN: usize = 8 + 32 + 8 + 4 + 1 + 1; // 54 bytes (added tree_id)
+    pub const LEN: usize = 8 + 32 + 8 + 4 + 2 + 1; // 55 bytes (tree_id is now u16)
 }
 
 // ---- ZK public inputs (for transaction circuit) ----
@@ -326,7 +326,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[0u8]],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &0u16.to_le_bytes()],
         bump,
         space = MerkleTreeAccount::LEN,
     )]
@@ -407,7 +407,7 @@ pub struct GlobalConfigAdmin<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey, tree_id: u8)]
+#[instruction(mint_address: Pubkey, tree_id: u16)]
 pub struct AddMerkleTree<'info> {
     #[account(
         mut,
@@ -420,7 +420,7 @@ pub struct AddMerkleTree<'info> {
     #[account(
         init,
         payer = admin,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[tree_id]],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &tree_id.to_le_bytes()],
         bump,
         space = MerkleTreeAccount::LEN,
     )]
@@ -436,8 +436,8 @@ pub struct AddMerkleTree<'info> {
 #[derive(Accounts)]
 #[instruction(
     root: [u8; 32],
-    input_tree_id: u8,
-    output_tree_id: u8,
+    input_tree_id: u16,
+    output_tree_id: u16,
     public_amount: i64,
     ext_data_hash: [u8; 32],
     mint_address: Pubkey,
@@ -470,7 +470,7 @@ pub struct Transact<'info> {
     /// Input tree - where input notes came from (for root validation)
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[input_tree_id]],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes()],
         bump,
     )]
     pub input_tree: AccountLoader<'info, MerkleTreeAccount>,
@@ -478,7 +478,7 @@ pub struct Transact<'info> {
     /// Output tree - where new output commitments will be inserted
     #[account(
         mut,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &[output_tree_id]],
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &output_tree_id.to_le_bytes()],
         bump,
     )]
     pub output_tree: AccountLoader<'info, MerkleTreeAccount>,
@@ -495,7 +495,7 @@ pub struct Transact<'info> {
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), &[input_tree_id], input_nullifier_0.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -506,7 +506,7 @@ pub struct Transact<'info> {
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), &[input_tree_id], input_nullifier_1.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -647,7 +647,7 @@ pub mod privacy_pool {
     pub fn add_merkle_tree(
         ctx: Context<AddMerkleTree>,
         _mint_address: Pubkey,
-        tree_id: u8,
+        tree_id: u16,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
 
@@ -768,8 +768,8 @@ pub mod privacy_pool {
     pub fn transact(
         ctx: Context<Transact>,
         root: [u8; 32],
-        input_tree_id: u8,
-        output_tree_id: u8,
+        input_tree_id: u16,
+        output_tree_id: u16,
         public_amount: i64,
         ext_data_hash: [u8; 32],
         mint_address: Pubkey,
@@ -1085,7 +1085,7 @@ fn mark_nullifier_spent(
     nullifier: [u8; 32],
     bump: u8,
     mint_address: Pubkey,
-    tree_id: u8,
+    tree_id: u16,
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
@@ -1388,7 +1388,7 @@ pub struct CommitmentEvent {
     pub new_root: [u8; 32],
     pub timestamp: i64,
     pub mint_address: Pubkey,
-    pub tree_id: u8,
+    pub tree_id: u16,
 }
 
 #[event]
@@ -1396,7 +1396,7 @@ pub struct NullifierSpent {
     pub nullifier: [u8; 32],
     pub timestamp: i64,
     pub mint_address: Pubkey,
-    pub tree_id: u8,
+    pub tree_id: u16,
 }
 
 // ---- Errors ----

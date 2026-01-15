@@ -154,6 +154,13 @@ function randomBytes32(): Uint8Array {
   return Keypair.generate().publicKey.toBytes();
 }
 
+// Helper: Encode tree_id as 2-byte little-endian (u16)
+function encodeTreeId(treeId: number): Buffer {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(treeId, 0);
+  return buffer;
+}
+
 // Helper: Derive nullifier marker PDA with tree_id
 // New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
 function deriveNullifierMarkerPDA(
@@ -166,7 +173,7 @@ function deriveNullifierMarkerPDA(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      Buffer.from([treeId]),
+      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId
@@ -813,7 +820,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       [
         Buffer.from("privacy_note_tree_v3"),
         SOL_MINT.toBuffer(),
-        Buffer.from([0]),
+        encodeTreeId(0),
       ],
       program.programId
     );
@@ -3718,7 +3725,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       [
         Buffer.from("privacy_note_tree_v3"),
         SOL_MINT.toBuffer(),
-        Buffer.from([destinationTreeId]),
+        encodeTreeId(destinationTreeId),
       ],
       program.programId
     );
