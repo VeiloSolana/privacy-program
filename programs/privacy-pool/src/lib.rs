@@ -10,7 +10,7 @@ pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
-declare_id!("G4jVg1TydNuzQQZojYYVekaGYFZVMAuimC8KWVVKzWfa");
+declare_id!("6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU");
 
 // ---- Constants ----
 
@@ -412,14 +412,13 @@ pub struct AddMerkleTree<'info> {
     #[account(
         mut,
         seeds = [b"privacy_config_v3", mint_address.as_ref()],
-        bump = config.bump,
-        has_one = admin
+        bump = config.bump
     )]
     pub config: Account<'info, PrivacyConfig>,
 
     #[account(
         init,
-        payer = admin,
+        payer = payer,
         seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &tree_id.to_le_bytes()],
         bump,
         space = MerkleTreeAccount::LEN,
@@ -427,7 +426,7 @@ pub struct AddMerkleTree<'info> {
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(mut)]
-    pub admin: Signer<'info>,
+    pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -650,6 +649,13 @@ pub mod privacy_pool {
         tree_id: u16,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
+        let payer = &ctx.accounts.payer;
+
+        // Validate payer is either admin or relayer
+        require!(
+            payer.key() == cfg.admin || cfg.is_relayer(&payer.key()),
+            PrivacyError::Unauthorized
+        );
 
         // Validate tree_id is sequential
         require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
@@ -1025,7 +1031,7 @@ pub mod privacy_pool {
 
         // Check if output tree has capacity for 2 new leaves
         let max_capacity = 1u64 << (output_tree.height as u64);
-        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        let remaining_capacity: u64 = max_capacity.saturating_sub(output_tree.next_index);
         require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
 
         let leaf_index_0 = output_tree.next_index;
@@ -1490,6 +1496,8 @@ pub enum PrivacyError {
     ExcessiveFeeMargin,
     #[msg("Only authorized admin can initialize")]
     UnauthorizedAdmin,
+    #[msg("Unauthorized: only admin or relayers can perform this action")]
+    Unauthorized,
     #[msg("Invalid tree_id (tree does not exist or exceeds num_trees)")]
     InvalidTreeId,
     #[msg("Maximum number of Merkle trees reached for this pool")]

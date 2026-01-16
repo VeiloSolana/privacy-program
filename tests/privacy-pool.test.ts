@@ -3713,6 +3713,21 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       "Testing multi-tree architecture with separate input/output trees"
     );
 
+    // Create and register a relayer for this test
+    const testRelayer = Keypair.generate();
+    await airdropAndConfirm(
+      provider,
+      testRelayer.publicKey,
+      2 * LAMPORTS_PER_SOL
+    );
+    await (program.methods as any)
+      .addRelayer(SOL_MINT, testRelayer.publicKey)
+      .accounts({ config, admin: wallet.publicKey })
+      .rpc();
+    console.log(
+      `\n✅ Test relayer registered: ${testRelayer.publicKey.toBase58()}`
+    );
+
     // Step 1: Fetch current config to get next sequential tree ID
     // We will use this new tree as the DESTINATION (Output Tree)
     const currentConfig = await program.account.privacyConfig.fetch(config);
@@ -3730,23 +3745,72 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId
     );
 
-    // Create the tree
+    // Create the tree using relayer (instead of admin)
     try {
       await (program.methods as any)
         .addMerkleTree(SOL_MINT, destinationTreeId)
         .accounts({
           config,
           noteTree: noteTreeDestination,
-          admin: wallet.publicKey,
+          payer: testRelayer.publicKey,
           systemProgram: SystemProgram.programId,
         })
+        .signers([testRelayer])
         .rpc();
       console.log(
-        `✅ Destination tree created successfully: ${noteTreeDestination.toBase58()}`
+        `✅ Destination tree created successfully by relayer: ${noteTreeDestination.toBase58()}`
       );
     } catch (e) {
       // Should not happen with random ID, but log if it does
       console.log("⚠️  Tree already exists (unlikely with random ID)");
+    }
+
+    // Verify unauthorized wallet CANNOT create tree
+    console.log(
+      `\n🔒 Verifying access control: unauthorized wallet cannot create tree...`
+    );
+    const unauthorizedWallet = Keypair.generate();
+    await airdropAndConfirm(
+      provider,
+      unauthorizedWallet.publicKey,
+      1 * LAMPORTS_PER_SOL
+    );
+
+    const unauthorizedTreeId = currentConfig.numTrees + 1;
+    const [unauthorizedTreePDA] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("privacy_note_tree_v3"),
+        SOL_MINT.toBuffer(),
+        encodeTreeId(unauthorizedTreeId),
+      ],
+      program.programId
+    );
+
+    try {
+      await (program.methods as any)
+        .addMerkleTree(SOL_MINT, unauthorizedTreeId)
+        .accounts({
+          config,
+          noteTree: unauthorizedTreePDA,
+          payer: unauthorizedWallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([unauthorizedWallet])
+        .rpc();
+      throw new Error("Expected unauthorized wallet to fail!");
+    } catch (e: any) {
+      if (e.message.includes("Expected unauthorized wallet to fail")) {
+        throw e;
+      }
+      // Expected error - verify it's the Unauthorized error
+      const isUnauthorized =
+        e.toString().includes("Unauthorized") || e.toString().includes("6000"); // Unauthorized error code
+      if (isUnauthorized) {
+        console.log(`   ✅ Unauthorized wallet correctly rejected`);
+      } else {
+        console.log(`   ⚠️  Unexpected error: ${e.toString()}`);
+        throw e;
+      }
     }
 
     // Create local offchain tree to track this fresh tree
