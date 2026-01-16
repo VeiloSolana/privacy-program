@@ -115,18 +115,18 @@ describe("Privacy Pool - SPL Token Support", () => {
     // Create test token mint
     console.log("Creating test token mint...");
     testMint = new PublicKey("A4jyQhHNRW5kFAdGN8ZnXB8HHW5kXJU4snGddS5UpdSq");
-    try {
-      testMint = await createMint(
-        provider.connection,
-        wallet.payer,
-        wallet.publicKey,
-        null,
-        MINT_DECIMALS
-      );
-    } catch (error) {
-      // Mint already exists, use the hardcoded address
-      console.log("Using existing test mint");
-    }
+    // try {
+    //   testMint = await createMint(
+    //     provider.connection,
+    //     wallet.payer,
+    //     wallet.publicKey,
+    //     null,
+    //     MINT_DECIMALS
+    //   );
+    // } catch (error) {
+    //   // Mint already exists, use the hardcoded address
+    //   console.log("Using existing test mint");
+    // }
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
     // Get PDAs for token pool (v3 with mint_address in seeds)
@@ -1139,6 +1139,21 @@ describe("Privacy Pool - SPL Token Support", () => {
       "Testing multi-tree architecture with separate input/output trees for SPL tokens"
     );
 
+    // Create and register a relayer for this test
+    const testRelayer = Keypair.generate();
+    await airdropAndConfirm(
+      provider,
+      testRelayer.publicKey,
+      2 * LAMPORTS_PER_SOL
+    );
+    await (program.methods as any)
+      .addRelayer(testMint, testRelayer.publicKey)
+      .accounts({ config: tokenConfig, admin: wallet.publicKey })
+      .rpc();
+    console.log(
+      `\n✅ Test relayer registered: ${testRelayer.publicKey.toBase58()}`
+    );
+
     // Step 1: Fetch current config to get next sequential tree ID
     const currentConfig = await program.account.privacyConfig.fetch(
       tokenConfig
@@ -1157,22 +1172,71 @@ describe("Privacy Pool - SPL Token Support", () => {
       program.programId
     );
 
-    // Create the tree
+    // Create the tree using relayer (instead of admin)
     try {
       await (program.methods as any)
         .addMerkleTree(testMint, destinationTreeId)
         .accounts({
           config: tokenConfig,
           noteTree: tokenNoteTreeDestination,
-          admin: wallet.publicKey,
+          payer: testRelayer.publicKey,
           systemProgram: SystemProgram.programId,
         })
+        .signers([testRelayer])
         .rpc();
       console.log(
-        `✅ Destination SPL tree created: ${tokenNoteTreeDestination.toBase58()}`
+        `✅ Destination SPL tree created by relayer: ${tokenNoteTreeDestination.toBase58()}`
       );
     } catch (e) {
       console.log("⚠️  Tree already exists");
+    }
+
+    // Verify unauthorized wallet CANNOT create tree
+    console.log(
+      `\n🔒 Verifying access control: unauthorized wallet cannot create SPL tree...`
+    );
+    const unauthorizedWallet = Keypair.generate();
+    await airdropAndConfirm(
+      provider,
+      unauthorizedWallet.publicKey,
+      1 * LAMPORTS_PER_SOL
+    );
+
+    const unauthorizedTreeId = currentConfig.numTrees + 1;
+    const [unauthorizedTreePDA] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("privacy_note_tree_v3"),
+        testMint.toBuffer(),
+        encodeTreeId(unauthorizedTreeId),
+      ],
+      program.programId
+    );
+
+    try {
+      await (program.methods as any)
+        .addMerkleTree(testMint, unauthorizedTreeId)
+        .accounts({
+          config: tokenConfig,
+          noteTree: unauthorizedTreePDA,
+          payer: unauthorizedWallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([unauthorizedWallet])
+        .rpc();
+      throw new Error("Expected unauthorized wallet to fail!");
+    } catch (e: any) {
+      if (e.message.includes("Expected unauthorized wallet to fail")) {
+        throw e;
+      }
+      // Expected error - verify it's the Unauthorized error
+      const isUnauthorized =
+        e.toString().includes("Unauthorized") || e.toString().includes("6000"); // Unauthorized error code
+      if (isUnauthorized) {
+        console.log(`   ✅ Unauthorized wallet correctly rejected`);
+      } else {
+        console.log(`   ⚠️  Unexpected error: ${e.toString()}`);
+        throw e;
+      }
     }
 
     // Create local offchain tree to track this fresh tree
