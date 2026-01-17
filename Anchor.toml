@@ -21,11 +21,11 @@ url = "https://api.apr.dev"
 
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "/Users/admin/.config/solana/id.json"
 
 [test]
 startup_wait = 15000
 
 [scripts]
-test = "npm run test:spl"
+test = "npm run test:sol"

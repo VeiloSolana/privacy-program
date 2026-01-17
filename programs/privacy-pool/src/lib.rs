@@ -10,13 +10,42 @@ pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
+#[cfg(any(
+    feature = "devnet",
+    feature = "localnet",
+    feature = "localnet-mint-checked"
+))]
 declare_id!("6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU");
+
+#[cfg(not(any(
+    feature = "devnet",
+    feature = "localnet",
+    feature = "localnet-mint-checked"
+)))]
+declare_id!("9fhQBbumKEFuXtMBDw8AaQyAjCorLGJQiS3skWZdQyQD");
 
 // ---- Constants ----
 
 /// Authorized admin address that can initialize pools
 /// This should be set to your deployment wallet address
-pub const AUTHORIZED_ADMIN: Pubkey = pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP");
+#[cfg(any(feature = "localnet", feature = "localnet-mint-checked", test))]
+pub const AUTHORIZED_ADMIN: Option<Pubkey> = None;
+
+#[cfg(all(
+    feature = "devnet",
+    not(any(feature = "localnet", feature = "localnet-mint-checked", test))
+))]
+pub const AUTHORIZED_ADMIN: Option<Pubkey> =
+    Some(pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP"));
+
+#[cfg(not(any(
+    feature = "localnet",
+    feature = "localnet-mint-checked",
+    feature = "devnet",
+    test
+)))]
+pub const AUTHORIZED_ADMIN: Option<Pubkey> =
+    Some(pubkey!("AWexibGxNFKTa1b5R5MN4PJr9HWnWRwf8EW9g8cLx3dM"));
 
 pub type PoseidonHasher = Poseidon;
 pub const MAX_RELAYERS: usize = 16;
@@ -28,6 +57,33 @@ pub const MAX_MERKLE_TREES: u16 = 10000;
 
 /// Maximum fee basis points: 100 = 1%
 pub const MAX_FEE_BPS: u16 = 100;
+
+/// Allow all SPL tokens for testing on localnet
+#[cfg(any(feature = "localnet", test))]
+pub const ALLOW_ALL_SPL_TOKENS: bool = true;
+
+#[cfg(not(any(feature = "localnet", test)))]
+pub const ALLOW_ALL_SPL_TOKENS: bool = false;
+
+/// Devnet allowed tokens
+#[cfg(feature = "devnet")]
+pub const ALLOWED_TOKENS: &[Pubkey] = &[
+    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC
+    pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT
+    pubkey!("6zxkY8UygHKBf64LJDXnzcYr9wdvyqScmj7oGPBFw58Z"), // ORE
+    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"),  // ZEC
+    pubkey!("5MvqBFU5zeHaEfRuAFW2RhqidHLb7Ejsa6sUwPQQXcj1"), // stORE
+];
+
+/// Mainnet allowed tokens
+#[cfg(not(feature = "devnet"))]
+pub const ALLOWED_TOKENS: &[Pubkey] = &[
+    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
+    pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
+    pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp"),  // ORE
+    pubkey!("A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS"), // ZEC
+    pubkey!("sTorERYB6xAZ1SSbwpK3zoK2EEwbBrc7TZAzg1uCGiH"),  // stORE
+];
 
 // ---- Accounts ----
 
@@ -341,7 +397,7 @@ pub struct Initialize<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    #[account(mut, address = AUTHORIZED_ADMIN @ PrivacyError::UnauthorizedAdmin)]
+    #[account(mut)]
     pub admin: Signer<'info>,
 
     pub system_program: Program<'info, System>,
@@ -387,7 +443,7 @@ pub struct InitializeGlobalConfig<'info> {
     )]
     pub global_config: Account<'info, GlobalConfig>,
 
-    #[account(mut, address = AUTHORIZED_ADMIN @ PrivacyError::UnauthorizedAdmin)]
+    #[account(mut)]
     pub admin: Signer<'info>,
 
     pub system_program: Program<'info, System>,
@@ -582,6 +638,14 @@ pub mod privacy_pool {
         min_withdraw_amount: Option<u64>,
         max_withdraw_amount: Option<u64>,
     ) -> Result<()> {
+        // Check authorization
+        if let Some(admin_key) = AUTHORIZED_ADMIN {
+            require!(
+                ctx.accounts.admin.key().eq(&admin_key),
+                PrivacyError::UnauthorizedAdmin
+            );
+        }
+
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -748,6 +812,14 @@ pub mod privacy_pool {
     }
 
     pub fn initialize_global_config(ctx: Context<InitializeGlobalConfig>) -> Result<()> {
+        // Check authorization
+        if let Some(admin_key) = AUTHORIZED_ADMIN {
+            require!(
+                ctx.accounts.admin.key().eq(&admin_key),
+                PrivacyError::UnauthorizedAdmin
+            );
+        }
+
         let global_cfg = &mut ctx.accounts.global_config;
 
         global_cfg.bump = ctx.bumps.global_config;
@@ -872,7 +944,15 @@ pub mod privacy_pool {
             PrivacyError::InvalidMintAddress
         );
 
-        // 4a. Validate token accounts if using SPL tokens
+        // 4a. Validate SPL token is allowed (if not SOL)
+        if is_token_mint(&mint_address) {
+            require!(
+                ALLOW_ALL_SPL_TOKENS || ALLOWED_TOKENS.contains(&mint_address),
+                PrivacyError::InvalidMintAddress
+            );
+        }
+
+        // 4b. Validate token accounts if using SPL tokens
         if is_token_mint(&mint_address) {
             // Verify token program is provided
             require_keys_eq!(

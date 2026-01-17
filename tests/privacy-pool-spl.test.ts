@@ -115,18 +115,18 @@ describe("Privacy Pool - SPL Token Support", () => {
     // Create test token mint
     console.log("Creating test token mint...");
     testMint = new PublicKey("A4jyQhHNRW5kFAdGN8ZnXB8HHW5kXJU4snGddS5UpdSq");
-    // try {
-    //   testMint = await createMint(
-    //     provider.connection,
-    //     wallet.payer,
-    //     wallet.publicKey,
-    //     null,
-    //     MINT_DECIMALS
-    //   );
-    // } catch (error) {
-    //   // Mint already exists, use the hardcoded address
-    //   console.log("Using existing test mint");
-    // }
+    try {
+      testMint = await createMint(
+        provider.connection,
+        wallet.payer,
+        wallet.publicKey,
+        null,
+        MINT_DECIMALS
+      );
+    } catch (error) {
+      // Mint already exists, use the hardcoded address
+      console.log("Using existing test mint");
+    }
     console.log(`✅ Test mint created: ${testMint.toBase58()}`);
 
     // Get PDAs for token pool (v3 with mint_address in seeds)

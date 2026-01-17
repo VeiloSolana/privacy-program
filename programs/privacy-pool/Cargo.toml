@@ -18,6 +18,9 @@ zk-verify = []
 # AUDIT-008 FIX: zk-verify-debug feature removed to prevent accidental production use
 # that could enable compute budget exhaustion attacks via expensive debug logging
 idl-build = ["anchor-lang/idl-build"]
+devnet = []
+localnet = []
+localnet-mint-checked = []
 
 [dependencies]
 indexmap = { workspace = true }
