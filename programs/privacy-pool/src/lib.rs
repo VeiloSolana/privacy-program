@@ -10,42 +10,19 @@ pub mod zk;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
-#[cfg(any(
-    feature = "devnet",
-    feature = "localnet",
-    feature = "localnet-mint-checked"
-))]
 declare_id!("6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU");
-
-#[cfg(not(any(
-    feature = "devnet",
-    feature = "localnet",
-    feature = "localnet-mint-checked"
-)))]
-declare_id!("9fhQBbumKEFuXtMBDw8AaQyAjCorLGJQiS3skWZdQyQD");
 
 // ---- Constants ----
 
 /// Authorized admin address that can initialize pools
-/// This should be set to your deployment wallet address
-#[cfg(any(feature = "localnet", feature = "localnet-mint-checked", test))]
+/// For localnet/test: None (any wallet can initialize for testing)
+/// For devnet/mainnet: Specific authorized wallet only
+#[cfg(any(feature = "localnet", test))]
 pub const AUTHORIZED_ADMIN: Option<Pubkey> = None;
 
-#[cfg(all(
-    feature = "devnet",
-    not(any(feature = "localnet", feature = "localnet-mint-checked", test))
-))]
+#[cfg(not(any(feature = "localnet", test)))]
 pub const AUTHORIZED_ADMIN: Option<Pubkey> =
     Some(pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP"));
-
-#[cfg(not(any(
-    feature = "localnet",
-    feature = "localnet-mint-checked",
-    feature = "devnet",
-    test
-)))]
-pub const AUTHORIZED_ADMIN: Option<Pubkey> =
-    Some(pubkey!("AWexibGxNFKTa1b5R5MN4PJr9HWnWRwf8EW9g8cLx3dM"));
 
 pub type PoseidonHasher = Poseidon;
 pub const MAX_RELAYERS: usize = 16;
@@ -65,18 +42,18 @@ pub const ALLOW_ALL_SPL_TOKENS: bool = true;
 #[cfg(not(any(feature = "localnet", test)))]
 pub const ALLOW_ALL_SPL_TOKENS: bool = false;
 
-/// Devnet allowed tokens
-#[cfg(feature = "devnet")]
+/// Devnet/Localnet allowed tokens (test networks)
+#[cfg(any(feature = "devnet", feature = "localnet"))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
-    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC
-    pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT
-    pubkey!("6zxkY8UygHKBf64LJDXnzcYr9wdvyqScmj7oGPBFw58Z"), // ORE
-    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"),  // ZEC
-    pubkey!("5MvqBFU5zeHaEfRuAFW2RhqidHLb7Ejsa6sUwPQQXcj1"), // stORE
+    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC (devnet)
+    pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT (devnet)
+    pubkey!("6zxkY8UygHKBf64LJDXnzcYr9wdvyqScmj7oGPBFw58Z"), // ORE (devnet)
+    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"),  // ZEC (devnet)
+    pubkey!("5MvqBFU5zeHaEfRuAFW2RhqidHLb7Ejsa6sUwPQQXcj1"), // stORE (devnet)
 ];
 
-/// Mainnet allowed tokens
-#[cfg(not(feature = "devnet"))]
+/// Mainnet allowed tokens (production)
+#[cfg(not(any(feature = "devnet", feature = "localnet")))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
     pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
