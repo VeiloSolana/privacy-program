@@ -8,7 +8,11 @@
     "check-pool": "ts-node scripts/check-pool.ts",
     "init-global-config": "ts-node scripts/initialize-global-config.ts",
     "update-global-config": "ts-node scripts/update-global-config.ts",
-    "update-pool": "ts-node scripts/update-pool-config.ts"
+    "update-pool": "ts-node scripts/update-pool-config.ts",
+    "clone-jupiter": "node scripts/clone-jupiter-route.js",
+    "clone-jupiter:start": "node scripts/clone-jupiter-route.js --start",
+    "setup-jupiter-env": "./scripts/setup-jupiter-test-env.sh",
+    "test:jupiter": "ts-node scripts/test-jupiter-integration.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -19,6 +23,7 @@
     "bs58": "^6.0.0",
     "circomlibjs": "^0.1.7",
     "commander": "^11.1.0",
+    "node-fetch": "^2.7.0",
     "snarkjs": "^0.7.5"
   },
   "devDependencies": {
@@ -28,6 +33,7 @@
     "@types/circomlibjs": "^0.1.6",
     "@types/mocha": "^10.0.10",
     "@types/node": "^24.10.1",
+    "@types/node-fetch": "^2.6.13",
     "@types/snarkjs": "^0.7.9",
     "anchor-client-gen": "^0.28.1",
     "chai": "^4.3.4",

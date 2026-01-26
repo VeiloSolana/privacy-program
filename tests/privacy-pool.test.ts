@@ -843,6 +843,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
   it("initializes the privacy pool (UTXO model)", async () => {
     try {
+      console.log("Initializing privacy pool...");
+      console.log(wallet.publicKey.toBase58());
       await (program.methods as any)
         .initialize(
           feeBps,
