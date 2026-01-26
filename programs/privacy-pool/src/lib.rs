@@ -5,6 +5,7 @@ use light_hasher::Poseidon;
 
 pub mod groth16;
 pub mod merkle_tree;
+pub mod swap;
 pub mod vk_constants;
 pub mod zk;
 
@@ -1137,12 +1138,45 @@ pub mod privacy_pool {
 
         Ok(())
     }
+
+    /// Atomic cross-pool private swap
+    /// Consumes notes from source pool, swaps via Jupiter, creates notes in dest pool
+    /// All in one transaction - see swap.rs for implementation details
+    pub fn transact_swap(
+        ctx: Context<swap::TransactSwap>,
+        source_root: [u8; 32],
+        source_tree_id: u16,
+        source_mint: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        dest_tree_id: u16,
+        dest_mint: Pubkey,
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        swap_params: swap::SwapParams,
+        ext_data: ExtData,
+    ) -> Result<()> {
+        swap::transact_swap(
+            ctx,
+            source_root,
+            source_tree_id,
+            source_mint,
+            input_nullifier_0,
+            input_nullifier_1,
+            dest_tree_id,
+            dest_mint,
+            output_commitment_0,
+            output_commitment_1,
+            swap_params,
+            ext_data,
+        )
+    }
 }
 
 // ---- Helper Functions ----
 
 /// Mark a nullifier as spent (tree-specific to prevent cross-tree reuse)
-fn mark_nullifier_spent(
+pub fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
     nullifier: [u8; 32],
