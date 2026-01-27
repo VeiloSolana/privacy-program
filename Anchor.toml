@@ -5,7 +5,7 @@ solana_version = "2.2.0"
 [features]
 seeds = false
 skip-lint = false
-privacy_pool = ["zk-verify"]
+privacy_pool = ["zk-verify", "localnet"]
 
 [programs.localnet]
 privacy_pool = "6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU"
@@ -27,5 +27,44 @@ wallet = "/Users/admin/.config/solana/id.json"
 [test]
 startup_wait = 15000
 
+[test.validator]
+url = "https://api.mainnet-beta.solana.com"
+
+# Clone Raydium CPMM Program
+[[test.validator.clone]]
+address = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
+
+# Clone SOL/USDC CPMM Pool State
+[[test.validator.clone]]
+address = "7JuwJuNU88gurFnyWeiyGKbFmExMWcmRZntn9imEzdny"
+
+# Clone Pool Token Vault 0 (SOL)
+[[test.validator.clone]]
+address = "7VLUXrnSSDo9BfCa4NWaQs68g7ddDY1sdXBKW6Xswj9Y"
+
+# Clone Pool Token Vault 1 (USDC)
+[[test.validator.clone]]
+address = "3rzbbW5Q8MA7sCaowf28hNgACNPecdS2zceWy7Ptzua9"
+
+# Clone WSOL Mint
+[[test.validator.clone]]
+address = "So11111111111111111111111111111111111111112"
+
+# Clone USDC Mint
+[[test.validator.clone]]
+address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# Clone LP Mint
+[[test.validator.clone]]
+address = "Ff68JGeEiUEF859B2xEaPX82vuFeuwxqoxGNHTZPAuKR"
+
+# Clone AMM Config
+[[test.validator.clone]]
+address = "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2"
+
+# Clone Observation State (derived PDA for the pool)
+[[test.validator.clone]]
+address = "4MYrPgjgFceyhtwhG1ZX8UVb4wn1aQB5wzMimtFqg7U8"
+
 [scripts]
-test = "npm run test:sol"
+test = "npm run test:swap"
