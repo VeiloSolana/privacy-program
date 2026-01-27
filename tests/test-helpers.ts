@@ -67,15 +67,15 @@ export class InMemoryNoteStorage {
 
 export const WASM_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_js/transaction.wasm"
+  "zk/circuits/transaction/transaction_js/transaction.wasm",
 );
 export const ZKEY_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_final.zkey"
+  "zk/circuits/transaction/transaction_final.zkey",
 );
 export const VK_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_verification_key.json"
+  "zk/circuits/transaction/transaction_verification_key.json",
 );
 
 // =============================================================================
@@ -102,7 +102,7 @@ export function makeProvider(): AnchorProvider {
 export async function airdropAndConfirm(
   provider: AnchorProvider,
   pubkey: PublicKey,
-  amount: number
+  amount: number,
 ) {
   const sig = await provider.connection.requestAirdrop(pubkey, amount);
   const latestBlockhash = await provider.connection.getLatestBlockhash();
@@ -121,13 +121,13 @@ export async function createAndFundTokenAccount(
   provider: AnchorProvider,
   mint: PublicKey,
   owner: PublicKey,
-  amount: number
+  amount: number,
 ): Promise<PublicKey> {
   const tokenAccount = await getOrCreateAssociatedTokenAccount(
     provider.connection,
     (provider.wallet as Wallet).payer,
     mint,
-    owner
+    owner,
   );
 
   if (amount > 0) {
@@ -137,7 +137,7 @@ export async function createAndFundTokenAccount(
       mint,
       tokenAccount.address,
       (provider.wallet as Wallet).payer,
-      amount
+      amount,
     );
   }
 
@@ -151,7 +151,7 @@ export function bytesToBigIntBE(bytes: Uint8Array): bigint {
 // Helper: Reduce value modulo BN254 Fr field
 export function reduceToField(bytes: Uint8Array): bigint {
   const FR_MODULUS = BigInt(
-    "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+    "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
   );
   const value = BigInt("0x" + Buffer.from(bytes).toString("hex"));
   return value % FR_MODULUS;
@@ -172,10 +172,10 @@ export function computeExtDataHash(
     relayer: PublicKey;
     fee: BN;
     refund: BN;
-  }
+  },
 ): Uint8Array {
   const recipientField = poseidon.F.e(
-    reduceToField(extData.recipient.toBytes())
+    reduceToField(extData.recipient.toBytes()),
   );
   const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
   const feeField = poseidon.F.e(extData.fee.toString());
@@ -196,13 +196,13 @@ export function computeCommitment(
   amount: bigint,
   ownerPubkey: bigint, // Already derived from private key
   blinding: Uint8Array,
-  mintAddress: PublicKey
+  mintAddress: PublicKey,
 ): Uint8Array {
   const amountField = poseidon.F.e(amount.toString());
   const ownerField = poseidon.F.e(ownerPubkey.toString());
   const blindingField = poseidon.F.e(bytesToBigIntBE(blinding));
   const mintField = poseidon.F.e(
-    reduceToField(mintAddress.toBytes()).toString()
+    reduceToField(mintAddress.toBytes()).toString(),
   );
 
   // Poseidon hash with 4 inputs (amount, pubkey, blinding, mint)
@@ -224,7 +224,7 @@ export function computeNullifier(
   poseidon: any,
   commitment: Uint8Array,
   leafIndex: number,
-  privateKey: Uint8Array
+  privateKey: Uint8Array,
 ): Uint8Array {
   const commitmentField = poseidon.F.e(bytesToBigIntBE(commitment));
   const indexField = poseidon.F.e(BigInt(leafIndex));
@@ -242,7 +242,7 @@ export function computeNullifier(
 export function createDummyInput(
   poseidon: any,
   owner: bigint,
-  mintAddress: PublicKey
+  mintAddress: PublicKey,
 ) {
   const amount = 0n;
   const blinding = new Uint8Array(32).fill(0);
@@ -254,7 +254,7 @@ export function createDummyInput(
     amount,
     owner,
     blinding,
-    mintAddress
+    mintAddress,
   );
   const nullifier = computeNullifier(poseidon, commitment, 0, privateKey);
 
@@ -505,7 +505,7 @@ export async function generateTransactionProof(inputs: {
   inputBlindings: [Uint8Array, Uint8Array];
   inputMerklePaths: [
     { pathElements: bigint[]; pathIndices: number[] },
-    { pathElements: bigint[]; pathIndices: number[] }
+    { pathElements: bigint[]; pathIndices: number[] },
   ];
 
   outputAmounts: [bigint, bigint];
@@ -521,7 +521,7 @@ export async function generateTransactionProof(inputs: {
     publicAmount: (() => {
       if (inputs.publicAmount < 0n) {
         const FR_MODULUS = BigInt(
-          "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+          "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
         );
         return (FR_MODULUS + inputs.publicAmount).toString();
       }
@@ -532,10 +532,10 @@ export async function generateTransactionProof(inputs: {
 
     // Public inputs (arrays)
     inputNullifier: inputs.inputNullifiers.map((n) =>
-      bytesToBigIntBE(n).toString()
+      bytesToBigIntBE(n).toString(),
     ),
     outputCommitment: inputs.outputCommitments.map((c) =>
-      bytesToBigIntBE(c).toString()
+      bytesToBigIntBE(c).toString(),
     ),
 
     // Private inputs - input UTXOs (arrays)
@@ -543,26 +543,26 @@ export async function generateTransactionProof(inputs: {
     inPubkey: inputs.inputPublicKeys.map((pk) => pk.toString()),
     inBlinding: inputs.inputBlindings.map((b) => bytesToBigIntBE(b).toString()),
     inPathIndex: inputs.inputMerklePaths.map((p) =>
-      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0)
+      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0),
     ),
     inPathElements: inputs.inputMerklePaths.map((p) =>
-      p.pathElements.map((e) => e.toString())
+      p.pathElements.map((e) => e.toString()),
     ),
     inPrivateKey: inputs.inputPrivateKeys.map((pk) =>
-      bytesToBigIntBE(pk).toString()
+      bytesToBigIntBE(pk).toString(),
     ),
 
     // Private inputs - output UTXOs (arrays)
     outAmount: inputs.outputAmounts.map((a) => a.toString()),
     outPubkey: inputs.outputOwners.map((o) => o.toString()),
     outBlinding: inputs.outputBlindings.map((b) =>
-      bytesToBigIntBE(b).toString()
+      bytesToBigIntBE(b).toString(),
     ),
   };
 
   console.log(
     "Generating proof with inputs:",
-    JSON.stringify(circuitInputs, null, 2)
+    JSON.stringify(circuitInputs, null, 2),
   );
 
   // Generate proof
@@ -571,7 +571,7 @@ export async function generateTransactionProof(inputs: {
     ({ proof, publicSignals } = await groth16.fullProve(
       circuitInputs,
       WASM_PATH,
-      ZKEY_PATH
+      ZKEY_PATH,
     ));
   } catch (e: any) {
     console.error("\n❌ Proof generation failed!");
@@ -582,7 +582,7 @@ export async function generateTransactionProof(inputs: {
     console.error("  2. Flat signals: inputNullifier0, inputNullifier1");
     console.error("  3. Different names: nullifier0, nullifier1");
     console.error(
-      "\nPlease check your circuit's signal declarations in transaction.circom\n"
+      "\nPlease check your circuit's signal declarations in transaction.circom\n",
     );
     throw e;
   }
@@ -609,7 +609,7 @@ export async function generateTransactionProof(inputs: {
 export async function fetchAndDisplayEvents(
   connection: Connection,
   txSignature: string,
-  expectedMintAddress: PublicKey
+  expectedMintAddress: PublicKey,
 ): Promise<number> {
   const tx = await connection.getTransaction(txSignature, {
     commitment: "confirmed",
@@ -664,7 +664,7 @@ export async function fetchAndDisplayEvents(
           `   Commitment: ${eventData
             .subarray(8, 40)
             .toString("hex")
-            .slice(0, 20)}...`
+            .slice(0, 20)}...`,
         );
         console.log(`   Leaf Index: ${eventData.readBigUInt64LE(40)}`);
         console.log(`   Mint Address: ${mintAddress.toString()}`);
@@ -677,7 +677,7 @@ export async function fetchAndDisplayEvents(
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
           throw new Error(
-            `Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+            `Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`,
           );
         }
       }
@@ -698,7 +698,7 @@ export async function fetchAndDisplayEvents(
           `   Nullifier: ${eventData
             .subarray(8, 40)
             .toString("hex")
-            .slice(0, 20)}...`
+            .slice(0, 20)}...`,
         );
         console.log(`   Mint Address: ${mintAddress.toString()}`);
 
@@ -710,7 +710,7 @@ export async function fetchAndDisplayEvents(
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
           throw new Error(
-            `Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+            `Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`,
           );
         }
       }
@@ -723,7 +723,7 @@ export async function fetchAndDisplayEvents(
   console.log(
     `   Mint addresses verified: ${mintAddressMatches}/${
       commitmentEventCount + nullifierSpentCount
-    }`
+    }`,
   );
   console.log(`   Expected mint_address: ${expectedMintAddress.toString()}`);
 
@@ -735,7 +735,7 @@ export async function fetchAndDisplayEvents(
 
   if (mintAddressMatches !== totalEvents) {
     throw new Error(
-      `Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`
+      `Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`,
     );
   }
 

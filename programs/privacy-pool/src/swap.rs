@@ -1,11 +1,8 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token, TokenAccount};
+use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
+use anchor_spl::token::{self, Transfer};
 
-use crate::merkle_tree::MerkleTreeAccount;
-use crate::{
-    ExtData, GlobalConfig, MerkleTree, NullifierMarker, NullifierSet, PoseidonHasher,
-    PrivacyConfig, PrivacyError, Vault,
-};
+use crate::{ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap};
 
 /// Swap executor PDA - ephemeral account that holds tokens during swap
 /// Created and closed within a single transaction
@@ -65,175 +62,6 @@ impl SwapParams {
     }
 }
 
-/// Account context for atomic cross-pool swap
-/// This instruction:
-/// 1. Consumes notes from source pool (e.g., SOL)
-/// 2. Creates ephemeral executor PDA
-/// 3. CPIs to Jupiter/Raydium to execute swap
-/// 4. Creates notes in destination pool (e.g., USDC)
-/// All atomic - succeeds or reverts entirely
-#[derive(Accounts)]
-#[instruction(
-    source_root: [u8; 32],
-    source_tree_id: u16,
-    source_mint: Pubkey,
-    input_nullifier_0: [u8; 32],
-    input_nullifier_1: [u8; 32],
-    dest_tree_id: u16,
-    dest_mint: Pubkey,
-    output_commitment_0: [u8; 32],
-    output_commitment_1: [u8; 32],
-)]
-pub struct TransactSwap<'info> {
-    // ---- Source Pool (tokens being swapped FROM) ----
-    #[account(
-        mut,
-        seeds = [b"privacy_config_v3", source_mint.as_ref()],
-        bump = source_config.bump
-    )]
-    pub source_config: Account<'info, PrivacyConfig>,
-
-    #[account(
-        seeds = [b"global_config_v1"],
-        bump = global_config.bump
-    )]
-    pub global_config: Account<'info, GlobalConfig>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_vault_v3", source_mint.as_ref()],
-        bump = source_config.vault_bump
-    )]
-    pub source_vault: Account<'info, Vault>,
-
-    /// Source tree - where input notes came from
-    #[account(
-        mut,
-        seeds = [b"privacy_note_tree_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes()],
-        bump,
-    )]
-    pub source_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_nullifiers_v3", source_mint.as_ref()],
-        bump = source_nullifiers.bump
-    )]
-    pub source_nullifiers: Account<'info, NullifierSet>,
-
-    /// First nullifier marker for source pool
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
-        bump,
-        space = NullifierMarker::LEN
-    )]
-    pub source_nullifier_marker_0: Account<'info, NullifierMarker>,
-
-    /// Second nullifier marker for source pool
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
-        bump,
-        space = NullifierMarker::LEN
-    )]
-    pub source_nullifier_marker_1: Account<'info, NullifierMarker>,
-
-    /// Source vault's token account (ATA for source_mint)
-    #[account(mut)]
-    pub source_vault_token_account: Account<'info, TokenAccount>,
-
-    /// Source token mint
-    pub source_mint_account: Account<'info, Mint>,
-
-    // ---- Destination Pool (tokens being swapped TO) ----
-    #[account(
-        mut,
-        seeds = [b"privacy_config_v3", dest_mint.as_ref()],
-        bump = dest_config.bump
-    )]
-    pub dest_config: Account<'info, PrivacyConfig>,
-
-    #[account(
-        mut,
-        seeds = [b"privacy_vault_v3", dest_mint.as_ref()],
-        bump = dest_config.vault_bump
-    )]
-    pub dest_vault: Account<'info, Vault>,
-
-    /// Destination tree - where output commitments will be inserted
-    #[account(
-        mut,
-        seeds = [b"privacy_note_tree_v3", dest_mint.as_ref(), &dest_tree_id.to_le_bytes()],
-        bump,
-    )]
-    pub dest_tree: AccountLoader<'info, MerkleTreeAccount>,
-
-    /// Destination vault's token account (ATA for dest_mint)
-    #[account(mut)]
-    pub dest_vault_token_account: Account<'info, TokenAccount>,
-
-    /// Destination token mint
-    pub dest_mint_account: Account<'info, Mint>,
-
-    // ---- Ephemeral Swap Executor PDA ----
-    /// Executor PDA - holds tokens during swap
-    /// Seeds ensure this is unique per swap (bound to nullifier)
-    #[account(
-        init,
-        payer = relayer,
-        seeds = [b"swap_executor", input_nullifier_0.as_ref()],
-        bump,
-        space = SwapExecutor::LEN
-    )]
-    pub executor: Account<'info, SwapExecutor>,
-
-    /// Executor's source token account (receives from source vault)
-    #[account(
-        init,
-        payer = relayer,
-        associated_token::mint = source_mint_account,
-        associated_token::authority = executor,
-    )]
-    pub executor_source_token: Account<'info, TokenAccount>,
-
-    /// Executor's destination token account (receives swapped tokens)
-    #[account(
-        init,
-        payer = relayer,
-        associated_token::mint = dest_mint_account,
-        associated_token::authority = executor,
-    )]
-    pub executor_dest_token: Account<'info, TokenAccount>,
-
-    // ---- Transaction Participants ----
-    /// Relayer who submits transaction (pays rent, receives fee)
-    #[account(mut)]
-    pub relayer: Signer<'info>,
-
-    /// Relayer's token account for fees (dest token)
-    #[account(mut)]
-    pub relayer_token_account: Account<'info, TokenAccount>,
-
-    // ---- Jupiter/DEX Integration ----
-    /// Jupiter aggregator program
-    /// CHECK: Validated against Jupiter program ID in instruction
-    pub jupiter_program: UncheckedAccount<'info>,
-
-    // Additional Jupiter accounts passed via remaining_accounts:
-    // - DEX programs (Raydium, Orca, etc.)
-    // - Pool accounts
-    // - Oracle accounts
-    // - etc.
-    // These are dynamic based on route chosen by client
-    // ---- Programs ----
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
-}
-
 /// Public inputs for swap ZK proof
 /// This extends the standard transaction proof with swap-specific commitments
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -270,15 +98,15 @@ pub struct SwapPublicInputs {
 /// 2. Burn nullifiers in source pool
 /// 3. Create executor PDA and token accounts
 /// 4. Transfer from source vault → executor
-/// 5. CPI to Jupiter (executor signs)
+/// 5. CPI to Raydium CPMM (executor signs) - NO SERUM
 /// 6. Transfer from executor → dest vault
 /// 7. Insert commitments in dest pool
 /// 8. Pay relayer fee
 /// 9. Close executor accounts
 ///
 /// All steps are atomic - transaction succeeds or reverts entirely
-pub fn transact_swap(
-    ctx: Context<TransactSwap>,
+pub fn transact_swap<'info>(
+    ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
     // Source pool params
     source_root: [u8; 32],
     source_tree_id: u16,
@@ -292,6 +120,10 @@ pub fn transact_swap(
     output_commitment_1: [u8; 32],
     // Swap params
     swap_params: SwapParams,
+    // Amount to swap (will be verified against ZK proof once circuit is ready)
+    swap_amount: u64,
+    // Raydium CPMM swap data: [discriminator (1), amount_in (8), min_out (8)]
+    swap_data: Vec<u8>,
     // External data (relayer, fee)
     _ext_data: ExtData,
     // ZK proof
@@ -399,60 +231,140 @@ pub fn transact_swap(
     executor.nullifier = input_nullifiers[0];
     executor.bump = ctx.bumps.executor;
 
-    // TODO: Step 5 - Transfer from source vault to executor
-    // let swap_amount = /* extract from proof verification */;
-    // let source_vault_seeds = &[
-    //     b"privacy_vault_v3",
-    //     source_mint.as_ref(),
-    //     &[ctx.accounts.source_vault.bump],
-    // ];
-    //
-    // token::transfer(
-    //     CpiContext::new_with_signer(
-    //         ctx.accounts.token_program.to_account_info(),
-    //         token::Transfer {
-    //             from: ctx.accounts.source_vault_token_account.to_account_info(),
-    //             to: ctx.accounts.executor_source_token.to_account_info(),
-    //             authority: ctx.accounts.source_vault.to_account_info(),
-    //         },
-    //         &[source_vault_seeds],
-    //     ),
-    //     swap_amount,
-    // )?;
+    // Step 5 - Transfer from source vault to executor
+    // swap_amount will be verified against ZK proof once circuit is ready
+    require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // TODO: Step 6 - CPI to Jupiter for swap
-    // This will be implemented in the next phase
-    // jupiter_cpi::swap(
-    //     executor_seeds,
-    //     ctx.accounts.jupiter_program,
-    //     ctx.accounts.executor_source_token,
-    //     ctx.accounts.executor_dest_token,
-    //     swap_amount,
-    //     swap_params.min_amount_out,
-    //     ctx.remaining_accounts, // Jupiter route accounts
-    // )?;
+    let source_vault_seeds: &[&[u8]] = &[
+        b"privacy_vault_v3",
+        source_mint.as_ref(),
+        &[ctx.accounts.source_config.vault_bump],
+    ];
 
-    // TODO: Step 7 - Transfer from executor to dest vault
-    // let executor_seeds = &[
-    //     b"swap_executor",
-    //     input_nullifiers[0].as_ref(),
-    //     &[executor.bump],
-    // ];
-    //
-    // let swapped_amount = ctx.accounts.executor_dest_token.amount;
-    //
-    // token::transfer(
-    //     CpiContext::new_with_signer(
-    //         ctx.accounts.token_program.to_account_info(),
-    //         token::Transfer {
-    //             from: ctx.accounts.executor_dest_token.to_account_info(),
-    //             to: ctx.accounts.dest_vault_token_account.to_account_info(),
-    //             authority: executor.to_account_info(),
-    //         },
-    //         &[executor_seeds],
-    //     ),
-    //     swapped_amount,
-    // )?;
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.source_vault_token_account.to_account_info(),
+                to: ctx.accounts.executor_source_token.to_account_info(),
+                authority: ctx.accounts.source_vault.to_account_info(),
+            },
+            &[source_vault_seeds],
+        ),
+        swap_amount,
+    )?;
+
+    // Step 6 - CPI to Raydium CPMM for swap (NO SERUM)
+    let executor_seeds: &[&[u8]] = &[
+        b"swap_executor",
+        input_nullifiers[0].as_ref(),
+        &[executor.bump],
+    ];
+
+    // Validate swap_data format: [discriminator (8), amount_in (8), min_out (8)]
+    // Raydium CPMM uses Anchor 8-byte discriminators
+    require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
+
+    // Raydium CPMM requires 8 accounts in remaining_accounts:
+    // 0: authority (CPMM pool vault PDA), 1: amm_config, 2: pool_state
+    // 3: input_vault, 4: output_vault
+    // 5: input_token_mint, 6: output_token_mint, 7: observation_state
+    require!(
+        ctx.remaining_accounts.len() >= 8,
+        PrivacyError::InvalidPublicAmount
+    );
+
+    let remaining = &ctx.remaining_accounts;
+
+    // Build CPMM swap instruction with correct Anchor account order:
+    // 1. payer (signer) - executor signs via invoke_signed
+    // 2. authority - CPMM pool vault authority PDA
+    // 3. amm_config - Factory state
+    // 4. pool_state - Pool account
+    // 5. input_token_account - User's input token (executor_source_token)
+    // 6. output_token_account - User's output token (executor_dest_token)
+    // 7. input_vault - Pool's input vault
+    // 8. output_vault - Pool's output vault
+    // 9. input_token_program - SPL Token program
+    // 10. output_token_program - SPL Token program
+    // 11. input_token_mint - Mint of input token
+    // 12. output_token_mint - Mint of output token
+    // 13. observation_state - Oracle observation
+    let cpmm_accounts = vec![
+        AccountMeta::new_readonly(executor.key(), true), // payer (signer)
+        AccountMeta::new_readonly(remaining[0].key(), false), // authority
+        AccountMeta::new_readonly(remaining[1].key(), false), // amm_config
+        AccountMeta::new(remaining[2].key(), false),     // pool_state
+        AccountMeta::new(ctx.accounts.executor_source_token.key(), false), // input_token_account
+        AccountMeta::new(ctx.accounts.executor_dest_token.key(), false), // output_token_account
+        AccountMeta::new(remaining[3].key(), false),     // input_vault
+        AccountMeta::new(remaining[4].key(), false),     // output_vault
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // input_token_program
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // output_token_program
+        AccountMeta::new_readonly(remaining[5].key(), false), // input_token_mint
+        AccountMeta::new_readonly(remaining[6].key(), false), // output_token_mint
+        AccountMeta::new(remaining[7].key(), false),     // observation_state
+    ];
+
+    let swap_ix = Instruction {
+        program_id: ctx.accounts.raydium_cpmm_program.key(),
+        accounts: cpmm_accounts,
+        data: swap_data.clone(),
+    };
+
+    // Detect instruction type from discriminator (first 8 bytes)
+    // swap_base_input: 8fbe5adac41e33de
+    // swap_base_output: 37d96256a34ab4ad
+    let is_base_input = swap_data[0] == 0x8f && swap_data[1] == 0xbe;
+
+    msg!(
+        "Raydium CPMM: swap_base_{} amount={}",
+        if is_base_input { "input" } else { "output" },
+        swap_amount
+    );
+
+    // Build account_infos for invoke_signed - must match cpmm_accounts order
+    let account_infos = &[
+        executor.to_account_info(),                           // payer (signer)
+        remaining[0].to_account_info(),                       // authority (CPMM pool authority)
+        remaining[1].to_account_info(),                       // amm_config
+        remaining[2].to_account_info(),                       // pool_state
+        ctx.accounts.executor_source_token.to_account_info(), // input_token_account
+        ctx.accounts.executor_dest_token.to_account_info(),   // output_token_account
+        remaining[3].to_account_info(),                       // input_vault
+        remaining[4].to_account_info(),                       // output_vault
+        ctx.accounts.token_program.to_account_info(),         // input_token_program
+        ctx.accounts.token_program.to_account_info(),         // output_token_program (same)
+        remaining[5].to_account_info(),                       // input_token_mint
+        remaining[6].to_account_info(),                       // output_token_mint
+        remaining[7].to_account_info(),                       // observation_state
+        ctx.accounts.raydium_cpmm_program.to_account_info(),  // program
+    ];
+
+    invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+
+    // Step 7 - Transfer from executor to dest vault
+    // Reload dest token account to get updated balance after swap
+    ctx.accounts.executor_dest_token.reload()?;
+    let swapped_amount = ctx.accounts.executor_dest_token.amount;
+
+    require!(
+        swapped_amount >= swap_params.min_amount_out,
+        PrivacyError::InvalidPublicAmount // Slippage exceeded
+    );
+
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.executor_dest_token.to_account_info(),
+                to: ctx.accounts.dest_vault_token_account.to_account_info(),
+                authority: executor.to_account_info(),
+            },
+            &[executor_seeds],
+        ),
+        swapped_amount,
+    )?;
 
     // Step 8 - Insert commitments into destination tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;

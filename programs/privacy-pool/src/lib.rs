@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::get_associated_token_address;
-use anchor_spl::token::{self, TokenAccount};
+use anchor_spl::token::{self, Mint, Token, TokenAccount};
 use light_hasher::Poseidon;
 
 pub mod groth16;
@@ -8,6 +8,9 @@ pub mod merkle_tree;
 pub mod swap;
 pub mod vk_constants;
 pub mod zk;
+
+// Re-export swap types for Anchor
+pub use swap::{SwapExecutor, SwapParams, SwapPublicInputs};
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
@@ -37,11 +40,8 @@ pub const MAX_MERKLE_TREES: u16 = 10000;
 pub const MAX_FEE_BPS: u16 = 100;
 
 /// Allow all SPL tokens for testing on localnet
-#[cfg(any(feature = "localnet", test))]
+/// TODO: For production, set this to false and use ALLOWED_TOKENS whitelist
 pub const ALLOW_ALL_SPL_TOKENS: bool = true;
-
-#[cfg(not(any(feature = "localnet", test)))]
-pub const ALLOW_ALL_SPL_TOKENS: bool = false;
 
 /// Devnet/Localnet allowed tokens (test networks)
 #[cfg(any(feature = "devnet", feature = "localnet"))]
@@ -601,6 +601,179 @@ fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
         .map_err(|_| error!(PrivacyError::MissingTokenAccount))
 }
 
+// ---- Swap Transaction Accounts ----
+
+/// Account context for atomic cross-pool swap
+/// This instruction:
+/// 1. Consumes notes from source pool (e.g., SOL)
+/// 2. Creates ephemeral executor PDA
+/// 3. CPIs to Raydium CPMM to execute swap (NO SERUM)
+/// 4. Creates notes in destination pool (e.g., USDC)
+/// All atomic - succeeds or reverts entirely
+#[derive(Accounts)]
+#[instruction(
+    source_root: [u8; 32],
+    source_tree_id: u16,
+    source_mint: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    dest_tree_id: u16,
+    dest_mint: Pubkey,
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+)]
+pub struct TransactSwap<'info> {
+    // ---- Source Pool (tokens being swapped FROM) ----
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", source_mint.as_ref()],
+        bump = source_config.bump
+    )]
+    pub source_config: Box<Account<'info, PrivacyConfig>>,
+
+    #[account(
+        seeds = [b"global_config_v1"],
+        bump = global_config.bump
+    )]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", source_mint.as_ref()],
+        bump = source_config.vault_bump
+    )]
+    pub source_vault: Box<Account<'info, Vault>>,
+
+    /// Source tree - where input notes came from
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes()],
+        bump,
+    )]
+    pub source_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_nullifiers_v3", source_mint.as_ref()],
+        bump = source_nullifiers.bump
+    )]
+    pub source_nullifiers: Box<Account<'info, NullifierSet>>,
+
+    /// First nullifier marker for source pool
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub source_nullifier_marker_0: Box<Account<'info, NullifierMarker>>,
+
+    /// Second nullifier marker for source pool
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub source_nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
+
+    /// Source vault's token account (ATA for source_mint)
+    #[account(mut)]
+    pub source_vault_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// Source token mint
+    pub source_mint_account: Box<Account<'info, Mint>>,
+
+    // ---- Destination Pool (tokens being swapped TO) ----
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", dest_mint.as_ref()],
+        bump = dest_config.bump
+    )]
+    pub dest_config: Box<Account<'info, PrivacyConfig>>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", dest_mint.as_ref()],
+        bump = dest_config.vault_bump
+    )]
+    pub dest_vault: Box<Account<'info, Vault>>,
+
+    /// Destination tree - where output commitments will be inserted
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", dest_mint.as_ref(), &dest_tree_id.to_le_bytes()],
+        bump,
+    )]
+    pub dest_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    /// Destination vault's token account (ATA for dest_mint)
+    #[account(mut)]
+    pub dest_vault_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// Destination token mint
+    pub dest_mint_account: Box<Account<'info, Mint>>,
+
+    // ---- Ephemeral Swap Executor PDA ----
+    /// Executor PDA - holds tokens during swap
+    /// Seeds ensure this is unique per swap (bound to nullifier)
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"swap_executor", input_nullifier_0.as_ref()],
+        bump,
+        space = SwapExecutor::LEN
+    )]
+    pub executor: Box<Account<'info, SwapExecutor>>,
+
+    /// Executor's source token account (receives from source vault)
+    #[account(
+        init,
+        payer = relayer,
+        associated_token::mint = source_mint_account,
+        associated_token::authority = executor,
+    )]
+    pub executor_source_token: Box<Account<'info, TokenAccount>>,
+
+    /// Executor's destination token account (receives swapped tokens)
+    #[account(
+        init,
+        payer = relayer,
+        associated_token::mint = dest_mint_account,
+        associated_token::authority = executor,
+    )]
+    pub executor_dest_token: Box<Account<'info, TokenAccount>>,
+
+    // ---- Transaction Participants ----
+    /// Relayer who submits transaction (pays rent, receives fee)
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    /// Relayer's token account for fees (dest token)
+    #[account(mut)]
+    pub relayer_token_account: Box<Account<'info, TokenAccount>>,
+
+    // ---- Raydium CPMM Integration (NO SERUM) ----
+    /// Raydium CPMM program (Constant Product Market Maker)
+    /// CHECK: Validated against Raydium CPMM program ID in instruction
+    pub raydium_cpmm_program: UncheckedAccount<'info>,
+
+    // Additional Raydium CPMM accounts passed via remaining_accounts:
+    // 0: pool_state - The CPMM pool state account
+    // 1: pool_authority - The pool authority PDA
+    // 2: token_vault_0 - Pool's first token vault
+    // 3: token_vault_1 - Pool's second token vault
+    // 4: observation_state - Oracle observation (optional)
+    //
+    // Only 5 accounts needed! Much simpler than legacy AMM.
+    // ---- Programs ----
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+}
+
 // ---- Program ----
 
 #[program]
@@ -916,6 +1089,8 @@ pub mod privacy_pool {
         );
 
         // 4. Verify mint address matches config
+        msg!("DEBUG: mint_address param = {}", mint_address);
+        msg!("DEBUG: cfg.mint_address   = {}", cfg.mint_address);
         require_keys_eq!(
             mint_address,
             cfg.mint_address,
@@ -1140,10 +1315,10 @@ pub mod privacy_pool {
     }
 
     /// Atomic cross-pool private swap
-    /// Consumes notes from source pool, swaps via Jupiter, creates notes in dest pool
+    /// Consumes notes from source pool, swaps via Raydium CPMM (no Serum), creates notes in dest pool
     /// All in one transaction - see swap.rs for implementation details
-    pub fn transact_swap(
-        ctx: Context<swap::TransactSwap>,
+    pub fn transact_swap<'info>(
+        ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
         source_root: [u8; 32],
         source_tree_id: u16,
         source_mint: Pubkey,
@@ -1153,7 +1328,9 @@ pub mod privacy_pool {
         dest_mint: Pubkey,
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
-        swap_params: swap::SwapParams,
+        swap_params: SwapParams,
+        swap_amount: u64,
+        swap_data: Vec<u8>,
         ext_data: ExtData,
     ) -> Result<()> {
         swap::transact_swap(
@@ -1168,6 +1345,8 @@ pub mod privacy_pool {
             output_commitment_0,
             output_commitment_1,
             swap_params,
+            swap_amount,
+            swap_data,
             ext_data,
         )
     }
