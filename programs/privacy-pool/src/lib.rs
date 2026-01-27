@@ -111,6 +111,14 @@ pub struct PrivacyConfig {
 
     /// Suggested tree index for next deposit (round-robin)
     pub next_tree_index: u16,
+
+    /// Minimum swap fee in destination token units (e.g., 100000 = 0.1 USDC)
+    /// Ensures relayer compensation for swap transactions
+    pub min_swap_fee: u64,
+
+    /// Swap fee in basis points (0-10_000) of swap output amount
+    /// Used with min_swap_fee: actual fee must be >= max(min_swap_fee, output * swap_fee_bps / 10000)
+    pub swap_fee_bps: u16,
 }
 
 impl PrivacyConfig {
@@ -130,7 +138,9 @@ impl PrivacyConfig {
         1 +   // num_relayers
         32 * MAX_RELAYERS +  // relayers
         2 +   // num_trees (u16)
-        2; // next_tree_index (u16) (649 bytes total)
+        2 +   // next_tree_index (u16)
+        8 +   // min_swap_fee
+        2; // swap_fee_bps (661 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
         let n = self.num_relayers as usize;
@@ -852,6 +862,10 @@ pub mod privacy_pool {
         cfg.num_trees = 1; // Start with one tree (tree_id = 0)
         cfg.next_tree_index = 0;
 
+        // ---- Swap fee initialization ----
+        cfg.min_swap_fee = 50_000; // Default: 0.05 USDC (6 decimals) minimum swap fee
+        cfg.swap_fee_bps = 10; // Default: 0.1% of swap output
+
         // ---- Nullifier set init ----
         nulls.count = 0;
 
@@ -920,6 +934,8 @@ pub mod privacy_pool {
         fee_bps: Option<u16>,
         min_withdrawal_fee: Option<u64>,
         fee_error_margin_bps: Option<u16>,
+        min_swap_fee: Option<u64>,
+        swap_fee_bps: Option<u16>,
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
 
@@ -947,6 +963,14 @@ pub mod privacy_pool {
             // Validate fee_error_margin_bps is reasonable (max 50% = 5000 bps)
             require!(val <= 5000, PrivacyError::ExcessiveFeeMargin);
             cfg.fee_error_margin_bps = val;
+        }
+        if let Some(val) = min_swap_fee {
+            cfg.min_swap_fee = val;
+        }
+        if let Some(val) = swap_fee_bps {
+            // Validate swap_fee_bps does not exceed 10% (1000 bps)
+            require!(val <= 1000, PrivacyError::ExcessiveFeeBps);
+            cfg.swap_fee_bps = val;
         }
 
         // Validate ranges after updates

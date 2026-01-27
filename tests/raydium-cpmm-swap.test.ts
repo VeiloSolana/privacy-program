@@ -11,6 +11,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
   TransactionInstruction,
+  Connection,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -110,12 +111,15 @@ function encodeTreeId(treeId: number): Buffer {
 }
 
 /**
+
+/**
  * Build CPMM swap instruction data
- * Format: [discriminator (8 bytes), amount_in (8 bytes), min_amount_out (8 bytes)]
+ * For swap_base_input: [discriminator, amount_in, min_amount_out]
+ * For swap_base_output: [discriminator, max_amount_in, amount_out]
  */
 function buildCpmmSwapData(
-  amountIn: anchor.BN,
-  minAmountOut: anchor.BN,
+  amount1: anchor.BN,
+  amount2: anchor.BN,
   swapBaseIn: boolean = true,
 ): Buffer {
   const data = Buffer.alloc(24);
@@ -123,9 +127,145 @@ function buildCpmmSwapData(
     ? CPMM_SWAP_BASE_INPUT_DISCRIMINATOR
     : CPMM_SWAP_BASE_OUTPUT_DISCRIMINATOR;
   discriminator.copy(data, 0);
-  data.writeBigUInt64LE(BigInt(amountIn.toString()), 8);
-  data.writeBigUInt64LE(BigInt(minAmountOut.toString()), 16);
+  data.writeBigUInt64LE(BigInt(amount1.toString()), 8);
+  data.writeBigUInt64LE(BigInt(amount2.toString()), 16);
   return data;
+}
+
+/**
+ * Simulate a CPMM swap to get the exact output amount.
+ * Uses constant product formula: (x + dx) * (y - dy) = x * y
+ * Reads actual fee rates from AMM config account.
+ *
+ * Raydium CPMM applies trade fee to INPUT before the swap:
+ * 1. input_amount_less_fees = input_amount - (input_amount * trade_fee_rate / 1_000_000)
+ * 2. output = y * input_amount_less_fees / (x + input_amount_less_fees)
+ *
+ * IMPORTANT: Vault amounts must be adjusted for accumulated protocol/fund/creator fees
+ * that are stored in the vaults but not part of trading liquidity.
+ *
+ * Returns the exact output amount after all fees.
+ */
+async function simulateCpmmSwap(
+  connection: anchor.web3.Connection,
+  poolState: PublicKey,
+  ammConfig: PublicKey,
+  inputVault: PublicKey,
+  outputVault: PublicKey,
+  amountIn: bigint,
+  direction: "ZeroForOne" | "OneForZero",
+): Promise<bigint> {
+  // Get vault balances, pool state, and AMM config in parallel
+  const [inputBalance, outputBalance, poolStateInfo, ammConfigInfo] =
+    await Promise.all([
+      connection.getTokenAccountBalance(inputVault),
+      connection.getTokenAccountBalance(outputVault),
+      connection.getAccountInfo(poolState),
+      connection.getAccountInfo(ammConfig),
+    ]);
+
+  let xRaw = BigInt(inputBalance.value.amount);
+  let yRaw = BigInt(outputBalance.value.amount);
+
+  // Parse fee rates from AMM config
+  // Raydium CPMM AmmConfig layout (Anchor):
+  // - 8 bytes: discriminator
+  // - 1 byte: bump
+  // - 1 byte: disable_create_pool
+  // - 2 bytes: index (u16)
+  // - 8 bytes: trade_fee_rate (u64)
+  // - 8 bytes: protocol_fee_rate (u64)
+  // - 8 bytes: fund_fee_rate (u64)
+  // Total offset to trade_fee_rate: 8 + 1 + 1 + 2 = 12
+
+  let tradeFeeRate = 2500n; // Default 0.25%
+
+  if (ammConfigInfo?.data && ammConfigInfo.data.length >= 36) {
+    const data = ammConfigInfo.data;
+    tradeFeeRate = data.readBigUInt64LE(12);
+
+    // Sanity check - fee rates should be reasonable (< 10% = 100000 for trade fee)
+    if (tradeFeeRate > 100000n) {
+      console.log(
+        `   ⚠️ AMM config fee rate looks wrong (${tradeFeeRate}), using default 2500`,
+      );
+      tradeFeeRate = 2500n;
+    }
+  }
+
+  // Parse accumulated fees from pool state and subtract from vault amounts
+  // Raydium CPMM PoolState layout (zero_copy, packed):
+  // - 8 bytes: discriminator
+  // - 10 * 32 = 320 bytes: pubkeys
+  // - 5 bytes: u8s (auth_bump, status, lp_mint_decimals, mint_0_decimals, mint_1_decimals)
+  // - 8 bytes: lp_supply (u64) - offset 333
+  // - 8 bytes: protocol_fees_token_0 (u64) - offset 341
+  // - 8 bytes: protocol_fees_token_1 (u64) - offset 349
+  // - 8 bytes: fund_fees_token_0 (u64) - offset 357
+  // - 8 bytes: fund_fees_token_1 (u64) - offset 365
+  // - 8 bytes: open_time - offset 373
+  // - 8 bytes: recent_epoch - offset 381
+  // - 1 byte: creator_fee_on - offset 389
+  // - 1 byte: enable_creator_fee - offset 390
+  // - 6 bytes: padding1 - offset 391
+  // - 8 bytes: creator_fees_token_0 (u64) - offset 397
+  // - 8 bytes: creator_fees_token_1 (u64) - offset 405
+
+  let x = xRaw;
+  let y = yRaw;
+
+  if (poolStateInfo?.data && poolStateInfo.data.length >= 420) {
+    const data = poolStateInfo.data;
+    // Read accumulated fees at correct offsets
+    const protocolFeesToken0 = data.readBigUInt64LE(341);
+    const protocolFeesToken1 = data.readBigUInt64LE(349);
+    const fundFeesToken0 = data.readBigUInt64LE(357);
+    const fundFeesToken1 = data.readBigUInt64LE(365);
+    const creatorFeesToken0 = data.readBigUInt64LE(397);
+    const creatorFeesToken1 = data.readBigUInt64LE(405);
+
+    // Calculate total accumulated fees for each token
+    const feesToken0 = protocolFeesToken0 + fundFeesToken0 + creatorFeesToken0;
+    const feesToken1 = protocolFeesToken1 + fundFeesToken1 + creatorFeesToken1;
+
+    // Adjust based on direction (ZeroForOne means token0 is input, token1 is output)
+    if (direction === "ZeroForOne") {
+      // Input is token0, output is token1
+      x = xRaw - feesToken0;
+      y = yRaw - feesToken1;
+    } else {
+      // Input is token1, output is token0
+      x = xRaw - feesToken1;
+      y = yRaw - feesToken0;
+    }
+
+    console.log(
+      `   Accumulated fees: token0=${feesToken0}, token1=${feesToken1}`,
+    );
+    console.log(
+      `   Vault amounts: raw(${xRaw}, ${yRaw}) -> adjusted(${x}, ${y})`,
+    );
+  }
+
+  const FEE_DENOMINATOR = 1000000n;
+
+  // Step 1: Apply trade fee to INPUT (Raydium applies fee to input, not output)
+  // trade_fee = input * trade_fee_rate / 1_000_000
+  const tradeFee = (amountIn * tradeFeeRate) / FEE_DENOMINATOR;
+  const amountInAfterFee = amountIn - tradeFee;
+
+  // Step 2: Constant product formula: dy = y * dx / (x + dx)
+  const amountOut = (y * amountInAfterFee) / (x + amountInAfterFee);
+
+  console.log(`   Simulation: x=${x}, y=${y}, tradeFeeRate=${tradeFeeRate}`);
+  console.log(
+    `   Trade fee: ${tradeFee}, amountInAfterFee: ${amountInAfterFee}`,
+  );
+  console.log(
+    `   Simulated output: ${amountOut} (${Number(amountOut) / 1_000_000} USDC)`,
+  );
+
+  return amountOut;
 }
 
 // Helper: Derive nullifier marker PDA with tree_id
@@ -208,8 +348,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
   // Test constants - using real token decimals
   const SOURCE_DECIMALS = 9; // WSOL has 9 decimals
   const DEST_DECIMALS = 6; // USDC has 6 decimals
-  const INITIAL_DEPOSIT = 100_000_000; // 0.1 SOL in lamports
-  const SWAP_AMOUNT = 50_000_000; // 0.05 SOL to swap
+  const INITIAL_DEPOSIT = 2_000_000_000; // 2 SOL in lamports
+  const SWAP_AMOUNT = 700_000_000; // 1 SOL to swap
+  const SWAP_FEE = 100_000; // 0.1 USDC relayer fee (6 decimals)
   const feeBps = 50; // 0.5%
 
   // Deposited note reference
@@ -773,25 +914,49 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     );
     const dummyProof = sourceOffchainTree.getMerkleProof(0);
 
-    // Calculate expected USDC output (rough estimate: 1 SOL ≈ 150 USDC, 5% slippage)
-    // WSOL has 9 decimals, USDC has 6 decimals
+    // Calculate expected USDC output by simulating the swap
+    // This ensures the commitment amount matches exactly what we'll receive
     const swapAmountBn = new BN(SWAP_AMOUNT);
-    const estimatedUsdcOut =
-      (BigInt(SWAP_AMOUNT) * 150n) / BigInt(LAMPORTS_PER_SOL);
-    const minAmountOut = new BN(((estimatedUsdcOut * 95n) / 100n).toString()); // 5% slippage
+
+    // Simulate the swap to get exact output (minus fee)
+    const SWAP_FEE = 100_000n; // 0.1 USDC relayer fee
+    const simulatedOutput = await simulateCpmmSwap(
+      provider.connection,
+      CPMM_POOL_STATE, // Pool state for accumulated fees
+      CPMM_AMM_CONFIG, // AMM config for fee rate
+      CPMM_TOKEN_VAULT_0, // SOL vault (input)
+      CPMM_TOKEN_VAULT_1, // USDC vault (output)
+      BigInt(SWAP_AMOUNT),
+      "ZeroForOne", // SOL (token0) -> USDC (token1)
+    );
+
+    // The exact amount that will go to the vault (after relayer fee)
+    const exactUsdcOut = simulatedOutput - SWAP_FEE;
+    // Max input with 5% slippage buffer for swap_base_output
+    const maxAmountIn = new BN(
+      ((BigInt(SWAP_AMOUNT) * 105n) / 100n).toString(),
+    );
 
     console.log(
-      `   Estimated USDC out: ${estimatedUsdcOut} (${
-        Number(estimatedUsdcOut) / 1_000_000
+      `   Simulated USDC out: ${simulatedOutput} (${
+        Number(simulatedOutput) / 1_000_000
       } USDC)`,
     );
-    console.log(`   Min amount out: ${minAmountOut.toString()}`);
+    console.log(
+      `   Relayer fee: ${SWAP_FEE} (${Number(SWAP_FEE) / 1_000_000} USDC)`,
+    );
+    console.log(
+      `   USDC to vault: ${exactUsdcOut} (${
+        Number(exactUsdcOut) / 1_000_000
+      } USDC)`,
+    );
+    console.log(`   Max SOL input: ${maxAmountIn.toString()}`);
 
     // For the ZK proof, we need to satisfy the balance equation:
     // sumIns + publicAmount = sumOuts
     // Since we're withdrawing SWAP_AMOUNT from source pool:
-    // 100,000,000 + (-50,000,000) = 50,000,000
-    // So output amounts should sum to 50,000,000 (the remaining in source pool)
+    // 2_000_000_000 + (-1_000_000_000) = 1_000_000_000
+    // So output amounts should sum to 1_000_000_000 (the change in source pool)
 
     // The swappedAmount for the ZK proof is 0 (placeholder)
     // because the actual swapped amount in dest pool is different token
@@ -806,9 +971,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const destPrivKey = randomBytes32();
     const destPubKey = derivePublicKey(poseidon, destPrivKey);
     const destBlinding = randomBytes32();
-    const swappedAmount = estimatedUsdcOut; // Will be actual amount from swap
+    const swappedAmount = exactUsdcOut; // EXACT amount from simulation
 
-    // For the actual program instruction, use dest mint
+    // For the actual program instruction, use dest mint with exact amount
     const destCommitment = computeCommitment(
       poseidon,
       swappedAmount,
@@ -842,7 +1007,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const extData = {
       recipient: payer.publicKey,
       relayer: payer.publicKey,
-      fee: new BN(0),
+      fee: new BN(SWAP_FEE), // 0.1 USDC relayer fee
       refund: new BN(0),
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
@@ -870,8 +1035,18 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     });
     console.log("   ✅ ZK proof generated");
 
-    // Build CPMM swap data
-    const swapData = buildCpmmSwapData(swapAmountBn, minAmountOut, true);
+    // Build CPMM swap data using swap_base_input
+    // swap_base_input: [discriminator, amount_in, min_amount_out]
+    // We simulate first to get the expected output, then use that for the commitment
+    const minAmountOut = new BN(((simulatedOutput * 95n) / 100n).toString()); // 5% slippage
+    const swapData = buildCpmmSwapData(
+      swapAmountBn,
+      minAmountOut,
+      true, // swap_base_input
+    );
+    console.log(
+      `   Using swap_base_input: amount_in=${swapAmountBn}, min_out=${minAmountOut}`,
+    );
 
     // Real CPMM pool accounts (cloned from mainnet)
     const cpmmPoolAccounts: CpmmPoolAccounts = {
@@ -912,8 +1087,6 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       true,
     );
 
-    console.log("   Executing transact_swap instruction...");
-
     // Get or create relayer token account (for dest token - USDC)
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
@@ -922,9 +1095,113 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       payer.publicKey,
     );
 
+    // ============ BALANCE LOGGING BEFORE SWAP ============
+    console.log(
+      "\n   ╔══════════════════════════════════════════════════════════════════╗",
+    );
+    console.log(
+      "   ║                    BALANCES BEFORE SWAP                          ║",
+    );
+    console.log(
+      "   ╠══════════════════════════════════════════════════════════════════╣",
+    );
+
+    // Privacy Pool Vaults
+    const sourceVaultBalanceBefore =
+      await provider.connection.getTokenAccountBalance(
+        sourceVaultWsolAccount.address,
+      );
+    const destVaultBalanceBefore =
+      await provider.connection.getTokenAccountBalance(
+        destVaultUsdcAccount.address,
+      );
+
+    console.log(
+      "   ║ PRIVACY POOL VAULTS:                                             ║",
+    );
+    console.log(
+      `   ║   Source Vault (WSOL): ${sourceVaultWsolAccount.address.toBase58()}`,
+    );
+    console.log(
+      `   ║     Balance: ${sourceVaultBalanceBefore.value.uiAmountString} WSOL (${sourceVaultBalanceBefore.value.amount} lamports)`,
+    );
+    console.log(
+      `   ║   Dest Vault (USDC):   ${destVaultUsdcAccount.address.toBase58()}`,
+    );
+    console.log(
+      `   ║     Balance: ${destVaultBalanceBefore.value.uiAmountString} USDC (${destVaultBalanceBefore.value.amount} base units)`,
+    );
+
+    // CPMM Pool Vaults
+    const cpmmVault0BalanceBefore =
+      await provider.connection.getTokenAccountBalance(CPMM_TOKEN_VAULT_0);
+    const cpmmVault1BalanceBefore =
+      await provider.connection.getTokenAccountBalance(CPMM_TOKEN_VAULT_1);
+
+    console.log(
+      "   ╠══════════════════════════════════════════════════════════════════╣",
+    );
+    console.log(
+      "   ║ RAYDIUM CPMM POOL VAULTS:                                        ║",
+    );
+    console.log(`   ║   SOL Vault:  ${CPMM_TOKEN_VAULT_0.toBase58()}`);
+    console.log(
+      `   ║     Balance: ${cpmmVault0BalanceBefore.value.uiAmountString} WSOL`,
+    );
+    console.log(`   ║   USDC Vault: ${CPMM_TOKEN_VAULT_1.toBase58()}`);
+    console.log(
+      `   ║     Balance: ${cpmmVault1BalanceBefore.value.uiAmountString} USDC`,
+    );
+
+    // Relayer/Payer
+    const relayerUsdcBalanceBefore =
+      await provider.connection.getTokenAccountBalance(
+        relayerTokenAccount.address,
+      );
+    const payerSolBalanceBefore = await provider.connection.getBalance(
+      payer.publicKey,
+    );
+
+    console.log(
+      "   ╠══════════════════════════════════════════════════════════════════╣",
+    );
+    console.log(
+      "   ║ RELAYER/PAYER:                                                   ║",
+    );
+    console.log(`   ║   Address: ${payer.publicKey.toBase58()}`);
+    console.log(
+      `   ║     SOL Balance: ${(
+        payerSolBalanceBefore / LAMPORTS_PER_SOL
+      ).toFixed(4)} SOL`,
+    );
+    console.log(
+      `   ║     USDC Balance: ${relayerUsdcBalanceBefore.value.uiAmountString} USDC`,
+    );
+
+    console.log(
+      "   ╠══════════════════════════════════════════════════════════════════╣",
+    );
+    console.log(
+      "   ║ KEY ADDRESSES:                                                   ║",
+    );
+    console.log(`   ║   Source Pool Config: ${sourceConfig.toBase58()}`);
+    console.log(`   ║   Dest Pool Config:   ${destConfig.toBase58()}`);
+    console.log(`   ║   Source Merkle Tree: ${sourceNoteTree.toBase58()}`);
+    console.log(`   ║   Dest Merkle Tree:   ${destNoteTree.toBase58()}`);
+    console.log(`   ║   CPMM Pool State:    ${CPMM_POOL_STATE.toBase58()}`);
+    console.log(
+      "   ╚══════════════════════════════════════════════════════════════════╝\n",
+    );
+
+    console.log("   Executing transact_swap instruction...");
+
     // Swap params for the instruction
+    // minAmountOut is used for on-chain slippage check
+    const minAmountOutForCheck = new BN(
+      ((simulatedOutput * 95n) / 100n).toString(),
+    ); // 5% slippage tolerance
     const swapParams = {
-      minAmountOut: minAmountOut,
+      minAmountOut: minAmountOutForCheck,
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600), // 1 hour from now
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
@@ -949,6 +1226,19 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       executorPda,
       true, // allowOwnerOffCurve
     );
+
+    console.log(
+      "   ╠══════════════════════════════════════════════════════════════════╣",
+    );
+    console.log(
+      "   ║ EXECUTOR PDA (swap agent):                                       ║",
+    );
+    console.log(`   ║   Executor PDA:        ${executorPda.toBase58()}`);
+    console.log(
+      `   ║   Executor WSOL ATA:   ${executorSourceToken.toBase58()}`,
+    );
+    console.log(`   ║   Executor USDC ATA:   ${executorDestToken.toBase58()}`);
+    console.log(`   ║   Seeds: ["swap_executor", nullifier_0]`);
 
     // Create Address Lookup Table with all static accounts to reduce tx size
     console.log("   Creating Address Lookup Table...");
@@ -1151,6 +1441,165 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       });
 
       console.log(`✅ Cross-pool swap executed: ${txSig}`);
+
+      // ============ BALANCE LOGGING AFTER SWAP ============
+      console.log(
+        "\n   ╔══════════════════════════════════════════════════════════════════╗",
+      );
+      console.log(
+        "   ║                    BALANCES AFTER SWAP                           ║",
+      );
+      console.log(
+        "   ╠══════════════════════════════════════════════════════════════════╣",
+      );
+
+      // Privacy Pool Vaults
+      const sourceVaultBalanceAfter =
+        await provider.connection.getTokenAccountBalance(
+          sourceVaultWsolAccount.address,
+        );
+      const destVaultBalanceAfter =
+        await provider.connection.getTokenAccountBalance(
+          destVaultUsdcAccount.address,
+        );
+
+      console.log(
+        "   ║ PRIVACY POOL VAULTS:                                             ║",
+      );
+      console.log(
+        `   ║   Source Vault (WSOL): ${sourceVaultWsolAccount.address.toBase58()}`,
+      );
+      console.log(
+        `   ║     Before: ${sourceVaultBalanceBefore.value.uiAmountString} WSOL`,
+      );
+      console.log(
+        `   ║     After:  ${sourceVaultBalanceAfter.value.uiAmountString} WSOL`,
+      );
+      console.log(
+        `   ║     Change: ${
+          (Number(sourceVaultBalanceAfter.value.amount) -
+            Number(sourceVaultBalanceBefore.value.amount)) /
+          LAMPORTS_PER_SOL
+        } WSOL`,
+      );
+      console.log(
+        `   ║   Dest Vault (USDC):   ${destVaultUsdcAccount.address.toBase58()}`,
+      );
+      console.log(
+        `   ║     Before: ${destVaultBalanceBefore.value.uiAmountString} USDC`,
+      );
+      console.log(
+        `   ║     After:  ${destVaultBalanceAfter.value.uiAmountString} USDC`,
+      );
+      console.log(
+        `   ║     Change: +${
+          (Number(destVaultBalanceAfter.value.amount) -
+            Number(destVaultBalanceBefore.value.amount)) /
+          1_000_000
+        } USDC`,
+      );
+
+      // CPMM Pool Vaults
+      const cpmmVault0BalanceAfter =
+        await provider.connection.getTokenAccountBalance(CPMM_TOKEN_VAULT_0);
+      const cpmmVault1BalanceAfter =
+        await provider.connection.getTokenAccountBalance(CPMM_TOKEN_VAULT_1);
+
+      console.log(
+        "   ╠══════════════════════════════════════════════════════════════════╣",
+      );
+      console.log(
+        "   ║ RAYDIUM CPMM POOL VAULTS:                                        ║",
+      );
+      console.log(`   ║   SOL Vault:  ${CPMM_TOKEN_VAULT_0.toBase58()}`);
+      console.log(
+        `   ║     Before: ${cpmmVault0BalanceBefore.value.uiAmountString} WSOL`,
+      );
+      console.log(
+        `   ║     After:  ${cpmmVault0BalanceAfter.value.uiAmountString} WSOL`,
+      );
+      console.log(
+        `   ║     Change: +${
+          (Number(cpmmVault0BalanceAfter.value.amount) -
+            Number(cpmmVault0BalanceBefore.value.amount)) /
+          LAMPORTS_PER_SOL
+        } WSOL (received from swap)`,
+      );
+      console.log(`   ║   USDC Vault: ${CPMM_TOKEN_VAULT_1.toBase58()}`);
+      console.log(
+        `   ║     Before: ${cpmmVault1BalanceBefore.value.uiAmountString} USDC`,
+      );
+      console.log(
+        `   ║     After:  ${cpmmVault1BalanceAfter.value.uiAmountString} USDC`,
+      );
+      console.log(
+        `   ║     Change: ${
+          (Number(cpmmVault1BalanceAfter.value.amount) -
+            Number(cpmmVault1BalanceBefore.value.amount)) /
+          1_000_000
+        } USDC (sent to privacy pool)`,
+      );
+
+      // Relayer/Payer
+      const relayerUsdcBalanceAfter =
+        await provider.connection.getTokenAccountBalance(
+          relayerTokenAccount.address,
+        );
+      const payerSolBalanceAfter = await provider.connection.getBalance(
+        payer.publicKey,
+      );
+
+      console.log(
+        "   ╠══════════════════════════════════════════════════════════════════╣",
+      );
+      console.log(
+        "   ║ RELAYER/PAYER:                                                   ║",
+      );
+      console.log(`   ║   Address: ${payer.publicKey.toBase58()}`);
+      console.log(
+        `   ║     SOL Balance: ${(
+          payerSolBalanceAfter / LAMPORTS_PER_SOL
+        ).toFixed(4)} SOL (was ${(
+          payerSolBalanceBefore / LAMPORTS_PER_SOL
+        ).toFixed(4)})`,
+      );
+      console.log(
+        `   ║     USDC Balance: ${relayerUsdcBalanceAfter.value.uiAmountString} USDC (was ${relayerUsdcBalanceBefore.value.uiAmountString})`,
+      );
+
+      console.log(
+        "   ╠══════════════════════════════════════════════════════════════════╣",
+      );
+      console.log(
+        "   ║ SWAP SUMMARY:                                                    ║",
+      );
+      console.log(
+        `   ║   Swapped: ${SWAP_AMOUNT / LAMPORTS_PER_SOL} SOL → USDC`,
+      );
+      const usdcToVault =
+        Number(destVaultBalanceAfter.value.amount) -
+        Number(destVaultBalanceBefore.value.amount);
+      const usdcToRelayer =
+        Number(relayerUsdcBalanceAfter.value.amount) -
+        Number(relayerUsdcBalanceBefore.value.amount);
+      const totalUsdcSwapped = usdcToVault + usdcToRelayer;
+      console.log(
+        `   ║   Total USDC from Swap: ${totalUsdcSwapped / 1_000_000} USDC`,
+      );
+      console.log(`   ║   USDC to Vault: ${usdcToVault / 1_000_000} USDC`);
+      console.log(
+        `   ║   USDC to Relayer (fee): ${usdcToRelayer / 1_000_000} USDC`,
+      );
+      console.log(
+        `   ║   Effective Rate: 1 SOL = ${(
+          (totalUsdcSwapped * LAMPORTS_PER_SOL) /
+          SWAP_AMOUNT /
+          1_000_000
+        ).toFixed(6)} USDC`,
+      );
+      console.log(
+        "   ╚══════════════════════════════════════════════════════════════════╝\n",
+      );
 
       // Update off-chain trees
       destOffchainTree.insert(destCommitment);
