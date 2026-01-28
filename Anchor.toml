@@ -25,7 +25,7 @@ cluster = "localnet"
 wallet = "/Users/admin/.config/solana/id.json"
 
 [test]
-startup_wait = 15000
+startup_wait = 60000
 
 [test.validator]
 url = "https://api.mainnet-beta.solana.com"
@@ -99,4 +99,216 @@ address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
 address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 
 [scripts]
-test = "npm run test:swap"
+test = "npm run test:amm"
+
+# ============================================
+# Raydium AMM V4 Configuration (SOL/USDC)
+# ============================================
+
+# Raydium AMM V4 Program
+[[test.validator.clone]]
+address = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+
+# Serum/OpenBook Program
+[[test.validator.clone]]
+address = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"
+
+# AMM Pool State
+[[test.validator.clone]]
+address = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"
+
+# AMM Authority
+[[test.validator.clone]]
+address = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+
+# AMM Open Orders
+[[test.validator.clone]]
+address = "HmiHHzq4Fym9e1D4qzLS6LDDM3tNsCTBPDWHTLZ763jY"
+
+# AMM Target Orders
+[[test.validator.clone]]
+address = "CZza3Ej4Mc58MnxWA385itCC9jCo3L1D7zc3LKy1bZMR"
+
+# AMM Base Vault (SOL)
+[[test.validator.clone]]
+address = "DQyrAcCrDXQ7NeoqGgDCZwBvWDcYmFCjSb9JtteuvPpz"
+
+# AMM Quote Vault (USDC)
+[[test.validator.clone]]
+address = "HLmqeL62xR1QoZ1HKKbXRrdN1p3phKpxRMb2VVopvBBz"
+
+# Serum Market
+[[test.validator.clone]]
+address = "8BnEgHoWFysVcuFFX7QztDmzuH8r5ZFvyP3sYwn1XTh6"
+
+# Serum Bids
+[[test.validator.clone]]
+address = "5jWUncPNBMZJ3sTHKmMLszypVkoRK6bfEQMQUHweeQnh"
+
+# Serum Asks
+[[test.validator.clone]]
+address = "EaXdHx7x3mdGA38j5RSmKYSXMzAFzzUXCLNBEDXDn1d5"
+
+# Serum Event Queue
+[[test.validator.clone]]
+address = "8CvwxZ9Db6XbLD46NZwwmVDZZRDy7eydFcAGkXKh9axa"
+
+# Serum Base Vault
+[[test.validator.clone]]
+address = "CKxTHwM9fPMRRvZmFnFoqKNd9pQR21c5Aq9bh5h9oghX"
+
+# Serum Quote Vault
+[[test.validator.clone]]
+address = "6A5NHCj1yF6urc9wZNe6Bcjj4LVszQNj5DwAWG97yzMu"
+
+# ============================================
+# Raydium AMM V4 SOL/USDT Pool Configuration
+# ============================================
+
+# SOL/USDT AMM Pool State
+[[test.validator.clone]]
+address = "7XawhbbxtsRcQA8KTkHT9f9nc6d69UwqCDh6U5EEbEmX"
+
+# SOL/USDT AMM Open Orders
+[[test.validator.clone]]
+address = "3oWQRLewGsUMA2pebcpGPPGrzyRNfbs7fQEMUxPAGgff"
+
+# SOL/USDT AMM Target Orders
+[[test.validator.clone]]
+address = "9x4knb3nuNAzxsV7YFuGLgnYqKArGemY54r2vFExM1dp"
+
+# SOL/USDT AMM Base Vault (SOL)
+[[test.validator.clone]]
+address = "876Z9waBygfzUrwwKFfnRcc7cfY4EQf6Kz1w7GRgbVYW"
+
+# SOL/USDT AMM Quote Vault (USDT)
+[[test.validator.clone]]
+address = "CB86HtaqpXbNWbq67L18y5x2RhqoJ6smb7xHUcyWdQAQ"
+
+# SOL/USDT Serum Market
+[[test.validator.clone]]
+address = "2AdaV97p6SfkuMQJdu8DHhBhmJe7oWdvbm52MJfYQmfA"
+
+# SOL/USDT Serum Bids
+[[test.validator.clone]]
+address = "F4LnU7SarP7nLmGPnDHxnCqZ8gRwiFRgbo5seifyicfo"
+
+# SOL/USDT Serum Asks
+[[test.validator.clone]]
+address = "BKgZNz8tqJFoZ9gEHKR6k33wBMeXKAaSWpW5zMhSRhr3"
+
+# SOL/USDT Serum Event Queue
+[[test.validator.clone]]
+address = "9zw6ztEpHfcKccahzTKgPkQNYhJMPwL4iJJc8BAztNYY"
+
+# SOL/USDT Serum Base Vault
+[[test.validator.clone]]
+address = "4zVFCGJVQhSvsJ625qTH4WKgvfPQpNpAVUfjpgCxbKh8"
+
+# SOL/USDT Serum Quote Vault
+[[test.validator.clone]]
+address = "9aoqhYjXBqWsTVCEjwtxrotx6sVPGVLmbpVSpSRzTv54"
+
+# ============================================
+# Raydium AMM V4 JUP/SOL Pool Configuration
+# ============================================
+
+# JUP Mint
+[[test.validator.clone]]
+address = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+
+# JUP/SOL AMM Pool State
+[[test.validator.clone]]
+address = "5Qtn7FFKmVH4Brx3V1cR8E4mot2V3eSmvFRBpmKjNy35"
+
+# AMM Base Vault (SOL)
+[[test.validator.clone]]
+address = "Acwf28DzuSVX6eYVWMNuPaD5378twu17NafazqF5PH89"
+
+# AMM Quote Vault (JUP)
+[[test.validator.clone]]
+address = "BegAFgvdVAkdvZv6G8tTjpuGxd1m6TagyBR26APSt5su"
+
+# AMM Open Orders
+[[test.validator.clone]]
+address = "6YZhHwBtcZee8gUWP9Q5UAo45ZTWq4fbmcuzZavDCTqr"
+
+# AMM Target Orders
+[[test.validator.clone]]
+address = "GbW9b9kPYZJSfgk1VzkdZ8qymGHpnpTSjYUtk7fa1pKr"
+
+# Market ID
+[[test.validator.clone]]
+address = "73Wb3iipqsS3Na1wQmv76sQ6LFKojKF6mXUKgU42HG3Y"
+
+# Market Bids
+[[test.validator.clone]]
+address = "HNM57UFT38WnKLYBQwFp2Mnm8GHriqZ891Eqe86GMvYu"
+
+# Market Asks
+[[test.validator.clone]]
+address = "GXeHADffqCk4ziHW4eeKv1rk3E2ruJ13C6L8k8DP1D27"
+
+# Market Event Queue
+[[test.validator.clone]]
+address = "C4GnNz9hVznyC2KX7YNGSwKwCTUU5Ho1LYp3FXhptxui"
+
+# Market Base Vault
+[[test.validator.clone]]
+address = "A3gx7w2p9miYq2wEUtqyCbViBQe8Fm6CJpsBjNP8t1fW"
+
+# Market Quote Vault
+[[test.validator.clone]]
+address = "6hcq3n5hFhwVVLXL7gZTybeYVBck4U8HmjCepJtmcGbN"
+
+# ============================================
+# Raydium AMM V4 USD1/SOL Pool Configuration
+# ============================================
+
+# USD1 Mint
+[[test.validator.clone]]
+address = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"
+
+# USD1/SOL AMM Pool State
+[[test.validator.clone]]
+address = "FaDoeere161VKUFqcrQEM8it6kSCHKrLyq7wWyPvBkPq"
+
+# AMM Base Vault (SOL)
+[[test.validator.clone]]
+address = "3U9HB8KNHXmAmiGMbDsj6fBxzM63dfX5JbaYs5oTHbtu"
+
+# AMM Quote Vault (USD1)
+[[test.validator.clone]]
+address = "GLx7TdT66CPKYJBn3Pzc9khrfXEx6mXtAiE8uskGBQJq"
+
+# AMM Open Orders
+[[test.validator.clone]]
+address = "HLgEs2cgaQPS4TN81dCHM8b213jbu14PefveN9GH6Q1t"
+
+# AMM Target Orders
+[[test.validator.clone]]
+address = "AYUAXXi12y86wkPQUdJCwGjsJorANtztDq2wqi9FZQCN"
+
+# Market ID
+[[test.validator.clone]]
+address = "CV2sfgbG8eM6dJe3sozjtRoeRF2oCik5VhMhn7n2niWT"
+
+# Market Bids
+[[test.validator.clone]]
+address = "5dHG6hwP2vXkk3QER3XsVfBbwvt3JJEkZccrBnFD3igx"
+
+# Market Asks
+[[test.validator.clone]]
+address = "FHMCccPDnNzuA7Z7QvbLpu2CwCVEbuA1rcDmdkSfg2dU"
+
+# Market Event Queue
+[[test.validator.clone]]
+address = "DdW7ZuAhAjTme8Kw1tsAxNpmAMiPAAQHfsCb72HaDPo5"
+
+# Market Base Vault
+[[test.validator.clone]]
+address = "3hJQCCWHYSYVGS1S1vJEVHWLuw6R6xPZD4sXLRQkcsvB"
+
+# Market Quote Vault
+[[test.validator.clone]]
+address = "5DKFA5wfP1HqLWkPa4weyRsdmikcm2Hr2hebUxkqZSMW"

@@ -765,10 +765,10 @@ pub struct TransactSwap<'info> {
     #[account(mut)]
     pub relayer_token_account: Box<Account<'info, TokenAccount>>,
 
-    // ---- Raydium CPMM Integration (NO SERUM) ----
-    /// Raydium CPMM program (Constant Product Market Maker)
-    /// CHECK: Validated against Raydium CPMM program ID in instruction
-    pub raydium_cpmm_program: UncheckedAccount<'info>,
+    // ---- Raydium Integration (CPMM or AMM) ----
+    /// Raydium Swap program (CPMM or AMM)
+    /// CHECK: Validated against Raydium program ID in instruction
+    pub swap_program: UncheckedAccount<'info>,
 
     // Additional Raydium CPMM accounts passed via remaining_accounts:
     // 0: pool_state - The CPMM pool state account

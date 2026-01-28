@@ -210,69 +210,151 @@ pub fn transact_swap<'info>(
         .checked_sub(swap_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // CPI to Raydium CPMM for swap
+    // CPI to Swap Program (Raydium CPMM or AMM)
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
         input_nullifiers[0].as_ref(),
         &[executor.bump],
     ];
 
-    require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
-    require!(
-        ctx.remaining_accounts.len() >= 8,
-        PrivacyError::InvalidPublicAmount
-    );
-
     let remaining = &ctx.remaining_accounts;
 
-    // Build CPMM swap instruction accounts
-    let cpmm_accounts = vec![
-        AccountMeta::new_readonly(executor.key(), true),
-        AccountMeta::new_readonly(remaining[0].key(), false),
-        AccountMeta::new_readonly(remaining[1].key(), false),
-        AccountMeta::new(remaining[2].key(), false),
-        AccountMeta::new(ctx.accounts.executor_source_token.key(), false),
-        AccountMeta::new(ctx.accounts.executor_dest_token.key(), false),
-        AccountMeta::new(remaining[3].key(), false),
-        AccountMeta::new(remaining[4].key(), false),
-        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
-        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
-        AccountMeta::new_readonly(remaining[5].key(), false),
-        AccountMeta::new_readonly(remaining[6].key(), false),
-        AccountMeta::new(remaining[7].key(), false),
-    ];
+    // Detect generic Swap Program type based on Instruction Discriminator
+    // Raydium CPMM: 8-byte discriminator (0x8fbe5adac41e33de for swap_base_input)
+    // Raydium AMM V4: 1-byte discriminator (0x09 for swap_base_in)
+    let is_cpmm = swap_data.len() >= 8
+        && swap_data[0] == 0x8f
+        && swap_data[1] == 0xbe
+        && swap_data[2] == 0x5a
+        && swap_data[3] == 0xda;
 
-    let swap_ix = Instruction {
-        program_id: ctx.accounts.raydium_cpmm_program.key(),
-        accounts: cpmm_accounts,
-        data: swap_data.clone(),
-    };
+    let is_amm = !is_cpmm && swap_data.len() >= 1 && swap_data[0] == 9;
 
-    let is_base_input = swap_data[0] == 0x8f && swap_data[1] == 0xbe;
-    msg!(
-        "Raydium CPMM: swap_base_{} amount={}",
-        if is_base_input { "input" } else { "output" },
-        swap_amount
-    );
+    if is_cpmm {
+        require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
+        require!(remaining.len() >= 8, PrivacyError::InvalidPublicAmount);
 
-    let account_infos = &[
-        executor.to_account_info(),
-        remaining[0].to_account_info(),
-        remaining[1].to_account_info(),
-        remaining[2].to_account_info(),
-        ctx.accounts.executor_source_token.to_account_info(),
-        ctx.accounts.executor_dest_token.to_account_info(),
-        remaining[3].to_account_info(),
-        remaining[4].to_account_info(),
-        ctx.accounts.token_program.to_account_info(),
-        ctx.accounts.token_program.to_account_info(),
-        remaining[5].to_account_info(),
-        remaining[6].to_account_info(),
-        remaining[7].to_account_info(),
-        ctx.accounts.raydium_cpmm_program.to_account_info(),
-    ];
+        // Build CPMM swap instruction accounts
+        let cpmm_accounts = vec![
+            AccountMeta::new_readonly(executor.key(), true),
+            AccountMeta::new_readonly(remaining[0].key(), false),
+            AccountMeta::new_readonly(remaining[1].key(), false),
+            AccountMeta::new(remaining[2].key(), false),
+            AccountMeta::new(ctx.accounts.executor_source_token.key(), false),
+            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false),
+            AccountMeta::new(remaining[3].key(), false),
+            AccountMeta::new(remaining[4].key(), false),
+            AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
+            AccountMeta::new_readonly(remaining[5].key(), false),
+            AccountMeta::new_readonly(remaining[6].key(), false),
+            AccountMeta::new(remaining[7].key(), false),
+        ];
 
-    invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+        let swap_ix = Instruction {
+            program_id: ctx.accounts.swap_program.key(),
+            accounts: cpmm_accounts,
+            data: swap_data.clone(),
+        };
+
+        msg!("Raydium CPMM: Executing Swap...");
+
+        let account_infos = &[
+            executor.to_account_info(),
+            remaining[0].to_account_info(),
+            remaining[1].to_account_info(),
+            remaining[2].to_account_info(),
+            ctx.accounts.executor_source_token.to_account_info(),
+            ctx.accounts.executor_dest_token.to_account_info(),
+            remaining[3].to_account_info(),
+            remaining[4].to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
+            remaining[5].to_account_info(),
+            remaining[6].to_account_info(),
+            remaining[7].to_account_info(),
+            ctx.accounts.swap_program.to_account_info(),
+        ];
+
+        invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+    } else if is_amm {
+        // Raydium AMM V4 Swap
+        // Accounts:
+        // 0. Token Program
+        // 1. Amm Id
+        // 2. Amm Authority
+        // 3. Amm Open Orders
+        // 4. Amm Target Orders
+        // 5. Pool Coin Token Account
+        // 6. Pool Pc Token Account
+        // 7. Serum Program
+        // 8. Serum Market
+        // 9. Serum Bids
+        // 10. Serum Asks
+        // 11. Serum Event Queue
+        // 12. Serum Coin Vault
+        // 13. Serum Pc Vault
+        // 14. Serum Vault Signer
+        // 15. User Source Token
+        // 16. User Dest Token
+        // 17. User Owner
+
+        // We expect remaining accounts to contain indices 1..15 (14 accounts)
+        // Token Program is known (ctx.accounts.token_program)
+        // User accounts are known
+        require!(
+            remaining.len() >= 14,
+            PrivacyError::InvalidPublicAmount // Should have specific error
+        );
+
+        let amm_accounts = vec![
+            AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // 0
+            AccountMeta::new(remaining[0].key(), false),                        // 1: Amm Id
+            AccountMeta::new_readonly(remaining[1].key(), false),               // 2: Amm Authority
+            AccountMeta::new(remaining[2].key(), false),                        // 3: Open Orders
+            AccountMeta::new(remaining[3].key(), false),                        // 4: Target Orders
+            AccountMeta::new(remaining[4].key(), false),                        // 5: Pool Coin
+            AccountMeta::new(remaining[5].key(), false),                        // 6: Pool Pc
+            AccountMeta::new_readonly(remaining[6].key(), false),               // 7: Serum Program
+            AccountMeta::new(remaining[7].key(), false),                        // 8: Serum Market
+            AccountMeta::new(remaining[8].key(), false),                        // 9: Bids
+            AccountMeta::new(remaining[9].key(), false),                        // 10: Asks
+            AccountMeta::new(remaining[10].key(), false),                       // 11: Event Queue
+            AccountMeta::new(remaining[11].key(), false),                       // 12: Coin Vault
+            AccountMeta::new(remaining[12].key(), false),                       // 13: Pc Vault
+            AccountMeta::new_readonly(remaining[13].key(), false),              // 14: Vault Signer
+            AccountMeta::new(ctx.accounts.executor_source_token.key(), false),  // 15
+            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false),    // 16
+            AccountMeta::new_readonly(executor.key(), true),                    // 17
+        ];
+
+        let swap_ix = Instruction {
+            program_id: ctx.accounts.swap_program.key(),
+            accounts: amm_accounts,
+            data: swap_data.clone(),
+        };
+
+        msg!("Raydium AMM: Executing Swap...");
+
+        // Construct account_infos including all dependencies
+        let mut account_infos = vec![
+            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.executor_source_token.to_account_info(),
+            ctx.accounts.executor_dest_token.to_account_info(),
+            executor.to_account_info(),
+            ctx.accounts.swap_program.to_account_info(),
+        ];
+
+        for acc in remaining.iter().take(14) {
+            account_infos.push(acc.to_account_info());
+        }
+
+        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
+    } else {
+        msg!(
+            "Unknown Swap Program detected. Requires CPMM (0x8fbe..) or AMM (0x09) discriminator."
+        );
+        return err!(PrivacyError::InvalidPublicAmount);
+    }
 
     // Transfer swapped tokens to dest vault (minus fee)
     ctx.accounts.executor_dest_token.reload()?;
