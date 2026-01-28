@@ -66,5 +66,37 @@ address = "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2"
 [[test.validator.clone]]
 address = "4MYrPgjgFceyhtwhG1ZX8UVb4wn1aQB5wzMimtFqg7U8"
 
+# ============================================
+# SOL/USDT CPMM Pool Configuration
+# ============================================
+
+# Clone SOL/USDT CPMM Pool State
+[[test.validator.clone]]
+address = "CzQhTRhvonYcnCsWxX3M4etA5SzpxeMrM2WSnNCua3Q1"
+
+# Clone Pool Token Vault 0 (SOL for USDT pool)
+[[test.validator.clone]]
+address = "F8nKR5gxnpgcnJbX3BuG6fi1kfviAy9dfmKWYbRLuEUZ"
+
+# Clone Pool Token Vault 1 (USDT)
+[[test.validator.clone]]
+address = "43x9CiKXAg6KoQaEFarh9dmy97XNrmxCLstCarQK8YGQ"
+
+# Clone USDT Mint
+[[test.validator.clone]]
+address = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+
+# Clone SOL/USDT LP Mint
+[[test.validator.clone]]
+address = "3xsXc8c1D8v1sbSSrVKegbWMMbnZrMktosLFUCrumMrB"
+
+# Clone SOL/USDT AMM Config
+[[test.validator.clone]]
+address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
+
+# Clone SOL/USDT Observation State
+[[test.validator.clone]]
+address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
+
 [scripts]
 test = "npm run test:swap"

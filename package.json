@@ -20,6 +20,8 @@
     "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
     "@metaplex-foundation/umi": "^1.4.1",
     "@metaplex-foundation/umi-bundle-defaults": "^1.4.1",
+    "@solana/buffer-layout": "^4.0.1",
+    "@solana/buffer-layout-utils": "^0.3.0",
     "@zkprivacysol/sdk-core": "^0.1.12",
     "bs58": "^6.0.0",
     "circomlibjs": "^0.1.7",

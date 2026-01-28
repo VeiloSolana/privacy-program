@@ -202,6 +202,14 @@ pub fn transact_swap<'info>(
         swap_amount,
     )?;
 
+    // Update source pool TVL (decrease by swap_amount)
+    ctx.accounts.source_config.total_tvl = ctx
+        .accounts
+        .source_config
+        .total_tvl
+        .checked_sub(swap_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+
     // CPI to Raydium CPMM for swap
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
@@ -308,6 +316,14 @@ pub fn transact_swap<'info>(
         vault_amount,
     )?;
 
+    // Update dest pool TVL (increase by vault_amount)
+    ctx.accounts.dest_config.total_tvl = ctx
+        .accounts
+        .dest_config
+        .total_tvl
+        .checked_add(vault_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+
     // Pay relayer fee
     if relayer_fee > 0 {
         token::transfer(
@@ -324,37 +340,48 @@ pub fn transact_swap<'info>(
         )?;
     }
 
-    // Insert commitments into destination tree
+    // Insert swap output (commitment 0) into destination tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
 
     let max_capacity = 1u64 << (dest_tree.height as u64);
     let remaining = max_capacity.saturating_sub(dest_tree.next_index);
-    require!(remaining >= 2, PrivacyError::MerkleTreeFull);
+    require!(remaining >= 1, PrivacyError::MerkleTreeFull);
 
     let leaf_index_0 = dest_tree.next_index;
     MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *dest_tree)?;
 
-    let leaf_index_1 = dest_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *dest_tree)?;
-
-    let new_root = dest_tree.root;
+    let dest_new_root = dest_tree.root;
     drop(dest_tree);
 
     emit!(crate::CommitmentEvent {
         commitment: output_commitments[0],
         leaf_index: leaf_index_0,
-        new_root,
+        new_root: dest_new_root,
         timestamp: clock.unix_timestamp,
         mint_address: dest_mint,
         tree_id: dest_tree_id,
     });
+
+    // Insert change note (commitment 1) back into source tree
+    let mut source_tree = ctx.accounts.source_tree.load_mut()?;
+
+    let max_capacity = 1u64 << (source_tree.height as u64);
+    let remaining = max_capacity.saturating_sub(source_tree.next_index);
+    require!(remaining >= 1, PrivacyError::MerkleTreeFull);
+
+    let leaf_index_1 = source_tree.next_index;
+    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *source_tree)?;
+
+    let source_new_root = source_tree.root;
+    drop(source_tree);
+
     emit!(crate::CommitmentEvent {
         commitment: output_commitments[1],
         leaf_index: leaf_index_1,
-        new_root,
+        new_root: source_new_root,
         timestamp: clock.unix_timestamp,
-        mint_address: dest_mint,
-        tree_id: dest_tree_id,
+        mint_address: source_mint,
+        tree_id: source_tree_id,
     });
 
     // Close executor accounts
