@@ -5,9 +5,9 @@ use num_bigint::BigUint;
 use std::ops::Neg;
 
 use crate::groth16::Groth16Verifier;
-use crate::vk_constants::{TRANSACTION_VK, SWAP_VK};
-use crate::{PrivacyError, TransactionPublicInputs};
 use crate::swap::SwapPublicInputs;
+use crate::vk_constants::{SWAP_VK, TRANSACTION_VK};
+use crate::{PrivacyError, TransactionPublicInputs};
 
 /// Proof broken into (a, b, c) parts - for legacy withdraw
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -251,10 +251,7 @@ fn u64_to_field_be(value: u64) -> [u8; 32] {
 /// 8. changeCommitment   - Change output commitment (source token)
 /// 9. destCommitment     - Destination output commitment (dest token)
 /// 10. swapAmount        - Amount being swapped (public for DEX CPI)
-pub fn verify_swap_transaction_groth16(
-    proof: SwapProof,
-    inputs: &SwapPublicInputs,
-) -> Result<()> {
+pub fn verify_swap_transaction_groth16(proof: SwapProof, inputs: &SwapPublicInputs) -> Result<()> {
     // ----- 1. Build public input array (10 inputs) -----
     let mut public_inputs: [[u8; 32]; 10] = [[0u8; 32]; 10];
 

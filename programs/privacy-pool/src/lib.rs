@@ -629,6 +629,7 @@ fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
 /// All atomic - succeeds or reverts entirely
 #[derive(Accounts)]
 #[instruction(
+    proof: zk::SwapProof,
     source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
