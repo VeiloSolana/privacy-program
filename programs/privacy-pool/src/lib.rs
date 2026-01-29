@@ -19,6 +19,15 @@ declare_id!("6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU");
 
 // ---- Constants ----
 
+// AUDIT-015: Compute Budget Requirements for ZK Verification
+// Groth16 verification performs 4 BN254 pairings + scalar multiplications
+// Transaction circuit (8 public inputs): ~350,000 CUs
+// Swap circuit (10 public inputs): ~400,000 CUs
+// Clients MUST prepend ComputeBudgetInstruction::SetComputeUnitLimit
+// with at least 500,000 CUs before calling transact() or transact_swap()
+pub const RECOMMENDED_COMPUTE_UNITS_TRANSACTION: u32 = 500_000;
+pub const RECOMMENDED_COMPUTE_UNITS_SWAP: u32 = 500_000;
+
 /// Authorized admin address that can initialize pools
 /// For localnet/test: None (any wallet can initialize for testing)
 /// For devnet/mainnet: Specific authorized wallet only
@@ -543,7 +552,7 @@ pub struct Transact<'info> {
     /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
@@ -554,7 +563,7 @@ pub struct Transact<'info> {
     /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
@@ -679,7 +688,7 @@ pub struct TransactSwap<'info> {
 
     /// First nullifier marker for source pool
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
@@ -689,7 +698,7 @@ pub struct TransactSwap<'info> {
 
     /// Second nullifier marker for source pool
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
@@ -737,8 +746,9 @@ pub struct TransactSwap<'info> {
     // ---- Ephemeral Swap Executor PDA ----
     /// Executor PDA - holds tokens during swap
     /// Seeds ensure this is unique per swap (bound to nullifier)
+    /// AUDIT-003 fix: Use init instead of init_if_needed to prevent griefing/front-running
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"swap_executor", input_nullifier_0.as_ref()],
         bump,
@@ -1192,6 +1202,12 @@ pub mod privacy_pool {
                     ctx.accounts.relayer.key(),
                     PrivacyError::DepositorTokenAccountMismatch
                 );
+
+                // AUDIT-004 fix: Prevent delegation bypass - deposits must use direct ownership
+                require!(
+                    user_token.delegate.is_none() || user_token.delegated_amount == 0,
+                    PrivacyError::InvalidTokenAuthority
+                );
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -1240,6 +1256,9 @@ pub mod privacy_pool {
         };
 
         // 6. Verify Groth16 proof
+        // AUDIT-015: ZK verification consumes ~350K CUs (4 pairings + 8 scalar muls)
+        // Clients must prepend ComputeBudgetInstruction::SetComputeUnitLimit(500_000)
+        // to prevent ComputeBudgetExceeded failures during network congestion
         zk::verify_transaction_groth16(proof, &public_inputs)?;
 
         // 7. Check root is known in input tree

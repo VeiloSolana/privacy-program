@@ -145,9 +145,18 @@ pub fn transact_swap<'info>(
     );
     require!(source_mint != dest_mint, PrivacyError::InvalidMintAddress);
 
+    // AUDIT-013 fix: Check relayer is whitelisted in BOTH source and dest pools
+    // This prevents relayers authorized only for one pool from facilitating
+    // swaps across pool boundaries they shouldn't access
     require!(
         ctx.accounts
             .source_config
+            .is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
+    require!(
+        ctx.accounts
+            .dest_config
             .is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
@@ -213,6 +222,9 @@ pub fn transact_swap<'info>(
         output_commitments,
         swap_amount,
     };
+    // AUDIT-015: ZK verification consumes ~400K CUs (4 pairings + 10 scalar muls)
+    // Clients must prepend ComputeBudgetInstruction::SetComputeUnitLimit(500_000)
+    // to prevent ComputeBudgetExceeded failures during network congestion
     verify_swap_transaction_groth16(proof, &public_inputs)?;
     // }
     // #[cfg(not(feature = "zk-verify"))]
@@ -225,6 +237,18 @@ pub fn transact_swap<'info>(
         PrivacyError::UnknownRoot
     );
     drop(source_tree);
+
+    // Validate tree_id matches to prevent cross-tree nullifier reuse (AUDIT-002 fix)
+    require!(
+        ctx.accounts.source_nullifier_marker_0.tree_id == 0
+            || ctx.accounts.source_nullifier_marker_0.tree_id == source_tree_id,
+        PrivacyError::NullifierTreeMismatch
+    );
+    require!(
+        ctx.accounts.source_nullifier_marker_1.tree_id == 0
+            || ctx.accounts.source_nullifier_marker_1.tree_id == source_tree_id,
+        PrivacyError::NullifierTreeMismatch
+    );
 
     // Mark nullifiers as spent
     crate::mark_nullifier_spent(
@@ -244,25 +268,9 @@ pub fn transact_swap<'info>(
         source_tree_id,
     )?;
 
-    // Initialize executor PDA
-    // and allow reclaiming it. In practice, Solana's atomic transactions prevent this,
-    // but this provides defense-in-depth.
+    // Initialize executor PDA (AUDIT-003 fix: now uses 'init' so always fresh, no staleness check needed)
     let executor = &mut ctx.accounts.executor;
     let current_slot = Clock::get()?.slot;
-
-    // If executor already has data, verify it's stale before reclaiming
-    if executor.created_slot != 0 {
-        let slots_elapsed = current_slot.saturating_sub(executor.created_slot);
-        require!(
-            slots_elapsed >= SwapExecutor::STALE_THRESHOLD_SLOTS,
-            PrivacyError::ExecutorNotStale
-        );
-        // Stale executor - reclaim it
-        msg!(
-            "Reclaiming stale executor from slot {}",
-            executor.created_slot
-        );
-    }
 
     executor.source_mint = source_mint;
     executor.dest_mint = dest_mint;
@@ -272,6 +280,15 @@ pub fn transact_swap<'info>(
 
     // Transfer from source vault to executor
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    // AUDIT-007 fix: Validate vault has sufficient balance before transfer
+    let vault_token_data = crate::deserialize_token_account(
+        &ctx.accounts.source_vault_token_account.to_account_info(),
+    )?;
+    require!(
+        vault_token_data.amount >= swap_amount,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
 
     let source_vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
