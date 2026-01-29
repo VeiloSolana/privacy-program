@@ -88,7 +88,8 @@ pub fn transact_swap<'info>(
     // Prevents arbitrary CPI to malicious programs
     require!(
         ctx.accounts.swap_program.key() == crate::RAYDIUM_CPMM_PROGRAM_ID
-            || ctx.accounts.swap_program.key() == crate::RAYDIUM_AMM_PROGRAM_ID,
+            || ctx.accounts.swap_program.key() == crate::RAYDIUM_AMM_PROGRAM_ID
+            || ctx.accounts.swap_program.key() == crate::JUPITER_PROGRAM_ID,
         PrivacyError::InvalidSwapProgram
     );
 
@@ -267,6 +268,11 @@ pub fn transact_swap<'info>(
 
     let is_amm = !is_cpmm && swap_data.len() >= 1 && swap_data[0] == 9;
 
+    // Detect Jupiter V6 "route" instruction
+    let is_jupiter = !is_cpmm && !is_amm
+        && swap_data.len() >= 8
+        && swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a];
+
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
@@ -430,9 +436,83 @@ pub fn transact_swap<'info>(
         }
 
         invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
+    } else if is_jupiter {
+        // Jupiter V6 Route Swap
+        msg!("Jupiter V6: Executing Route Swap...");
+
+        // Minimum required: token_program + 8 base accounts + event authority
+        require!(
+            remaining.len() >= 1,  // At least event authority
+            PrivacyError::InvalidRemainingAccounts
+        );
+
+        // Extract event authority (should be first in remaining_accounts)
+        let event_authority = &remaining[0];
+        require!(
+            event_authority.key() == crate::JUPITER_EVENT_AUTHORITY,
+            PrivacyError::InvalidRemainingAccounts
+        );
+
+        // Determine destination mint for account #5
+        let dest_mint = if ctx.accounts.dest_mint_account.key() == ctx.accounts.source_config.mint_address {
+            ctx.accounts.source_config.mint_address
+        } else {
+            ctx.accounts.dest_config.mint_address
+        };
+
+        // Build Jupiter account list following IDL structure
+        let mut jupiter_accounts = vec![
+            AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // 0: token_program
+            AccountMeta::new_readonly(executor.key(), true),                    // 1: user_transfer_authority (signer)
+            AccountMeta::new(ctx.accounts.executor_source_token.key(), false),  // 2: user_source_token_account
+            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false),    // 3: user_destination_token_account
+            AccountMeta::new_readonly(ctx.accounts.swap_program.key(), false),  // 4: destination_token_account (optional - use program)
+            AccountMeta::new_readonly(dest_mint, false),                        // 5: destination_mint
+            AccountMeta::new_readonly(ctx.accounts.swap_program.key(), false),  // 6: platform_fee_account (optional - use program)
+            AccountMeta::new_readonly(event_authority.key(), false),            // 7: event_authority
+            AccountMeta::new_readonly(ctx.accounts.swap_program.key(), false),  // 8: program (self-reference)
+        ];
+
+        // Add remaining DEX-specific routing accounts (from Jupiter API response)
+        for i in 1..remaining.len() {
+            let acc = &remaining[i];
+            // All routing accounts are writable and unsigned (as per example transaction)
+            jupiter_accounts.push(AccountMeta::new(acc.key(), false));
+        }
+
+        // Construct instruction
+        let swap_ix = Instruction {
+            program_id: ctx.accounts.swap_program.key(),
+            accounts: jupiter_accounts,
+            data: swap_data.clone(),  // Contains: discriminator + route_plan + params
+        };
+
+        // Build account_infos for invoke_signed
+        let mut account_infos = vec![
+            ctx.accounts.token_program.to_account_info(),
+            executor.to_account_info(),
+            ctx.accounts.executor_source_token.to_account_info(),
+            ctx.accounts.executor_dest_token.to_account_info(),
+            ctx.accounts.swap_program.to_account_info(),  // Used 3 times (dest account, fee account, program)
+        ];
+
+        // Add dest mint (find it in the pool configs)
+        if ctx.accounts.source_config.mint_address == dest_mint {
+            account_infos.push(ctx.accounts.source_mint_account.to_account_info());
+        } else {
+            account_infos.push(ctx.accounts.dest_mint_account.to_account_info());
+        }
+
+        // Add remaining accounts
+        for acc in remaining.iter() {
+            account_infos.push(acc.to_account_info());
+        }
+
+        // Execute CPI with executor PDA signing
+        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
     } else {
         msg!(
-            "Unknown Swap Program detected. Requires CPMM (0x8fbe..) or AMM (0x09) discriminator."
+            "Unknown Swap Program detected. Requires CPMM (0x8fbe..), AMM (0x09), or Jupiter (0xe517cb97..) discriminator."
         );
         return err!(PrivacyError::InvalidPublicAmount);
     }

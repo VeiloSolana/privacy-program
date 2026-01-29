@@ -18,7 +18,8 @@
     "clone-jupiter": "node scripts/clone-jupiter-route.js",
     "clone-jupiter:start": "node scripts/clone-jupiter-route.js --start",
     "setup-jupiter-env": "./scripts/setup-jupiter-test-env.sh",
-    "test:jupiter": "ts-node scripts/test-jupiter-integration.ts"
+    "test:jupiter-old": "ts-node scripts/test-jupiter-integration.ts",
+    "test:jupiter": "mocha -r ts-node/register -t 1000000 'tests/jupiter-swap.test.ts'"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",

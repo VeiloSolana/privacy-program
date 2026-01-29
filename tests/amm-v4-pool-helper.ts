@@ -939,3 +939,12 @@ export async function getPoolKeysForSwap(
 
   return { poolKeys, isBuy };
 }
+
+// ============================================================================
+// JUPITER V6 CONSTANTS
+// ============================================================================
+
+// Jupiter V6 Constants
+export const JUPITER_PROGRAM_ID = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+export const JUPITER_EVENT_AUTHORITY = new PublicKey('D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf');
+export const JUPITER_ROUTE_DISCRIMINATOR = Buffer.from([0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a]);
