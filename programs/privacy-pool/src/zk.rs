@@ -5,8 +5,9 @@ use num_bigint::BigUint;
 use std::ops::Neg;
 
 use crate::groth16::Groth16Verifier;
-use crate::vk_constants::TRANSACTION_VK;
+use crate::vk_constants::{TRANSACTION_VK, SWAP_VK};
 use crate::{PrivacyError, TransactionPublicInputs};
+use crate::swap::SwapPublicInputs;
 
 /// Proof broken into (a, b, c) parts - for legacy withdraw
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -213,6 +214,108 @@ pub fn verify_transaction_groth16(
         &proof.proof_c,
         &public_inputs,
         &TRANSACTION_VK,
+    )
+    .map_err(|_| PrivacyError::InvalidProof)?;
+
+    let ok = verifier.verify().map_err(|_| PrivacyError::VerifyFailed)?;
+
+    require!(ok, PrivacyError::VerifyFailed);
+    Ok(())
+}
+
+/// Proof for swap transaction circuit (2-in-2-out cross-pool UTXO model)
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct SwapProof {
+    pub proof_a: [u8; 64],
+    pub proof_b: [u8; 128],
+    pub proof_c: [u8; 64],
+}
+
+/// Convert u64 to 32-byte big-endian field element
+fn u64_to_field_be(value: u64) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[24..].copy_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+/// Verify swap transaction Groth16 proof (2-in-2-out cross-pool UTXO model)
+///
+/// Public inputs (10 total):
+/// 1. sourceRoot         - Merkle root of source pool
+/// 2. swapParamsHash     - Hash of swap parameters (mints, min amount, deadline)
+/// 3. extDataHash        - Hash of external data (relayer, fee)
+/// 4. sourceMint         - Source token mint address
+/// 5. destMint           - Destination token mint address
+/// 6. inputNullifiers[0] - First input nullifier
+/// 7. inputNullifiers[1] - Second input nullifier
+/// 8. changeCommitment   - Change output commitment (source token)
+/// 9. destCommitment     - Destination output commitment (dest token)
+/// 10. swapAmount        - Amount being swapped (public for DEX CPI)
+pub fn verify_swap_transaction_groth16(
+    proof: SwapProof,
+    inputs: &SwapPublicInputs,
+) -> Result<()> {
+    // ----- 1. Build public input array (10 inputs) -----
+    let mut public_inputs: [[u8; 32]; 10] = [[0u8; 32]; 10];
+
+    // 1. sourceRoot
+    public_inputs[0] = reduce_to_field_be(inputs.source_root);
+
+    // 2. swapParamsHash
+    public_inputs[1] = reduce_to_field_be(inputs.swap_params_hash);
+
+    // 3. extDataHash
+    public_inputs[2] = reduce_to_field_be(inputs.ext_data_hash);
+
+    // 4. sourceMint
+    public_inputs[3] = reduce_to_field_be(inputs.source_mint.to_bytes());
+
+    // 5. destMint
+    public_inputs[4] = reduce_to_field_be(inputs.dest_mint.to_bytes());
+
+    // 6-7. inputNullifiers[2]
+    public_inputs[5] = reduce_to_field_be(inputs.input_nullifiers[0]);
+    public_inputs[6] = reduce_to_field_be(inputs.input_nullifiers[1]);
+
+    // 8. changeCommitment (output_commitments[0])
+    public_inputs[7] = reduce_to_field_be(inputs.output_commitments[0]);
+
+    // 9. destCommitment (output_commitments[1])
+    public_inputs[8] = reduce_to_field_be(inputs.output_commitments[1]);
+
+    // 10. swapAmount (u64 -> field element)
+    public_inputs[9] = u64_to_field_be(inputs.swap_amount);
+
+    // ----- 2. Re-encode proof_a: G1 -> 64-byte alt_bn128 layout -----
+    let g1_point = G1::deserialize_with_mode(
+        &*[&change_endianness(&proof.proof_a[..]), &[0u8][..]].concat(),
+        Compress::No,
+        Validate::Yes,
+    )
+    .map_err(|_| PrivacyError::InvalidProof)?;
+
+    let g1_neg = g1_point.neg();
+    let mut proof_a_neg = [0u8; 65];
+    g1_neg
+        .x
+        .serialize_with_mode(&mut proof_a_neg[..32], Compress::No)
+        .map_err(|_| PrivacyError::InvalidProof)?;
+    g1_neg
+        .y
+        .serialize_with_mode(&mut proof_a_neg[32..64], Compress::No)
+        .map_err(|_| PrivacyError::InvalidProof)?;
+
+    let proof_a: [u8; 64] = change_endianness(&proof_a_neg[..64])
+        .try_into()
+        .map_err(|_| PrivacyError::InvalidProof)?;
+
+    // ----- 3. Verify with Groth16Verifier<10> -----
+    let mut verifier = Groth16Verifier::<10>::new(
+        &proof_a,
+        &proof.proof_b,
+        &proof.proof_c,
+        &public_inputs,
+        &SWAP_VK,
     )
     .map_err(|_| PrivacyError::InvalidProof)?;
 

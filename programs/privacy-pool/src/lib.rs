@@ -11,6 +11,7 @@ pub mod zk;
 
 // Re-export swap types for Anchor
 pub use swap::{SwapExecutor, SwapParams, SwapPublicInputs};
+pub use zk::SwapProof;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
@@ -1352,6 +1353,7 @@ pub mod privacy_pool {
     /// All in one transaction - see swap.rs for implementation details
     pub fn transact_swap<'info>(
         ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
+        proof: zk::SwapProof,
         source_root: [u8; 32],
         source_tree_id: u16,
         source_mint: Pubkey,
@@ -1368,6 +1370,7 @@ pub mod privacy_pool {
     ) -> Result<()> {
         swap::transact_swap(
             ctx,
+            proof,
             source_root,
             source_tree_id,
             source_mint,

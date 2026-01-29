@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
 use anchor_spl::token::{self, CloseAccount, Transfer};
 
+use crate::zk::{verify_swap_transaction_groth16, SwapProof};
 use crate::{ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap};
 
 /// Ephemeral PDA that holds tokens during swap, created and closed atomically
@@ -69,6 +70,7 @@ pub struct SwapPublicInputs {
 /// Atomic cross-pool swap: source pool → DEX → destination pool
 pub fn transact_swap<'info>(
     ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
+    proof: SwapProof,
     source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
@@ -137,10 +139,8 @@ pub fn transact_swap<'info>(
     );
 
     // ╔══════════════════════════════════════════════════════════════════════════╗
-    // ║ CRITICAL TODO: ZK PROOF VERIFICATION                                     ║
-    // ║ Without this, the swap is NOT privacy-preserving!                        ║
-    // ║                                                                          ║
-    // ║ The proof must verify:                                                   ║
+    // ║ ZK PROOF VERIFICATION                                                    ║
+    // ║ Verifies:                                                                ║
     // ║   1. User owns input notes (knows preimages for nullifiers)              ║
     // ║   2. Input notes exist in source Merkle tree (root membership)           ║
     // ║   3. Output commitments are correctly formed                             ║
@@ -148,17 +148,22 @@ pub fn transact_swap<'info>(
     // ║   5. ext_data_hash matches Poseidon(relayer, fee)                        ║
     // ║   6. swap_params_hash matches committed swap parameters                  ║
     // ╚══════════════════════════════════════════════════════════════════════════╝
-    // let public_inputs = SwapPublicInputs {
-    //     source_root,
-    //     swap_params_hash: swap_params.hash()?,
-    //     ext_data_hash: ext_data.hash()?,
-    //     source_mint,
-    //     dest_mint,
-    //     input_nullifiers,
-    //     output_commitments,
-    //     swap_amount,
-    // };
-    // verify_swap_groth16(proof, &public_inputs)?;
+    // #[cfg(feature = "zk-verify")]
+    // {
+    let public_inputs = SwapPublicInputs {
+        source_root,
+        swap_params_hash: swap_params.hash()?,
+        ext_data_hash: ext_data.hash()?,
+        source_mint,
+        dest_mint,
+        input_nullifiers,
+        output_commitments,
+        swap_amount,
+    };
+    verify_swap_transaction_groth16(proof, &public_inputs)?;
+    // }
+    // #[cfg(not(feature = "zk-verify"))]
+    // let _ = proof; // Suppress unused warning when ZK verification is disabled
 
     // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;

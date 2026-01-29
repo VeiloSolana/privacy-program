@@ -99,7 +99,7 @@ address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
 address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 
 [scripts]
-test = "npm run test:amm-various"
+test = "npm run test:spl"
 
 # ============================================
 # Raydium AMM V4 Configuration (SOL/USDC)
