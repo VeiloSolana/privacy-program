@@ -63,6 +63,12 @@ pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("sTorERYB6xAZ1SSbwpK3zoK2EEwbBrc7TZAzg1uCGiH"),  // stORE
 ];
 
+/// Raydium CPMM program ID (mainnet)
+pub const RAYDIUM_CPMM_PROGRAM_ID: Pubkey = pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
+
+/// Raydium AMM V4 program ID (mainnet)
+pub const RAYDIUM_AMM_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+
 // ---- Accounts ----
 
 #[account]
@@ -730,7 +736,7 @@ pub struct TransactSwap<'info> {
     /// Executor PDA - holds tokens during swap
     /// Seeds ensure this is unique per swap (bound to nullifier)
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         seeds = [b"swap_executor", input_nullifier_0.as_ref()],
         bump,
@@ -903,7 +909,10 @@ pub mod privacy_pool {
         MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
         // Update pool config
-        cfg.num_trees += 1;
+        cfg.num_trees = cfg
+            .num_trees
+            .checked_add(1)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         Ok(())
     }
@@ -1814,4 +1823,10 @@ pub enum PrivacyError {
     InsufficientDelegation,
     #[msg("Nullifier marker tree_id mismatch - nullifier already used in different tree")]
     NullifierTreeMismatch,
+    #[msg("Invalid swap program: must be Raydium CPMM or AMM")]
+    InvalidSwapProgram,
+    #[msg("Executor PDA exists and is not stale - cannot reclaim yet")]
+    ExecutorNotStale,
+    #[msg("Invalid remaining accounts: wrong count or ownership")]
+    InvalidRemainingAccounts,
 }

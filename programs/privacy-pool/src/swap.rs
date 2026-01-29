@@ -10,11 +10,17 @@ pub struct SwapExecutor {
     pub source_mint: Pubkey,
     pub dest_mint: Pubkey,
     pub nullifier: [u8; 32],
+    /// Slot when this executor was created (for stale detection)
+    pub created_slot: u64,
     pub bump: u8,
 }
 
 impl SwapExecutor {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 1;
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1;
+
+    /// Number of slots after which an executor is considered stale and can be reclaimed
+    /// ~2 minutes at 400ms slot time (enough for any reasonable transaction)
+    pub const STALE_THRESHOLD_SLOTS: u64 = 300;
 }
 
 /// Swap parameters committed to in the ZK proof
@@ -77,6 +83,13 @@ pub fn transact_swap<'info>(
     swap_data: Vec<u8>,
     ext_data: ExtData,
 ) -> Result<()> {
+    // Prevents arbitrary CPI to malicious programs
+    require!(
+        ctx.accounts.swap_program.key() == crate::RAYDIUM_CPMM_PROGRAM_ID
+            || ctx.accounts.swap_program.key() == crate::RAYDIUM_AMM_PROGRAM_ID,
+        PrivacyError::InvalidSwapProgram
+    );
+
     // Validate pools and mints
     require!(
         ctx.accounts.source_config.mint_address == source_mint,
@@ -174,10 +187,29 @@ pub fn transact_swap<'info>(
     )?;
 
     // Initialize executor PDA
+    // and allow reclaiming it. In practice, Solana's atomic transactions prevent this,
+    // but this provides defense-in-depth.
     let executor = &mut ctx.accounts.executor;
+    let current_slot = Clock::get()?.slot;
+
+    // If executor already has data, verify it's stale before reclaiming
+    if executor.created_slot != 0 {
+        let slots_elapsed = current_slot.saturating_sub(executor.created_slot);
+        require!(
+            slots_elapsed >= SwapExecutor::STALE_THRESHOLD_SLOTS,
+            PrivacyError::ExecutorNotStale
+        );
+        // Stale executor - reclaim it
+        msg!(
+            "Reclaiming stale executor from slot {}",
+            executor.created_slot
+        );
+    }
+
     executor.source_mint = source_mint;
     executor.dest_mint = dest_mint;
     executor.nullifier = input_nullifiers[0];
+    executor.created_slot = current_slot;
     executor.bump = ctx.bumps.executor;
 
     // Transfer from source vault to executor
@@ -232,7 +264,27 @@ pub fn transact_swap<'info>(
 
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
-        require!(remaining.len() >= 8, PrivacyError::InvalidPublicAmount);
+        require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
+
+        // remaining[0] = CPMM config - must be owned by CPMM program
+        require!(
+            remaining[0].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        // remaining[2] = pool state - must be owned by CPMM program
+        require!(
+            remaining[2].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        // remaining[3], remaining[4] = token vaults - must be owned by Token program
+        require!(
+            remaining[3].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        require!(
+            remaining[4].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
 
         // Build CPMM swap instruction accounts
         let cpmm_accounts = vec![
@@ -303,7 +355,31 @@ pub fn transact_swap<'info>(
         // User accounts are known
         require!(
             remaining.len() >= 14,
-            PrivacyError::InvalidPublicAmount // Should have specific error
+            PrivacyError::InvalidRemainingAccounts
+        );
+
+        // remaining[0] = AMM Id - must be owned by AMM program
+        require!(
+            remaining[0].owner == &crate::RAYDIUM_AMM_PROGRAM_ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        // remaining[4], remaining[5] = Pool token accounts - must be owned by Token program
+        require!(
+            remaining[4].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        require!(
+            remaining[5].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        // remaining[11], remaining[12] = Serum vaults - must be owned by Token program
+        require!(
+            remaining[11].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        require!(
+            remaining[12].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
         );
 
         let amm_accounts = vec![
