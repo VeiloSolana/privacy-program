@@ -47,6 +47,8 @@ import {
   derivePublicKey,
   bytesToBigIntBE,
   generateTransactionProof,
+  generateSwapProof,
+  computeSwapParamsHash,
   reduceToField,
 } from "./test-helpers";
 
@@ -57,6 +59,7 @@ import {
  * 1. Consumes notes from source pool (WSOL)
  * 2. CPIs to Raydium CPMM to execute swap SOL→USDC
  * 3. Creates notes in destination pool (USDC)
+ *
  *
  * Uses cloned mainnet Raydium CPMM SOL/USDC pool for testing.
  */
@@ -1020,29 +1023,19 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const changeAmount = note.amount - BigInt(SWAP_AMOUNT);
 
     // Generate output commitment for destination pool (USDC)
-    // Note: For the ZK proof, we need to use source mint for all commitments
-    // because the current circuit only supports a single mint address.
     const destPrivKey = randomBytes32();
     const destPubKey = derivePublicKey(poseidon, destPrivKey);
     const destBlinding = randomBytes32();
     const swappedAmount = exactUsdcOut; // EXACT amount from simulation
 
     // For the actual program instruction, use dest mint with exact amount
+    // The swap circuit correctly handles different mints for change vs dest
     const destCommitment = computeCommitment(
       poseidon,
       swappedAmount,
       destPubKey,
       destBlinding,
       destTokenMint, // USDC - actual commitment for dest pool
-    );
-
-    // For ZK proof, compute with source mint and zkSwappedAmount (circuit limitation)
-    const destCommitmentForProof = computeCommitment(
-      poseidon,
-      zkSwappedAmount,
-      destPubKey,
-      destBlinding,
-      sourceTokenMint, // WSOL - for ZK proof compatibility
     );
 
     // Change note stays in source token (WSOL) - if any
@@ -1066,33 +1059,70 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    // Generate ZK proof
-    // Note: Using destCommitmentForProof (source mint) for ZK compatibility
-    // The actual destCommitment (dest mint) is used in the on-chain instruction
-    // Output amounts: [0, changeAmount] to satisfy balance equation
-    console.log("   Generating ZK proof...");
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -BigInt(SWAP_AMOUNT), // Negative = withdrawal/swap out
+    // Swap params for ZK proof (must match on-chain swapParams)
+    const minAmountOutBigInt = (simulatedOutput * 95n) / 100n; // 5% slippage
+    const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+    // Compute swap params hash for ZK proof
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      sourceTokenMint,
+      destTokenMint,
+      minAmountOutBigInt,
+      deadlineBigInt,
+    );
+    
+    // Debug: log off-chain computed hashes
+    console.log("   DEBUG off-chain swapParamsHash:", Buffer.from(swapParamsHash).toString('hex'));
+    console.log("   DEBUG off-chain extDataHash:", Buffer.from(extDataHash).toString('hex'));
+    console.log("   DEBUG off-chain sourceRoot:", Buffer.from(root).toString('hex'));
+    console.log("   DEBUG off-chain sourceMint:", Buffer.from(sourceTokenMint.toBytes()).toString('hex'));
+    console.log("   DEBUG off-chain destMint:", Buffer.from(destTokenMint.toBytes()).toString('hex'));
+    console.log("   DEBUG off-chain swapAmount:", SWAP_AMOUNT.toString());
+
+    // Generate ZK swap proof
+    // The swap circuit uses 10 public inputs:
+    // sourceRoot, swapParamsHash, extDataHash, sourceMint, destMint,
+    // inputNullifier[2], changeCommitment, destCommitment, swapAmount
+    console.log("   Generating ZK swap proof...");
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
       extDataHash,
-      mintAddress: sourceTokenMint,
+      sourceMint: sourceTokenMint,
+      destMint: destTokenMint,
       inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [destCommitmentForProof, changeCommitment],
+      changeCommitment,
+      destCommitment,
+      swapAmount: BigInt(SWAP_AMOUNT),
+
+      // Private inputs - Input UTXOs
       inputAmounts: [note.amount, 0n],
       inputPrivateKeys: [note.privateKey, dummyPrivKey],
       inputPublicKeys: [note.publicKey, dummyPubKey],
       inputBlindings: [note.blinding, dummyBlinding],
       inputMerklePaths: [merkleProof, dummyProof],
-      outputAmounts: [zkSwappedAmount, changeAmount], // Use 0 for dest (balance equation)
-      outputOwners: [destPubKey, changePubKey],
-      outputBlindings: [destBlinding, changeBlinding],
+
+      // Private inputs - Change output (source token)
+      changeAmount,
+      changePubkey: changePubKey,
+      changeBlinding,
+
+      // Private inputs - Dest output (dest token)
+      destAmount: swappedAmount,
+      destPubkey: destPubKey,
+      destBlinding,
+
+      // Private inputs - Swap parameters
+      minAmountOut: minAmountOutBigInt,
+      deadline: deadlineBigInt,
     });
-    console.log("   ✅ ZK proof generated");
+    console.log("   ✅ ZK swap proof generated");
 
     // Build CPMM swap data using swap_base_input
     // swap_base_input: [discriminator, amount_in, min_amount_out]
     // We simulate first to get the expected output, then use that for the commitment
-    const minAmountOut = new BN(((simulatedOutput * 95n) / 100n).toString()); // 5% slippage
+    const minAmountOut = new BN(minAmountOutBigInt.toString());
     const swapData = buildCpmmSwapData(
       swapAmountBn,
       minAmountOut,
@@ -1249,14 +1279,11 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
     console.log("   Executing transact_swap instruction...");
 
-    // Swap params for the instruction
-    // minAmountOut is used for on-chain slippage check
-    const minAmountOutForCheck = new BN(
-      ((simulatedOutput * 95n) / 100n).toString(),
-    ); // 5% slippage tolerance
+    // Swap params for the instruction - MUST match the values used in the ZK proof
+    // minAmountOut and deadline are committed to in swapParamsHash
     const swapParams = {
-      minAmountOut: minAmountOutForCheck,
-      deadline: new BN(Math.floor(Date.now() / 1000) + 3600), // 1 hour from now
+      minAmountOut: new BN(minAmountOutBigInt.toString()),
+      deadline: new BN(deadlineBigInt.toString()),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
     };
@@ -1363,10 +1390,11 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
     try {
       // Build the instruction using Anchor's method builder
-      // Parameter order matches: source_root, source_tree_id, source_mint, input_nullifier_0, input_nullifier_1,
+      // Parameter order: proof, source_root, source_tree_id, source_mint, input_nullifier_0, input_nullifier_1,
       // dest_tree_id, dest_mint, output_commitment_0, output_commitment_1, swap_params, swap_amount, swap_data, ext_data
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof, // ZK swap proof (first parameter)
           Array.from(root), // source_root
           0, // source_tree_id
           sourceTokenMint, // source_mint
@@ -1374,8 +1402,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(dummyNullifier), // input_nullifier_1
           0, // dest_tree_id
           destTokenMint, // dest_mint
-          Array.from(destCommitment), // output_commitment_0
-          Array.from(changeCommitment), // output_commitment_1
+          Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
+          Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParams, // swap_params
           new BN(SWAP_AMOUNT.toString()), // swap_amount
           swapData, // swap_data - pass Buffer directly for Vec<u8>
@@ -3387,13 +3415,15 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         dummyPrivKey,
       );
 
-      // Swap params
-      const minAmountOut = new BN(((simulatedOutput * 95n) / 100n).toString()); // 5% slippage
+      // Swap params - compute before proof generation to ensure consistency
+      // minAmountOut should be based on NET destAmount (after fee) for the circuit's slippage check
+      const minAmountOutBigInt = (destAmount * 95n) / 100n; // 5% slippage on net amount
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
 
       // Build CPMM swap data (swap_base_input: SOL -> USDT)
       const swapData = buildCpmmSwapData(
         new BN(USDT_SWAP_AMOUNT.toString()),
-        minAmountOut,
+        new BN(minAmountOutBigInt.toString()),
         true, // swap_base_input
       );
 
@@ -3406,32 +3436,48 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      // For ZK proof, compute with source mint and 0 amount (circuit limitation)
-      const destCommitmentForProof = computeCommitment(
+      // Compute swap params hash for ZK proof
+      const swapParamsHash = computeSwapParamsHash(
         poseidon,
-        0n,
-        destPubKey,
-        destBlinding,
         WSOL_MINT,
+        USDT_MINT,
+        minAmountOutBigInt,
+        deadlineBigInt,
       );
 
-      // Generate ZK proof for the swap
+      // Generate ZK swap proof for the swap
       const dummyProof = sourceOffchainTree.getMerkleProof(0);
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(USDT_SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: WSOL_MINT,
+        sourceMint: WSOL_MINT,
+        destMint: USDT_MINT,
         inputNullifiers: [note!.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(USDT_SWAP_AMOUNT),
+
+        // Private inputs - Input UTXOs
         inputAmounts: [note!.amount, 0n],
         inputPrivateKeys: [note!.privateKey, dummyPrivKey],
         inputPublicKeys: [note!.publicKey, dummyPubKey],
         inputBlindings: [note!.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, 0n],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        // Private inputs - Change output (source token)
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        // Private inputs - Dest output (dest token)
+        destAmount,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        // Private inputs - Swap parameters
+        minAmountOut: minAmountOutBigInt,
+        deadline: deadlineBigInt,
       });
 
       // Derive nullifier markers
@@ -3466,10 +3512,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         true,
       );
 
-      // Swap params struct
+      // Swap params struct - MUST match values used in ZK proof
       const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+        minAmountOut: new BN(minAmountOutBigInt.toString()),
+        deadline: new BN(deadlineBigInt.toString()),
         sourceMint: WSOL_MINT,
         destMint: USDT_MINT,
       };
@@ -3531,6 +3577,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // Build swap instruction
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof, // ZK swap proof (first parameter)
           Array.from(root),
           0,
           WSOL_MINT,
@@ -3538,8 +3585,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(dummyNullifier),
           0,
           USDT_MINT,
-          Array.from(destCommitment),
-          Array.from(changeCommitment),
+          Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
+          Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParams,
           new BN(USDT_SWAP_AMOUNT.toString()),
           swapData,
@@ -3813,48 +3860,66 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      // 5. Generate ZK Proof
-      // For proof generation, we use 0 output for the cross-chain swap destination
-      // The actual amount is handled by the contract + swap params
-      const destCommitmentForProof = computeCommitment(
+      // 5. Swap params - compute before proof generation to ensure consistency
+      const minAmountOutBigInt = (simulatedOutput * 95n) / 100n; // 5% slippage
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+      // 6. Compute swap params hash for ZK proof
+      const swapParamsHash = computeSwapParamsHash(
         poseidon,
-        0n,
-        destPubKey,
-        destBlinding,
-        USDT_MINT, // Encoded with source mint in proof for now (circuit limitation)
+        USDT_MINT,
+        WSOL_MINT,
+        minAmountOutBigInt,
+        deadlineBigInt,
       );
 
+      // 7. Generate ZK Swap Proof
       // Get Merkle root for USDT tree
       const root = usdtOffchainTree.getRoot();
       const merkleProof = note.merklePath;
-      const dummyProof = usdtOffchainTree.getMerkleProof(0); // Assuming index 0 exists/valid or empty
+      const dummyProof = usdtOffchainTree.getMerkleProof(0);
 
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(note.amount), // Negative for withdrawal/swap-out
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: USDT_MINT,
+        sourceMint: USDT_MINT,
+        destMint: WSOL_MINT,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: note.amount,
+
+        // Private inputs - Input UTXOs
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, 0n],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        // Private inputs - Change output (source token)
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        // Private inputs - Dest output (dest token)
+        destAmount,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        // Private inputs - Swap parameters
+        minAmountOut: minAmountOutBigInt,
+        deadline: deadlineBigInt,
       });
 
-      // 6. CPMM Swap Params
-      const minAmountOut = new BN(((simulatedOutput * 95n) / 100n).toString()); // 5% slippage
+      // 8. CPMM Swap Params
       const swapData = buildCpmmSwapData(
         new BN(note.amount.toString()),
-        minAmountOut,
-        true, // swap_base_input (exact intput)
+        new BN(minAmountOutBigInt.toString()),
+        true, // swap_base_input (exact input)
       );
 
-      // 7. PDAs
+      // 9. PDAs
       const nullifierMarker0 = deriveNullifierMarkerPDA(
         program.programId,
         USDT_MINT,
@@ -3915,6 +3980,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         TOKEN_PROGRAM_ID,
         ASSOCIATED_TOKEN_PROGRAM_ID,
         SystemProgram.programId,
+        globalConfig,
+        sourceVaultTokenAccount,
       ];
 
       const extendLutIx = AddressLookupTableProgram.extendLookupTable({
@@ -3954,10 +4021,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         payer.publicKey,
       );
 
-      // Build swap params
+      // Build swap params - MUST match values used in ZK proof
       const swapParamsArg = {
-        minAmountOut: minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+        minAmountOut: new BN(minAmountOutBigInt.toString()),
+        deadline: new BN(deadlineBigInt.toString()),
         sourceMint: USDT_MINT,
         destMint: WSOL_MINT,
       };
@@ -3965,6 +4032,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // The transact_swap instruction
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof, // ZK swap proof (first parameter)
           Array.from(root),
           0, // source_tree_id
           USDT_MINT, // source_mint
@@ -3972,8 +4040,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(dummyNullifier), // input_nullifier_1
           0, // dest_tree_id
           WSOL_MINT, // dest_mint
-          Array.from(destCommitment), // output_commitment_0
-          Array.from(changeCommitment), // output_commitment_1
+          Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
+          Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParamsArg, // swap_params
           new BN(note.amount.toString()), // swap_amount
           swapData,

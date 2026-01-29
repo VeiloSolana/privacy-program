@@ -34,8 +34,51 @@ pub struct SwapParams {
 }
 
 impl SwapParams {
+    /// Reduce 32-byte value modulo BN254 Fr field
+    fn reduce_to_field(bytes: [u8; 32]) -> [u8; 32] {
+        use num_bigint::BigUint;
+
+        // BN254 Fr modulus as 32-byte BE
+        const FR_MODULUS: [u8; 32] = [
+            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81,
+            0x58, 0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93,
+            0xf0, 0x00, 0x00, 0x01,
+        ];
+
+        // Quick check: if bytes < modulus, no reduction needed
+        let mut needs_reduction = false;
+        for i in 0..32 {
+            if bytes[i] < FR_MODULUS[i] {
+                break;
+            }
+            if bytes[i] > FR_MODULUS[i] {
+                needs_reduction = true;
+                break;
+            }
+        }
+
+        if !needs_reduction {
+            return bytes;
+        }
+
+        // Use BigUint for proper modulo reduction
+        let val = BigUint::from_bytes_be(&bytes);
+        let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+        let reduced = val % modulus;
+
+        let mut result = [0u8; 32];
+        let reduced_bytes = reduced.to_bytes_be();
+        let offset = 32 - reduced_bytes.len();
+        result[offset..].copy_from_slice(&reduced_bytes);
+        result
+    }
+
     pub fn hash(&self) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
+
+        // Reduce mints to field elements (pubkeys may exceed Fr modulus)
+        let source_mint_bytes = Self::reduce_to_field(self.source_mint.to_bytes());
+        let dest_mint_bytes = Self::reduce_to_field(self.dest_mint.to_bytes());
 
         let mut min_out_bytes = [0u8; 32];
         min_out_bytes[24..].copy_from_slice(&self.min_amount_out.to_be_bytes());
@@ -43,9 +86,8 @@ impl SwapParams {
         let mut deadline_bytes = [0u8; 32];
         deadline_bytes[24..].copy_from_slice(&self.deadline.to_be_bytes());
 
-        let hash1 =
-            PoseidonHasher::hashv(&[&self.source_mint.to_bytes(), &self.dest_mint.to_bytes()])
-                .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash1 = PoseidonHasher::hashv(&[&source_mint_bytes, &dest_mint_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
         let hash2 = PoseidonHasher::hashv(&[&min_out_bytes, &deadline_bytes])
             .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
@@ -150,10 +192,21 @@ pub fn transact_swap<'info>(
     // ╚══════════════════════════════════════════════════════════════════════════╝
     // #[cfg(feature = "zk-verify")]
     // {
+    let swap_params_hash = swap_params.hash()?;
+    let ext_data_hash_val = ext_data.hash()?;
+
+    // Debug: log computed hashes as hex
+    msg!("DEBUG swap_params_hash: {:?}", swap_params_hash);
+    msg!("DEBUG ext_data_hash: {:?}", ext_data_hash_val);
+    msg!("DEBUG source_root: {:?}", source_root);
+    msg!("DEBUG source_mint: {:?}", source_mint.to_bytes());
+    msg!("DEBUG dest_mint: {:?}", dest_mint.to_bytes());
+    msg!("DEBUG swap_amount: {}", swap_amount);
+
     let public_inputs = SwapPublicInputs {
         source_root,
-        swap_params_hash: swap_params.hash()?,
-        ext_data_hash: ext_data.hash()?,
+        swap_params_hash,
+        ext_data_hash: ext_data_hash_val,
         source_mint,
         dest_mint,
         input_nullifiers,
@@ -271,9 +324,9 @@ pub fn transact_swap<'info>(
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
-        // remaining[0] = CPMM config - must be owned by CPMM program
+        // remaining[1] = CPMM config - must be owned by CPMM program
         require!(
-            remaining[0].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
+            remaining[1].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
         // remaining[2] = pool state - must be owned by CPMM program
@@ -504,43 +557,48 @@ pub fn transact_swap<'info>(
     }
 
     // Insert swap output (commitment 0) into destination tree
+    // Insert commitments into trees
+    // output_commitments[0] = changeCommitment (goes back to source tree)
+    // output_commitments[1] = destCommitment (goes to dest tree)
+
+    // Insert dest note (commitment 1) into dest tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
 
     let max_capacity = 1u64 << (dest_tree.height as u64);
     let remaining = max_capacity.saturating_sub(dest_tree.next_index);
     require!(remaining >= 1, PrivacyError::MerkleTreeFull);
 
-    let leaf_index_0 = dest_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *dest_tree)?;
+    let leaf_index_dest = dest_tree.next_index;
+    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *dest_tree)?;
 
     let dest_new_root = dest_tree.root;
     drop(dest_tree);
 
     emit!(crate::CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_0,
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_dest,
         new_root: dest_new_root,
         timestamp: clock.unix_timestamp,
         mint_address: dest_mint,
         tree_id: dest_tree_id,
     });
 
-    // Insert change note (commitment 1) back into source tree
+    // Insert change note (commitment 0) back into source tree
     let mut source_tree = ctx.accounts.source_tree.load_mut()?;
 
     let max_capacity = 1u64 << (source_tree.height as u64);
     let remaining = max_capacity.saturating_sub(source_tree.next_index);
     require!(remaining >= 1, PrivacyError::MerkleTreeFull);
 
-    let leaf_index_1 = source_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *source_tree)?;
+    let leaf_index_change = source_tree.next_index;
+    MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *source_tree)?;
 
     let source_new_root = source_tree.root;
     drop(source_tree);
 
     emit!(crate::CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_1,
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_change,
         new_root: source_new_root,
         timestamp: clock.unix_timestamp,
         mint_address: source_mint,
