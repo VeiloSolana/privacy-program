@@ -70,6 +70,12 @@ pub const RAYDIUM_CPMM_PROGRAM_ID: Pubkey = pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7
 /// Raydium AMM V4 program ID (mainnet)
 pub const RAYDIUM_AMM_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
 
+/// Jupiter V6 Aggregator Program ID (mainnet)
+pub const JUPITER_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+
+/// Jupiter V6 Event Authority (for validation)
+pub const JUPITER_EVENT_AUTHORITY: Pubkey = pubkey!("D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf");
+
 // ---- Accounts ----
 
 #[account]
@@ -1832,4 +1838,8 @@ pub enum PrivacyError {
     ExecutorNotStale,
     #[msg("Invalid remaining accounts: wrong count or ownership")]
     InvalidRemainingAccounts,
+    #[msg("Jupiter swap requires additional routing accounts")]
+    JupiterInsufficientAccounts,
+    #[msg("Jupiter instruction data invalid or unsupported version")]
+    JupiterInvalidInstruction,
 }
