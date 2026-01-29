@@ -103,6 +103,178 @@ function deriveNullifierMarkerPDA(
   return pda;
 }
 
+// Balance tracking interfaces and helpers
+interface BalanceSnapshot {
+  userSol: number;
+  userWsol?: number;
+  userUsdt?: number;
+  solVault?: number;
+  usdtVault?: number;
+  poolBaseLiquidity?: number;
+  poolQuoteLiquidity?: number;
+  relayerSol: number;
+  relayerUsdt?: number;
+}
+
+// Helper to get SOL balance
+async function getSolBalance(
+  connection: any,
+  pubkey: PublicKey,
+): Promise<number> {
+  const balance = await connection.getBalance(pubkey);
+  return balance / LAMPORTS_PER_SOL;
+}
+
+// Helper to get token balance
+async function getTokenBalance(
+  connection: any,
+  tokenAccount: PublicKey,
+): Promise<number | undefined> {
+  try {
+    const balance = await connection.getTokenAccountBalance(tokenAccount);
+    return parseFloat(balance.value.uiAmountString || "0");
+  } catch {
+    return undefined;
+  }
+}
+
+// Helper to get comprehensive balance snapshot
+async function getBalanceSnapshot(
+  connection: any,
+  userPubkey: PublicKey,
+  userWsolAccount?: PublicKey,
+  userUsdtAccount?: PublicKey,
+  solVaultAccount?: PublicKey,
+  usdtVaultAccount?: PublicKey,
+  relayerUsdtAccount?: PublicKey,
+): Promise<BalanceSnapshot> {
+  const [
+    userSol,
+    userWsol,
+    userUsdt,
+    solVault,
+    usdtVault,
+    relayerSol,
+    relayerUsdt,
+  ] = await Promise.all([
+    getSolBalance(connection, userPubkey),
+    userWsolAccount
+      ? getTokenBalance(connection, userWsolAccount)
+      : Promise.resolve(undefined),
+    userUsdtAccount
+      ? getTokenBalance(connection, userUsdtAccount)
+      : Promise.resolve(undefined),
+    solVaultAccount
+      ? getTokenBalance(connection, solVaultAccount)
+      : Promise.resolve(undefined),
+    usdtVaultAccount
+      ? getTokenBalance(connection, usdtVaultAccount)
+      : Promise.resolve(undefined),
+    getSolBalance(connection, userPubkey), // relayer is same as user in tests
+    relayerUsdtAccount
+      ? getTokenBalance(connection, relayerUsdtAccount)
+      : Promise.resolve(undefined),
+  ]);
+
+  return {
+    userSol,
+    userWsol,
+    userUsdt,
+    solVault,
+    usdtVault,
+    relayerSol,
+    relayerUsdt,
+  };
+}
+
+// Helper to log balance differences
+function logBalanceChanges(
+  before: BalanceSnapshot,
+  after: BalanceSnapshot,
+  operation: string,
+) {
+  console.log(`\n📊 Balance Changes - ${operation}:`);
+
+  if (before.userSol !== after.userSol) {
+    const diff = after.userSol - before.userSol;
+    console.log(
+      `   User SOL: ${before.userSol.toFixed(6)} → ${after.userSol.toFixed(
+        6,
+      )} (${diff >= 0 ? "+" : ""}${diff.toFixed(6)} SOL)`,
+    );
+  }
+
+  if (
+    before.userWsol !== after.userWsol &&
+    (before.userWsol || after.userWsol)
+  ) {
+    const beforeVal = before.userWsol || 0;
+    const afterVal = after.userWsol || 0;
+    const diff = afterVal - beforeVal;
+    console.log(
+      `   User WSOL: ${beforeVal.toFixed(6)} → ${afterVal.toFixed(6)} (${
+        diff >= 0 ? "+" : ""
+      }${diff.toFixed(6)} WSOL)`,
+    );
+  }
+
+  if (
+    before.userUsdt !== after.userUsdt &&
+    (before.userUsdt || after.userUsdt)
+  ) {
+    const beforeVal = before.userUsdt || 0;
+    const afterVal = after.userUsdt || 0;
+    const diff = afterVal - beforeVal;
+    console.log(
+      `   User USDT: ${beforeVal.toFixed(6)} → ${afterVal.toFixed(6)} (${
+        diff >= 0 ? "+" : ""
+      }${diff.toFixed(6)} USDT)`,
+    );
+  }
+
+  if (
+    before.solVault !== after.solVault &&
+    (before.solVault || after.solVault)
+  ) {
+    const beforeVal = before.solVault || 0;
+    const afterVal = after.solVault || 0;
+    const diff = afterVal - beforeVal;
+    console.log(
+      `   SOL Vault: ${beforeVal.toFixed(6)} → ${afterVal.toFixed(6)} (${
+        diff >= 0 ? "+" : ""
+      }${diff.toFixed(6)} SOL)`,
+    );
+  }
+
+  if (
+    before.usdtVault !== after.usdtVault &&
+    (before.usdtVault || after.usdtVault)
+  ) {
+    const beforeVal = before.usdtVault || 0;
+    const afterVal = after.usdtVault || 0;
+    const diff = afterVal - beforeVal;
+    console.log(
+      `   USDT Vault: ${beforeVal.toFixed(6)} → ${afterVal.toFixed(6)} (${
+        diff >= 0 ? "+" : ""
+      }${diff.toFixed(6)} USDT)`,
+    );
+  }
+
+  if (
+    before.relayerUsdt !== after.relayerUsdt &&
+    (before.relayerUsdt || after.relayerUsdt)
+  ) {
+    const beforeVal = before.relayerUsdt || 0;
+    const afterVal = after.relayerUsdt || 0;
+    const diff = afterVal - beforeVal;
+    console.log(
+      `   Relayer USDT: ${beforeVal.toFixed(6)} → ${afterVal.toFixed(6)} (${
+        diff >= 0 ? "+" : ""
+      }${diff.toFixed(6)} USDT)`,
+    );
+  }
+}
+
 describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
@@ -144,13 +316,14 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
   const USDT_DECIMALS = 6;
   const INITIAL_SOL_DEPOSIT = 2_000_000_000; // 2 SOL
   const SWAP_AMOUNT_SOL = 500_000_000; // 0.5 SOL
-  const SWAP_FEE = 100_000n; // 0.1 USDT relayer fee
+  const SWAP_FEE = 2_500_000n; // 0.5% (50bps) of 0.5 SOL
   const feeBps = 50; // 0.5%
 
   // Deposited note references
   let solDepositNoteId: string | null = null;
   let usdtFromSwapNoteId: string | null = null;
   let solChangeNoteId: string | null = null;
+  let solTransferredNoteId: string | null = null;
 
   // Serum vault signer (derived)
   let serumVaultSigner: PublicKey;
@@ -323,6 +496,60 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       } else {
         throw e;
       }
+    }
+  });
+
+  it("configures USDT pool (50bps swap fees)", async () => {
+    try {
+      await (program.methods as any)
+        .updatePoolConfig(
+          usdtTokenMint,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null, // min_swap_fee (keep default)
+          new BN(50), // swap_fee_bps = 50 (0.5%)
+        )
+        .accounts({
+          config: usdtConfig,
+          admin: payer.publicKey,
+        })
+        .rpc();
+      console.log("✅ USDT pool configured with 50bps swap fees");
+    } catch (e: any) {
+      console.error("Failed to update USDT pool config:", e);
+      throw e;
+    }
+  });
+
+  it("configures SOL pool (default withdrawal fees, 50bps swap fees)", async () => {
+    try {
+      await (program.methods as any)
+        .updatePoolConfig(
+          solTokenMint,
+          null, // min_deposit
+          null, // max_deposit
+          null, // min_withdraw
+          null, // max_withdraw
+          null, // fee_bps
+          null, // min_withdrawal_fee (keep default 1,000,000)
+          null, // fee_error_margin_bps
+          null, // min_swap_fee
+          new BN(50), // swap_fee_bps = 50 (0.5%)
+        )
+        .accounts({
+          config: solConfig,
+          admin: payer.publicKey,
+        })
+        .rpc();
+      console.log("✅ SOL pool configured with 50bps swap fees");
+    } catch (e: any) {
+      console.error("Failed to update SOL pool config:", e);
+      throw e;
     }
   });
 
@@ -1419,8 +1646,221 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       merklePath: solOffchainTree.getMerkleProof(leafIndex),
       mintAddress: solTokenMint,
     });
+    solTransferredNoteId = transferredNoteId; // Save for next test step
 
     console.log(`   Transferred SOL note: ${transferredNoteId}`);
     console.log(`   Amount: ${Number(note.amount) / 1e9} SOL`);
+  });
+
+  it("executes external SOL withdrawal", async () => {
+    console.log("\n💸 Executing external SOL withdrawal...");
+
+    // Use the note from internal transfer
+    const note = noteStorage.get(solTransferredNoteId!);
+    if (!note) throw new Error("SOL transferred note not found");
+
+    console.log(
+      `   Withdrawing ${Number(note.amount) / 1e9} SOL to external wallet`,
+    );
+
+    // Create external recipient
+    const externalRecipient = Keypair.generate();
+
+    // Create WSOL account for external recipient
+    const externalWsolAccount = await createWrappedNativeAccount(
+      provider.connection,
+      payer,
+      externalRecipient.publicKey,
+      0, // Start with 0 balance
+    );
+
+    // Take balance snapshot before withdrawal
+    const balanceBefore = await getBalanceSnapshot(
+      provider.connection,
+      externalRecipient.publicKey,
+      externalWsolAccount,
+      undefined,
+      await getAssociatedTokenAddress(solTokenMint, solVault, true),
+      undefined,
+      undefined,
+    );
+
+    // Get merkle proof
+    const merkleProof = solOffchainTree.getMerkleProof(note.leafIndex);
+    const root = solOffchainTree.getRoot();
+
+    // Dummy second input
+    const dummyPrivKey = randomBytes32();
+    const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+    const dummyBlinding = randomBytes32();
+    const dummyCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey,
+      dummyBlinding,
+      solTokenMint,
+    );
+    const dummyNullifier = computeNullifier(
+      poseidon,
+      dummyCommitment,
+      0,
+      dummyPrivKey,
+    );
+    const dummyProof = solOffchainTree.getMerkleProof(0);
+
+    // Zero change outputs
+    const changePrivKey1 = randomBytes32();
+    const changePubKey1 = derivePublicKey(poseidon, changePrivKey1);
+    const changeBlinding1 = randomBytes32();
+    const changeCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      changePubKey1,
+      changeBlinding1,
+      solTokenMint,
+    );
+
+    const changePrivKey2 = randomBytes32();
+    const changePubKey2 = derivePublicKey(poseidon, changePrivKey2);
+    const changeBlinding2 = randomBytes32();
+    const changeCommitment2 = computeCommitment(
+      poseidon,
+      0n,
+      changePubKey2,
+      changeBlinding2,
+      solTokenMint,
+    );
+
+    // External data for withdrawal
+    // Fee = 0.5% (50bps) of 1.5 SOL = 7,500,000 lamports
+    const fee = new BN(7_500_000);
+    const extData = {
+      recipient: externalRecipient.publicKey,
+      relayer: payer.publicKey,
+      fee: fee,
+      refund: new BN(0),
+    };
+    const extDataHash = computeExtDataHash(poseidon, extData);
+
+    // Generate ZK proof for withdrawal
+    const proof = await generateTransactionProof({
+      root,
+      publicAmount: -note.amount, // Negative for withdrawal
+      extDataHash,
+      mintAddress: solTokenMint,
+      inputNullifiers: [note.nullifier, dummyNullifier],
+      outputCommitments: [changeCommitment1, changeCommitment2],
+      inputAmounts: [note.amount, 0n],
+      inputPrivateKeys: [note.privateKey, dummyPrivKey],
+      inputPublicKeys: [note.publicKey, dummyPubKey],
+      inputBlindings: [note.blinding, dummyBlinding],
+      inputMerklePaths: [merkleProof, dummyProof],
+      outputAmounts: [0n, 0n],
+      outputOwners: [changePubKey1, changePubKey2],
+      outputBlindings: [changeBlinding1, changeBlinding2],
+    });
+
+    // Derive nullifier marker PDAs
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      solTokenMint,
+      0,
+      note.nullifier,
+    );
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      solTokenMint,
+      0,
+      dummyNullifier,
+    );
+
+    // Create WSOL account for relayer (payer) to receive fees/verify ownership
+    const relayerWsolAccount = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      solTokenMint,
+      payer.publicKey,
+    );
+
+    // Execute withdrawal
+    const tx = await (program.methods as any)
+      .transact(
+        Array.from(root),
+        0,
+        0,
+        new BN(note.amount.toString()).neg(),
+        Array.from(extDataHash),
+        solTokenMint,
+        Array.from(note.nullifier),
+        Array.from(dummyNullifier),
+        Array.from(changeCommitment1),
+        Array.from(changeCommitment2),
+        extData,
+        proof,
+      )
+      .accounts({
+        config: solConfig,
+        globalConfig,
+        vault: solVault,
+        inputTree: solNoteTree,
+        outputTree: solNoteTree,
+        nullifiers: solNullifiers,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayer: payer.publicKey,
+        recipient: externalRecipient.publicKey,
+        vaultTokenAccount: solVaultTokenAccount,
+        userTokenAccount: externalWsolAccount,
+        recipientTokenAccount: externalWsolAccount,
+        relayerTokenAccount: relayerWsolAccount.address,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+      ])
+      .rpc();
+
+    console.log(`✅ External SOL withdrawal: ${tx}`);
+
+    // Take balance snapshot after withdrawal
+    const balanceAfter = await getBalanceSnapshot(
+      provider.connection,
+      externalRecipient.publicKey,
+      externalWsolAccount,
+      undefined,
+      await getAssociatedTokenAddress(solTokenMint, solVault, true),
+      undefined,
+      undefined,
+    );
+
+    // Log balance changes
+    const wsolIncrease =
+      (balanceAfter.userWsol || 0) - (balanceBefore.userWsol || 0);
+    const vaultDecrease =
+      (balanceBefore.solVault || 0) - (balanceAfter.solVault || 0);
+
+    console.log(`📊 Withdrawal Results:`);
+    console.log(
+      `   External WSOL increased by: ${wsolIncrease.toFixed(6)} WSOL`,
+    );
+    console.log(`   SOL Vault decreased by: ${vaultDecrease.toFixed(6)} SOL`);
+
+    // Verify withdrawal worked
+    expect(wsolIncrease).to.be.greaterThan(
+      0,
+      "External wallet should receive WSOL",
+    );
+    expect(vaultDecrease).to.be.greaterThan(0, "SOL vault should decrease");
+
+    // Update off-chain tree
+    solOffchainTree.insert(changeCommitment1);
+    solOffchainTree.insert(changeCommitment2);
+
+    console.log(
+      `   ✅ Successfully withdrew ${wsolIncrease.toFixed(
+        6,
+      )} SOL to external wallet`,
+    );
   });
 });
