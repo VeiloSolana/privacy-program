@@ -99,7 +99,7 @@ address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
 address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 
 [scripts]
-test = "npm run test:amm-usdt"
+test = "npm run test:amm-various"
 
 # ============================================
 # Raydium AMM V4 Configuration (SOL/USDC)
@@ -312,3 +312,51 @@ address = "3hJQCCWHYSYVGS1S1vJEVHWLuw6R6xPZD4sXLRQkcsvB"
 # Market Quote Vault
 [[test.validator.clone]]
 address = "5DKFA5wfP1HqLWkPa4weyRsdmikcm2Hr2hebUxkqZSMW"
+
+# ============================================
+# Raydium AMM V4 JUP/USDC Pool Configuration
+# ============================================
+
+# JUP/USDC AMM Pool State
+[[test.validator.clone]]
+address = "7RJ5qmsgmvUKK5QtCLT9qHpQMegkiULppHRBNuWso12E"
+
+# AMM Base Vault (JUP)
+[[test.validator.clone]]
+address = "5ThYdrAwJEySRcszALMUGaCgjWwpRa7EU6HJa4X2UQQn"
+
+# AMM Quote Vault (USDC)
+[[test.validator.clone]]
+address = "7h3AAzTb6R9bnY4bhW2CTmGcwXRaGFtsxUpjmDR69ELh"
+
+# AMM Open Orders
+[[test.validator.clone]]
+address = "9AFJThS1MmP9iCVhToUdkyJUVicHWVkJvjgPeXvu7iLT"
+
+# AMM Target Orders
+[[test.validator.clone]]
+address = "5iUqQknJcKyfS64vAYsrivJ37fXkRBG7Jx6T7FhRr9Yw"
+
+# Market ID
+[[test.validator.clone]]
+address = "3DWa6Sz5frfSh5SedgWonf9qFjLL7xyyi9CsewoQNF2Q"
+
+# Market Bids
+[[test.validator.clone]]
+address = "7GGRdCvomRyFBVFmm5MF5efDom2uFPJMnXrx1pZruxTQ"
+
+# Market Asks
+[[test.validator.clone]]
+address = "CAryFCnzgxtQyBoTTcDKDsCRXmqkDkjcc49cB8w95hNz"
+
+# Market Event Queue
+[[test.validator.clone]]
+address = "EjJdRRZTkwMC1F4Hh4nKvnVfsE81Bv6rnegbuTs5N9kK"
+
+# Market Base Vault
+[[test.validator.clone]]
+address = "7ZLL8j9rBDkHBHoPHLW36y9vxQq4mj3sfAfYUHj9NP6q"
+
+# Market Quote Vault
+[[test.validator.clone]]
+address = "AAhzuFZLgRWr8EytSC2Fehc7MrBuvqvugeuMq52Qd8VS"

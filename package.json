@@ -8,6 +8,7 @@
     "test:amm-usdt": "mocha -r ts-node/register -t 1000000 'tests/raydium-amm-swap-usdt.test.ts'",
     "test:amm-jup": "mocha -r ts-node/register -t 1000000 'tests/raydium-amm-swap-jup.test.ts'",
     "test:amm-usd1": "mocha -r ts-node/register -t 1000000 'tests/raydium-amm-swap-usd1.test.ts'",
+    "test:amm-various": "mocha -r ts-node/register -t 1000000 'tests/raydium-amm-swap-various.test.ts'",
     "test:spl": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool-spl.test.ts'",
     "deploy:devnet": "ts-node scripts/deploy-devnet.ts",
     "check-pool": "ts-node scripts/check-pool.ts",
