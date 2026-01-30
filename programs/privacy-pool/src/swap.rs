@@ -204,14 +204,6 @@ pub fn transact_swap<'info>(
     let swap_params_hash = swap_params.hash()?;
     let ext_data_hash_val = ext_data.hash()?;
 
-    // Debug: log computed hashes as hex
-    msg!("DEBUG swap_params_hash: {:?}", swap_params_hash);
-    msg!("DEBUG ext_data_hash: {:?}", ext_data_hash_val);
-    msg!("DEBUG source_root: {:?}", source_root);
-    msg!("DEBUG source_mint: {:?}", source_mint.to_bytes());
-    msg!("DEBUG dest_mint: {:?}", dest_mint.to_bytes());
-    msg!("DEBUG swap_amount: {}", swap_amount);
-
     let public_inputs = SwapPublicInputs {
         source_root,
         swap_params_hash,
