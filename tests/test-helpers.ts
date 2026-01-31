@@ -744,3 +744,178 @@ export async function fetchAndDisplayEvents(
 
   return totalEvents;
 }
+
+// =============================================================================
+// Swap Proof Generation
+// =============================================================================
+
+export const SWAP_WASM_PATH = path.join(
+  process.cwd(),
+  "zk/circuits/swap/swap_js/swap.wasm",
+);
+export const SWAP_ZKEY_PATH = path.join(
+  process.cwd(),
+  "zk/circuits/swap/swap_final.zkey",
+);
+export const SWAP_VK_PATH = path.join(
+  process.cwd(),
+  "zk/circuits/swap/swap_verification_key.json",
+);
+
+/**
+ * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline))
+ * This must match the on-chain computation in swap.rs
+ */
+export function computeSwapParamsHash(
+  poseidon: any,
+  sourceMint: PublicKey,
+  destMint: PublicKey,
+  minAmountOut: bigint,
+  deadline: bigint,
+): Uint8Array {
+  const sourceMintField = poseidon.F.e(reduceToField(sourceMint.toBytes()));
+  const destMintField = poseidon.F.e(reduceToField(destMint.toBytes()));
+
+  const mintPairHash = poseidon([sourceMintField, destMintField]);
+
+  const minAmountOutField = poseidon.F.e(minAmountOut.toString());
+  const deadlineField = poseidon.F.e(deadline.toString());
+
+  const swapTermsHash = poseidon([minAmountOutField, deadlineField]);
+
+  const paramsHash = poseidon([mintPairHash, swapTermsHash]);
+
+  const hashBytes = poseidon.F.toString(paramsHash, 16).padStart(64, "0");
+  return Uint8Array.from(Buffer.from(hashBytes, "hex"));
+}
+
+/**
+ * Generate swap proof (2-in, 2-out with cross-pool swap)
+ *
+ * Public Inputs (10):
+ *   0: sourceRoot
+ *   1: swapParamsHash
+ *   2: extDataHash
+ *   3: sourceMint
+ *   4: destMint
+ *   5-6: inputNullifier[2]
+ *   7: changeCommitment
+ *   8: destCommitment
+ *   9: swapAmount
+ */
+export async function generateSwapProof(inputs: {
+  // Public inputs (10 total)
+  sourceRoot: Uint8Array;
+  swapParamsHash: Uint8Array;
+  extDataHash: Uint8Array;
+  sourceMint: PublicKey;
+  destMint: PublicKey;
+  inputNullifiers: [Uint8Array, Uint8Array];
+  changeCommitment: Uint8Array;
+  destCommitment: Uint8Array;
+  swapAmount: bigint;
+
+  // Private inputs - Input UTXOs (source token)
+  inputAmounts: [bigint, bigint];
+  inputPrivateKeys: [Uint8Array, Uint8Array];
+  inputPublicKeys: [bigint, bigint];
+  inputBlindings: [Uint8Array, Uint8Array];
+  inputMerklePaths: [
+    { pathElements: bigint[]; pathIndices: number[] },
+    { pathElements: bigint[]; pathIndices: number[] },
+  ];
+
+  // Private inputs - Change output (source token)
+  changeAmount: bigint;
+  changePubkey: bigint;
+  changeBlinding: Uint8Array;
+
+  // Private inputs - Dest output (dest token)
+  destAmount: bigint;
+  destPubkey: bigint;
+  destBlinding: Uint8Array;
+
+  // Private inputs - Swap parameters
+  minAmountOut: bigint;
+  deadline: bigint;
+}) {
+  // Format inputs for circuit - matching signal names from swap.circom
+  const circuitInputs = {
+    // Public inputs
+    sourceRoot: bytesToBigIntBE(inputs.sourceRoot).toString(),
+    swapParamsHash: bytesToBigIntBE(inputs.swapParamsHash).toString(),
+    extDataHash: bytesToBigIntBE(inputs.extDataHash).toString(),
+    sourceMint: reduceToField(inputs.sourceMint.toBytes()).toString(),
+    destMint: reduceToField(inputs.destMint.toBytes()).toString(),
+    inputNullifier: inputs.inputNullifiers.map((n) =>
+      bytesToBigIntBE(n).toString(),
+    ),
+    changeCommitment: bytesToBigIntBE(inputs.changeCommitment).toString(),
+    destCommitment: bytesToBigIntBE(inputs.destCommitment).toString(),
+    swapAmount: inputs.swapAmount.toString(),
+
+    // Private inputs - Input UTXOs
+    inAmount: inputs.inputAmounts.map((a) => a.toString()),
+    inPubkey: inputs.inputPublicKeys.map((pk) => pk.toString()),
+    inBlinding: inputs.inputBlindings.map((b) => bytesToBigIntBE(b).toString()),
+    inPathIndex: inputs.inputMerklePaths.map((p) =>
+      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0),
+    ),
+    inPathElements: inputs.inputMerklePaths.map((p) =>
+      p.pathElements.map((e) => e.toString()),
+    ),
+    inPrivateKey: inputs.inputPrivateKeys.map((pk) =>
+      bytesToBigIntBE(pk).toString(),
+    ),
+
+    // Private inputs - Change output
+    changeAmount: inputs.changeAmount.toString(),
+    changePubkey: inputs.changePubkey.toString(),
+    changeBlinding: bytesToBigIntBE(inputs.changeBlinding).toString(),
+
+    // Private inputs - Dest output
+    destAmount: inputs.destAmount.toString(),
+    destPubkey: inputs.destPubkey.toString(),
+    destBlinding: bytesToBigIntBE(inputs.destBlinding).toString(),
+
+    // Private inputs - Swap parameters
+    minAmountOut: inputs.minAmountOut.toString(),
+    deadline: inputs.deadline.toString(),
+  };
+
+  console.log(
+    "Generating swap proof with inputs:",
+    JSON.stringify(circuitInputs, null, 2),
+  );
+
+  // Generate proof
+  let proof, publicSignals;
+  try {
+    ({ proof, publicSignals } = await groth16.fullProve(
+      circuitInputs,
+      SWAP_WASM_PATH,
+      SWAP_ZKEY_PATH,
+    ));
+  } catch (e: any) {
+    console.error("\n❌ Swap proof generation failed!");
+    console.error("Error:", e.message);
+    console.error(
+      "\nPlease check your circuit's signal declarations in swap.circom\n",
+    );
+    throw e;
+  }
+
+  console.log("✓ Swap proof generated successfully");
+  console.log("Public signals:", publicSignals);
+
+  // Verify proof off-chain
+  const vKey = JSON.parse(fs.readFileSync(SWAP_VK_PATH, "utf8"));
+  const valid = await groth16.verify(vKey, publicSignals, proof);
+  console.log("Swap proof valid off-chain?", valid);
+
+  if (!valid) {
+    throw new Error("Generated swap proof is invalid!");
+  }
+
+  return convertProofToBytes(proof);
+}

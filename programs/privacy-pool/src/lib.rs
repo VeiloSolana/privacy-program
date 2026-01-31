@@ -549,7 +549,7 @@ pub struct Transact<'info> {
     /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
@@ -560,7 +560,7 @@ pub struct Transact<'info> {
     /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
@@ -635,6 +635,7 @@ fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
 /// All atomic - succeeds or reverts entirely
 #[derive(Accounts)]
 #[instruction(
+    proof: zk::SwapProof,
     source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
@@ -684,7 +685,7 @@ pub struct TransactSwap<'info> {
 
     /// First nullifier marker for source pool
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
@@ -694,7 +695,7 @@ pub struct TransactSwap<'info> {
 
     /// Second nullifier marker for source pool
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
@@ -743,7 +744,7 @@ pub struct TransactSwap<'info> {
     /// Executor PDA - holds tokens during swap
     /// Seeds ensure this is unique per swap (bound to nullifier)
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"swap_executor", input_nullifier_0.as_ref()],
         bump,
@@ -1196,6 +1197,12 @@ pub mod privacy_pool {
                     user_token.owner,
                     ctx.accounts.relayer.key(),
                     PrivacyError::DepositorTokenAccountMismatch
+                );
+
+                // Prevent delegation bypass - deposits must use direct ownership
+                require!(
+                    user_token.delegate.is_none() || user_token.delegated_amount == 0,
+                    PrivacyError::InvalidTokenAuthority
                 );
             }
 
