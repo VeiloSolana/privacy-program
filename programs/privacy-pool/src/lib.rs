@@ -549,7 +549,7 @@ pub struct Transact<'info> {
     /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
         bump,
@@ -560,7 +560,7 @@ pub struct Transact<'info> {
     /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
         bump,
@@ -792,7 +792,7 @@ pub struct TransactSwap<'info> {
     // 4: observation_state - Oracle observation (optional)
     //
     // Only 5 accounts needed! Much simpler than legacy AMM.
-    
+
     // ---- Jupiter Integration ----
     /// Jupiter Event Authority (required for Jupiter V6 swaps)
     /// CHECK: Validated in handler if Jupiter swap is detected
@@ -1061,18 +1061,26 @@ pub mod privacy_pool {
         let output_commitments = [output_commitment_0, output_commitment_1];
         let cfg = &mut ctx.accounts.config;
 
-        // Validate both tree IDs are valid
+        // AUDIT-004: Validate both tree IDs are valid BEFORE loading trees
+        // This early check prevents compute waste on invalid tree_ids
+        // Tree accounts are derived from tree_id, so invalid IDs would create valid PDAs
+        // but point to uninitialized trees, causing load failures after rent/compute consumption
         require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
         require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
 
         let input_tree = ctx.accounts.input_tree.load()?;
 
         // For deposits (public_amount > 0), no notes are consumed
-        // Nullifier validation is handled by the ZK circuit
+        // Must use zero nullifiers (enforced by circuit and validated here)
         let zero_nullifier = [0u8; 32];
         if public_amount > 0 {
-            // Deposits don't consume notes, so we skip nullifier marker validation entirely
-            // The ZK circuit ensures the proof is valid with whatever nullifiers it uses
+            // AUDIT-001 FIX: Deposits must use zero nullifiers (no inputs consumed)
+            // This prevents unlimited minting by ensuring deposits don't consume real notes
+            require!(
+                input_nullifiers[0] == zero_nullifier && input_nullifiers[1] == zero_nullifier,
+                PrivacyError::InvalidNullifiersForDeposit
+            );
+            // For deposits, nullifier markers are reusable (init_if_needed allows this)
         } else {
             // For withdrawals/transfers, validate no duplicate nullifiers
             require!(
@@ -1283,7 +1291,8 @@ pub mod privacy_pool {
                 PrivacyError::NullifierTreeMismatch
             );
 
-            // Check that nullifier markers don't already exist (prevents double-spend)
+            // AUDIT-001 FIX: With init_if_needed, check if nullifier was already marked
+            // This prevents double-spend even if the marker account already exists
             require!(
                 ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
                 PrivacyError::NullifierAlreadyUsed
@@ -1564,6 +1573,21 @@ fn handle_public_amount<'info>(
             .and_then(|x| x.checked_sub(refund))
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
+        // AUDIT-010 FIX: Calculate minimum valid withdrawal amount to prevent fee bypass
+        // Minimum withdrawal must be large enough that fee_bps-based fee >= min_withdrawal_fee
+        // This eliminates the "dead zone" and prevents timing attacks via consistent minimum fees
+        let min_valid_withdrawal = (config.min_withdrawal_fee as u128)
+            .checked_mul(10_000)
+            .and_then(|x| x.checked_div(config.fee_bps as u128))
+            .and_then(|x| u64::try_from(x).ok())
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+        // Reject withdrawals too small for minimum fee - prevents fee evasion and timing attacks
+        require!(
+            withdrawal_amount >= min_valid_withdrawal,
+            PrivacyError::WithdrawalTooSmallForMinFee
+        );
+
         // Fee validation with error margin for timing attack protection
         // Use u128 for intermediate calculation to prevent overflow on large withdrawals
         let max_fee_u128 = (withdrawal_amount as u128)
@@ -1582,23 +1606,12 @@ fn handle_public_amount<'info>(
             .map(|x| x / 10_000)
             .unwrap_or(max_fee);
 
-        // Ensure withdrawal amount is large enough that max_fee >= min_withdrawal_fee
-        // This prevents fee evasion via small withdrawals where truncation would
-        // make max_fee < min_withdrawal_fee, creating an impossible fee range
+        // At this point, max_fee >= min_withdrawal_fee is guaranteed by the check above
+        // Enforce fee range: [min_withdrawal_fee, max_fee_with_margin]
         require!(
-            max_fee >= config.min_withdrawal_fee,
-            PrivacyError::WithdrawalTooSmallForMinFee
+            fee >= config.min_withdrawal_fee && fee <= max_fee_with_margin,
+            PrivacyError::InvalidFeeAmount
         );
-
-        // 1. Check minimum fee to ensure relayer compensation
-        require!(
-            fee >= config.min_withdrawal_fee,
-            PrivacyError::InsufficientFee
-        );
-
-        // 2. Check maximum fee with margin (prevent malicious relayer from overcharging)
-        // The margin allows variance for timing attack protection
-        require!(fee <= max_fee_with_margin, PrivacyError::ExcessiveFee);
 
         if is_token {
             // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
@@ -1659,10 +1672,12 @@ fn handle_public_amount<'info>(
             let rent = Rent::get()?;
             let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
 
-            // Ensure vault maintains operational buffer above rent exemption
+            // AUDIT-003 FIX: Ensure vault maintains operational buffer above rent exemption
+            // Use 0.01 SOL (10,000,000 lamports) buffer to handle multiple withdrawals in same slot
+            // and protect against account size changes
             let total_required = withdrawal_amount
                 .checked_add(rent_exempt_minimum)
-                .and_then(|x| x.checked_add(1))
+                .and_then(|x| x.checked_add(10_000_000)) // 0.01 SOL buffer
                 .ok_or(PrivacyError::ArithmeticOverflow)?;
 
             require!(

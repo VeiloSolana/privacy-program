@@ -191,7 +191,8 @@ pub fn transact_swap<'info>(
     );
 
     // ╔══════════════════════════════════════════════════════════════════════════╗
-    // ║ ZK PROOF VERIFICATION                                                    ║
+    // ║ ZK PROOF VERIFICATION - ALWAYS ENABLED                                  ║
+    // ║ AUDIT-007: This verification MUST NEVER be disabled via feature flags   ║
     // ║ Verifies:                                                                ║
     // ║   1. User owns input notes (knows preimages for nullifiers)              ║
     // ║   2. Input notes exist in source Merkle tree (root membership)           ║
@@ -200,8 +201,6 @@ pub fn transact_swap<'info>(
     // ║   5. ext_data_hash matches Poseidon(relayer, fee)                        ║
     // ║   6. swap_params_hash matches committed swap parameters                  ║
     // ╚══════════════════════════════════════════════════════════════════════════╝
-    // #[cfg(feature = "zk-verify")]
-    // {
     let swap_params_hash = swap_params.hash()?;
     let ext_data_hash_val = ext_data.hash()?;
 
@@ -215,13 +214,10 @@ pub fn transact_swap<'info>(
         output_commitments,
         swap_amount,
     };
-    // ZK verification consumes ~400K CUs (4 pairings + 10 scalar muls)
-    // Clients must prepend ComputeBudgetInstruction::SetComputeUnitLimit(500_000)
-    // to prevent ComputeBudgetExceeded failures during network congestion
+
+    // CRITICAL: ZK verification consumes ~400K CUs (4 pairings + 10 scalar muls)
+    // This verification is MANDATORY and cannot be disabled
     verify_swap_transaction_groth16(proof, &public_inputs)?;
-    // }
-    // #[cfg(not(feature = "zk-verify"))]
-    // let _ = proof; // Suppress unused warning when ZK verification is disabled
 
     // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;
@@ -537,6 +533,12 @@ pub fn transact_swap<'info>(
             // 8: DestMint
             // ...
 
+            // Minimum account count check - Jupiter will validate account correctness
+            require!(
+                remaining.len() >= 9,
+                PrivacyError::JupiterInsufficientAccounts
+            );
+
             // We need to inject our executor accounts at indices 2, 3, and 6
             // The `remaining` array contains the accounts Jupiter expects, so we iterate through them
             // and replace the user-specific ones with our executor ones.
@@ -583,6 +585,12 @@ pub fn transact_swap<'info>(
             // 3: UserDestTokenAccount -> Executor Dest Token
             // 4: DestMint (or other optional)
             // ...
+
+            // Minimum account count check - Jupiter will validate account correctness
+            require!(
+                remaining.len() >= 4,
+                PrivacyError::JupiterInsufficientAccounts
+            );
 
             for (i, acc) in remaining.iter().enumerate() {
                 match i {
