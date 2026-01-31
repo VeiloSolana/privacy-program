@@ -2,18 +2,22 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
 import {
   PublicKey,
-  Keypair,
   SystemProgram,
-  LAMPORTS_PER_SOL,
   ComputeBudgetProgram,
+  LAMPORTS_PER_SOL,
+  Keypair,
+  AddressLookupTableProgram,
+  TransactionMessage,
+  VersionedTransaction,
+  Transaction,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddress,
-  NATIVE_MINT,
   createWrappedNativeAccount,
   closeAccount,
+  getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
 import { expect } from "chai";
 import { buildPoseidon } from "circomlibjs";
@@ -24,24 +28,17 @@ import {
   JUPITER_EVENT_AUTHORITY,
 } from "./amm-v4-pool-helper";
 import {
-  DepositNote,
   InMemoryNoteStorage,
   OffchainMerkleTree,
   makeProvider,
-  airdropAndConfirm,
   randomBytes32,
-  createAndFundTokenAccount,
-  createDummyNote,
-  extractRootFromAccount,
   computeCommitment,
   computeNullifier,
   computeExtDataHash,
   derivePublicKey,
-  bytesToBigIntBE,
+  airdropAndConfirm,
   generateTransactionProof,
-  reduceToField,
 } from "./test-helpers";
-import { generateSwapProof } from "./swap-test-helpers";
 
 /**
  * Privacy Pool Jupiter Swap Tests
@@ -170,6 +167,7 @@ describe("Privacy Pool Jupiter Swap", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.PrivacyPool as Program<PrivacyPool>;
+  console.log(`Using Privacy Pool program: ${program.programId.toString()}`);
   const connection = provider.connection;
   const payer = (provider.wallet as anchor.Wallet).payer;
 
@@ -200,10 +198,10 @@ describe("Privacy Pool Jupiter Swap", () => {
 
   // Test user keys
   let privateKey: Uint8Array;
-  let publicKey: Uint8Array;
+  let publicKey: bigint;
 
-  // Deposited note
-  let depositedNoteId: string;
+  // Deposited note (would be set by a deposit test)
+  let depositedNoteId: string | undefined;
 
   const INITIAL_DEPOSIT = 5_000_000_000n; // 5 SOL
 
@@ -219,8 +217,8 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log("✅ Jupiter service initialized");
 
     // Initialize off-chain storage
-    sourceOffchainTree = new OffchainMerkleTree(20, poseidon);
-    destOffchainTree = new OffchainMerkleTree(20, poseidon);
+    sourceOffchainTree = new OffchainMerkleTree(22, poseidon);
+    destOffchainTree = new OffchainMerkleTree(22, poseidon);
     noteStorage = new InMemoryNoteStorage();
 
     // Generate test keys
@@ -256,9 +254,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`  Global Config: ${globalConfig.toString()}`);
     console.log(`  Source Config (WSOL): ${sourceConfig.toString()}`);
     console.log(`  Dest Config (USDC): ${destConfig.toString()}`);
-    console.log(
-      `  Jupiter Program: ${JUPITER_PROGRAM_ID.toString()}`,
-    );
+    console.log(`  Jupiter Program: ${JUPITER_PROGRAM_ID.toString()}`);
   });
 
   it("should fetch Jupiter quote for SOL→USDC", async () => {
@@ -272,8 +268,12 @@ describe("Privacy Pool Jupiter Swap", () => {
     );
 
     console.log(`✅ Quote received:`);
-    console.log(`  Input: ${quote.inAmount} (${quote.inputMint.slice(0, 8)}...)`);
-    console.log(`  Output: ${quote.outAmount} (${quote.outputMint.slice(0, 8)}...)`);
+    console.log(
+      `  Input: ${quote.inAmount} (${quote.inputMint.slice(0, 8)}...)`,
+    );
+    console.log(
+      `  Output: ${quote.outAmount} (${quote.outputMint.slice(0, 8)}...)`,
+    );
     console.log(`  Slippage: ${quote.slippageBps} bps`);
     console.log(`  Price Impact: ${quote.priceImpactPct}%`);
 
@@ -306,9 +306,15 @@ describe("Privacy Pool Jupiter Swap", () => {
     );
 
     console.log(`✅ Swap instruction received`);
-    console.log(`  Setup instructions: ${swapIxResponse.setupInstructions.length}`);
-    console.log(`  Swap accounts: ${swapIxResponse.swapInstruction.accounts.length}`);
-    console.log(`  Cleanup instructions: ${swapIxResponse.cleanupInstruction ? 1 : 0}`);
+    console.log(
+      `  Setup instructions: ${swapIxResponse.setupInstructions.length}`,
+    );
+    console.log(
+      `  Swap accounts: ${swapIxResponse.swapInstruction.accounts.length}`,
+    );
+    console.log(
+      `  Cleanup instructions: ${swapIxResponse.cleanupInstruction ? 1 : 0}`,
+    );
 
     // Extract remaining accounts
     const remainingAccounts = jupiterService.extractRemainingAccounts(
@@ -316,7 +322,9 @@ describe("Privacy Pool Jupiter Swap", () => {
     );
 
     console.log(`  Remaining accounts (for CPI): ${remainingAccounts.length}`);
-    console.log(`    Event Authority: ${remainingAccounts[0].pubkey.toString()}`);
+    console.log(
+      `    Event Authority: ${remainingAccounts[0].pubkey.toString()}`,
+    );
 
     expect(remainingAccounts.length).to.be.greaterThan(0);
     expect(remainingAccounts[0].pubkey.toString()).to.equal(
@@ -335,29 +343,414 @@ describe("Privacy Pool Jupiter Swap", () => {
     expect(swapData.slice(0, 8).toString("hex")).to.equal("e517cb977ae3ad2a");
   });
 
-  it.skip("should execute SOL→USDC swap via Jupiter", async () => {
-    // This test is skipped because it requires:
-    // 1. Local validator with Jupiter program cloned
-    // 2. Proper pool initialization for both WSOL and USDC
-    // 3. Initial deposit transaction to create notes
-    // 4. Complex setup for executor PDA and token accounts
+  it("initializes global config", async () => {
+    console.log("\n🔧 Initializing global config...");
+
+    // Check if already initialized
+    try {
+      await (program.account as any).globalConfig.fetch(globalConfig);
+      console.log("✅ Global config already initialized");
+      return;
+    } catch (e) {
+      console.log(e);
+      // Account doesn't exist, proceed with initialization
+    }
+
+    await (program.methods as any)
+      .initializeGlobalConfig()
+      .accounts({
+        globalConfig,
+        admin: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("✅ Global config initialized");
+  });
+
+  it("initializes WSOL privacy pool", async () => {
+    console.log("\n🔧 Initializing WSOL pool...");
+
+    // Check if already initialized
+    try {
+      await program.account.privacyConfig.fetch(sourceConfig);
+      console.log("✅ WSOL pool already initialized");
+      return;
+    } catch {
+      // Account doesn't exist, proceed with initialization
+    }
+
+    const feeBps = 50; // 0.5% fee
+    const minDepositAmount = new BN(0);
+    const maxDepositAmount = new BN(1_000_000_000_000); // 1000 SOL
+    const minWithdrawAmount = new BN(0);
+    const maxWithdrawAmount = new BN(1_000_000_000_000);
+
+    await (program.methods as any)
+      .initialize(
+        feeBps,
+        WSOL_MINT,
+        minDepositAmount,
+        maxDepositAmount,
+        minWithdrawAmount,
+        maxWithdrawAmount,
+      )
+      .accounts({
+        config: sourceConfig,
+        vault: sourceVault,
+        noteTree: sourceNoteTree,
+        nullifiers: sourceNullifiers,
+        admin: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("✅ WSOL pool initialized");
+  });
+
+  it("initializes USDC privacy pool", async () => {
+    console.log("\n🔧 Initializing USDC pool...");
+
+    // Check if already initialized
+    try {
+      await program.account.privacyConfig.fetch(destConfig);
+      console.log("✅ USDC pool already initialized");
+      return;
+    } catch {
+      // Account doesn't exist, proceed with initialization
+    }
+
+    const feeBps = 50; // 0.5% fee
+    const minDepositAmount = new BN(0);
+    const maxDepositAmount = new BN(100_000_000_000); // 100k USDC (6 decimals)
+    const minWithdrawAmount = new BN(0);
+    const maxWithdrawAmount = new BN(100_000_000_000);
+
+    await (program.methods as any)
+      .initialize(
+        feeBps,
+        USDC_MINT,
+        minDepositAmount,
+        maxDepositAmount,
+        minWithdrawAmount,
+        maxWithdrawAmount,
+      )
+      .accounts({
+        config: destConfig,
+        vault: destVault,
+        noteTree: destNoteTree,
+        nullifiers: destNullifiers,
+        admin: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+
+    console.log("✅ USDC pool initialized");
+  });
+
+  it("registers relayer for WSOL pool", async () => {
+    console.log("\n🔧 Registering relayer for WSOL pool...");
+
+    try {
+      await (program.methods as any)
+        .addRelayer(WSOL_MINT, payer.publicKey)
+        .accounts({
+          config: sourceConfig,
+          admin: payer.publicKey,
+        })
+        .rpc();
+      console.log("✅ Relayer registered for WSOL pool");
+    } catch (e: any) {
+      if (
+        e.message?.includes("already registered") ||
+        e.message?.includes("AlreadyInUse")
+      ) {
+        console.log("✅ Relayer already registered for WSOL pool");
+      } else {
+        throw e;
+      }
+    }
+  });
+
+  it("registers relayer for USDC pool", async () => {
+    console.log("\n🔧 Registering relayer for USDC pool...");
+
+    try {
+      await (program.methods as any)
+        .addRelayer(USDC_MINT, payer.publicKey)
+        .accounts({
+          config: destConfig,
+          admin: payer.publicKey,
+        })
+        .rpc();
+      console.log("✅ Relayer registered for USDC pool");
+    } catch (e: any) {
+      if (
+        e.message?.includes("already registered") ||
+        e.message?.includes("AlreadyInUse")
+      ) {
+        console.log("✅ Relayer already registered for USDC pool");
+      } else {
+        throw e;
+      }
+    }
+  });
+
+  it("should deposit SOL to create spendable note", async function () {
+    console.log("\n💰 Creating initial deposit...");
+
+    // Airdrop SOL to payer
+    await airdropAndConfirm(provider, payer.publicKey, 10 * LAMPORTS_PER_SOL);
+
+    // Ensure vault token accounts exist
+    console.log("   Creating vault token accounts if needed...");
+    await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      payer,
+      WSOL_MINT,
+      sourceVault,
+      true, // allowOwnerOffCurve for PDA
+    );
+
+    // Create wrapped SOL account
+    const wsolKeypair = Keypair.generate();
+    const wsolAccount = await createWrappedNativeAccount(
+      provider.connection,
+      payer,
+      payer.publicKey,
+      Number(INITIAL_DEPOSIT) + 1_000_000, // Extra for fees
+      wsolKeypair, // Pass keypair to avoid ATA path
+    );
+
+    // Prepare deposit
+    const amount = INITIAL_DEPOSIT;
+    const blinding = randomBytes32();
+    const commitment = computeCommitment(
+      poseidon,
+      amount,
+      publicKey,
+      blinding,
+      WSOL_MINT,
+    );
+
+    // Create change note (0 amount for deposit)
+    const changeBlinding = randomBytes32();
+    const changePubKey = derivePublicKey(poseidon, randomBytes32());
+    const changeCommitment = computeCommitment(
+      poseidon,
+      0n,
+      changePubKey,
+      changeBlinding,
+      WSOL_MINT,
+    );
+
+    // Create dummy nullifiers for deposit
+    const dummyPrivKey1 = randomBytes32();
+    const dummyPubKey1 = derivePublicKey(poseidon, dummyPrivKey1);
+    const dummyBlinding1 = randomBytes32();
+    const dummyCommitment1 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey1,
+      dummyBlinding1,
+      WSOL_MINT,
+    );
+    const dummyNullifier1 = computeNullifier(
+      poseidon,
+      dummyCommitment1,
+      0,
+      dummyPrivKey1,
+    );
+
+    const dummyPrivKey2 = randomBytes32();
+    const dummyPubKey2 = derivePublicKey(poseidon, dummyPrivKey2);
+    const dummyBlinding2 = randomBytes32();
+    const dummyCommitment2 = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey2,
+      dummyBlinding2,
+      WSOL_MINT,
+    );
+    const dummyNullifier2 = computeNullifier(
+      poseidon,
+      dummyCommitment2,
+      0,
+      dummyPrivKey2,
+    );
+
+    // Prepare ext data
+    const extData = {
+      recipient: payer.publicKey,
+      relayer: payer.publicKey,
+      fee: new BN(0),
+      refund: new BN(0),
+    };
+    const extDataHash = computeExtDataHash(poseidon, extData);
+
+    // Get Merkle proof (empty tree)
+    const dummyProof = sourceOffchainTree.getMerkleProof(0);
+    const root = sourceOffchainTree.getRoot();
+
+    // Generate proof
+    const proof = await generateTransactionProof({
+      root,
+      publicAmount: amount,
+      extDataHash,
+      mintAddress: WSOL_MINT,
+      inputNullifiers: [dummyNullifier1, dummyNullifier2],
+      outputCommitments: [commitment, changeCommitment],
+      inputAmounts: [0n, 0n],
+      inputPrivateKeys: [dummyPrivKey1, dummyPrivKey2],
+      inputPublicKeys: [dummyPubKey1, dummyPubKey2],
+      inputBlindings: [dummyBlinding1, dummyBlinding2],
+      inputMerklePaths: [dummyProof, dummyProof],
+      outputAmounts: [amount, 0n],
+      outputOwners: [publicKey, changePubKey],
+      outputBlindings: [blinding, changeBlinding],
+    });
+
+    // Derive nullifier marker PDAs
+    const nullifierMarker0 = deriveNullifierMarkerPDA(
+      program.programId,
+      WSOL_MINT,
+      0,
+      dummyNullifier1,
+    );
+    const nullifierMarker1 = deriveNullifierMarkerPDA(
+      program.programId,
+      WSOL_MINT,
+      0,
+      dummyNullifier2,
+    );
+
+    // Execute deposit
+    const tx = await (program.methods as any)
+      .transact(
+        Array.from(root),
+        0, // input_tree_id
+        0, // output_tree_id
+        new BN(amount.toString()),
+        Array.from(extDataHash),
+        WSOL_MINT,
+        Array.from(dummyNullifier1),
+        Array.from(dummyNullifier2),
+        Array.from(commitment),
+        Array.from(changeCommitment),
+        {
+          recipient: extData.recipient,
+          relayer: extData.relayer,
+          fee: extData.fee,
+          refund: extData.refund,
+        },
+        proof,
+      )
+      .accounts({
+        config: sourceConfig,
+        globalConfig,
+        vault: sourceVault,
+        inputTree: sourceNoteTree,
+        outputTree: sourceNoteTree,
+        nullifiers: sourceNullifiers,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayer: payer.publicKey,
+        recipient: payer.publicKey,
+        vaultTokenAccount: sourceVaultTokenAccount,
+        userTokenAccount: wsolAccount,
+        recipientTokenAccount: wsolAccount,
+        relayerTokenAccount: wsolAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+      ])
+      .rpc();
+
+    console.log(`✅ Deposit tx: ${tx}`);
+
+    // Update off-chain tree
+    const leafIndex = sourceOffchainTree.insert(commitment);
+    sourceOffchainTree.insert(changeCommitment);
+
+    // Save note for use in swap
+    depositedNoteId = noteStorage.save({
+      amount,
+      commitment,
+      nullifier: computeNullifier(poseidon, commitment, leafIndex, privateKey),
+      blinding,
+      privateKey,
+      publicKey,
+      leafIndex,
+      merklePath: sourceOffchainTree.getMerkleProof(leafIndex),
+      mintAddress: WSOL_MINT,
+    });
+
+    console.log(`   Note saved: ${depositedNoteId}`);
+    console.log(`   Amount: ${INITIAL_DEPOSIT} lamports`);
+    console.log(`   Leaf index: ${leafIndex}`);
+
+    // Close wrapped SOL account
+    await closeAccount(
+      provider.connection,
+      payer,
+      wsolAccount,
+      payer.publicKey,
+      payer,
+    );
+  });
+
+  it("should execute SOL→USDC swap via Jupiter", async function () {
+    // This test requires:
+    // 1. Local validator with Jupiter program cloned:
+    //    solana-test-validator --url mainnet-beta \
+    //      --clone JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 \
+    //      --clone D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf \
+    //      --clone So11111111111111111111111111111111111111112 \
+    //      --clone EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+    //      --reset
     //
-    // To enable this test:
-    // 1. Start validator with: solana-test-validator --clone JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4
-    // 2. Initialize pools (see pool initialization tests)
-    // 3. Make a deposit to create spendable notes
-    // 4. Remove .skip from this test
+    // 2. Proper pool initialization for both WSOL and USDC
+    // 3. Initial deposit completed (previous test)
+    // 4. Jupiter API accessible (for quote/instruction fetching)
+    //
+    // The test will be skipped if prerequisites aren't met
 
     console.log("\n🔄 Testing Jupiter swap execution...");
 
-    // Get deposited note
+    // Skip if no deposit was made
+    if (!depositedNoteId) {
+      console.log("⚠️  Skipping swap test - no deposit found");
+      console.log("    Run the deposit test first to enable swap testing");
+      this.skip();
+      return;
+    }
+
     const note = noteStorage.get(depositedNoteId);
     if (!note) {
       throw new Error("No deposited note found");
     }
 
+    // Ensure destination vault token account exists
+    await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer,
+      USDC_MINT,
+      destVault,
+      true, // allowOwnerOffCurve for PDA
+    );
+
+    // Ensure relayer has a USDC token account (needed for fee payment)
+    await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer,
+      USDC_MINT,
+      payer.publicKey,
+    );
+
     // Get fresh Merkle proof
-    const merklePath = sourceOffchainTree.getMerkleProof(note.leafIndex);
+    // const merklePath = sourceOffchainTree.getMerkleProof(note.leafIndex);
     const root = sourceOffchainTree.getRoot();
 
     // Compute nullifier
@@ -383,10 +776,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`  Min amount out: ${minAmountOut}`);
 
     // Derive executor PDA
-    const [executorPDA] = deriveSwapExecutorPDA(
-      program.programId,
-      nullifier,
-    );
+    const [executorPDA] = deriveSwapExecutorPDA(program.programId, nullifier);
 
     // Get swap instruction from Jupiter
     const swapIxResponse = await jupiterService.getSwapInstruction(
@@ -402,24 +792,53 @@ describe("Privacy Pool Jupiter Swap", () => {
       swapIxResponse.swapInstruction,
     );
 
-    // Create output notes
-    const outputAmount = minAmountOut;
-    const outputBlinding = randomBytes32();
-    const outputCommitment = computeCommitment(
+    // Create output note for swap result in DESTINATION pool
+    // NOTE: The actual amount will be determined by the swap execution
+    // We use minAmountOut as the expected amount for commitment creation
+    const destAmount = minAmountOut;
+    const destBlinding = randomBytes32();
+    const destPubKey = publicKey; // Receive to same owner
+    const destCommitment = computeCommitment(
       poseidon,
-      outputAmount,
-      publicKey,
-      outputBlinding,
+      destAmount,
+      destPubKey,
+      destBlinding,
+      USDC_MINT, // DESTINATION mint
     );
 
-    // Create change note (0 amount - no change expected)
+    // Create change note in SOURCE pool
+    const SWAP_AMOUNT = swapAmount;
+    const changeAmount = note.amount - BigInt(SWAP_AMOUNT);
     const changeBlinding = randomBytes32();
     const changePubKey = derivePublicKey(poseidon, randomBytes32());
     const changeCommitment = computeCommitment(
       poseidon,
-      0n,
+      changeAmount,
       changePubKey,
       changeBlinding,
+      WSOL_MINT, // SOURCE mint
+    );
+
+    // Create intermediate 0-amount commitment in SOURCE mint
+    // This is required for circuit balance but won't be inserted on-chain
+    const outputBlinding = randomBytes32();
+    const intermediateCommitment = computeCommitment(
+      poseidon,
+      0n,
+      publicKey, // Can use any owner
+      outputBlinding,
+      WSOL_MINT, // SOURCE mint
+    );
+
+    console.log(
+      `  Dest commitment: ${Buffer.from(destCommitment)
+        .toString("hex")
+        .slice(0, 16)}...`,
+    );
+    console.log(
+      `  Change commitment: ${Buffer.from(changeCommitment)
+        .toString("hex")
+        .slice(0, 16)}...`,
     );
 
     // Prepare swap params
@@ -440,25 +859,51 @@ describe("Privacy Pool Jupiter Swap", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    // Generate ZK proof
-    const proof = await generateSwapProof({
-      sourceRoot: root,
-      swapParams,
+    // Generate ZK proof for swap
+    // Key insight: Proof verifies SPENDING from source pool only
+    // The swap output is handled on-chain after proof verification
+
+    // Create dummy second input (always 0 amount for single-note swaps)
+    const dummyPrivKey = randomBytes32();
+    const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+    const dummyBlinding = randomBytes32();
+    const dummyCommitment = computeCommitment(
+      poseidon,
+      0n,
+      dummyPubKey,
+      dummyBlinding,
+      WSOL_MINT, // SOURCE mint
+    );
+    const dummyNullifier = computeNullifier(
+      poseidon,
+      dummyCommitment,
+      0,
+      dummyPrivKey,
+    );
+    const dummyProof = sourceOffchainTree.getMerkleProof(0);
+
+    // Retrieve Merkle proof for the real note
+    const merklePath = sourceOffchainTree.getMerkleProof(note.leafIndex);
+
+    // Generate proof with SOURCE mint address (critical!)
+    const proof = await generateTransactionProof({
+      root,
+      publicAmount: -BigInt(swapAmount), // NEGATIVE = leaving source pool
       extDataHash,
-      sourceMint: WSOL_MINT,
-      destMint: USDC_MINT,
-      inputNullifiers: [nullifier, new Uint8Array(32)], // Second input is dummy
-      outputCommitments: [outputCommitment, changeCommitment],
-      swapAmount,
-      inputAmounts: [note.amount, 0n],
-      inputPrivateKeys: [note.privateKey, randomBytes32()],
-      inputPublicKeys: [note.publicKey, derivePublicKey(poseidon, randomBytes32())],
-      inputBlindings: [note.blinding, randomBytes32()],
-      inputMerklePaths: [merklePath, sourceOffchainTree.getMerkleProof(0)],
-      outputAmounts: [outputAmount, 0n],
+      mintAddress: WSOL_MINT, // SOURCE mint, not destination!
+      inputNullifiers: [nullifier, dummyNullifier], // Real + dummy
+      outputCommitments: [intermediateCommitment, changeCommitment], // Intermediate + change
+      inputAmounts: [note.amount, 0n], // Real note + dummy
+      inputPrivateKeys: [note.privateKey, dummyPrivKey],
+      inputPublicKeys: [note.publicKey, dummyPubKey],
+      inputBlindings: [note.blinding, dummyBlinding],
+      inputMerklePaths: [merklePath, dummyProof], // Real proof + dummy
+      outputAmounts: [0n, changeAmount], // Intermediate (0) + change
       outputOwners: [publicKey, changePubKey],
       outputBlindings: [outputBlinding, changeBlinding],
     });
+
+    console.log("✅ ZK proof generated successfully");
 
     // Derive nullifier markers
     const nullifierMarker0 = deriveNullifierMarkerPDA(
@@ -471,7 +916,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       program.programId,
       WSOL_MINT,
       0,
-      new Uint8Array(32),
+      dummyNullifier,
     );
 
     // Get executor token accounts
@@ -492,22 +937,22 @@ describe("Privacy Pool Jupiter Swap", () => {
       payer.publicKey,
     );
 
-    // Execute swap
-    const tx = await (program.methods as any)
+    // Execute swap - build instruction for versioned transaction with ALT
+    const swapIx = await (program.methods as any)
       .transactSwap(
         proof,
         Array.from(root),
         0, // source_tree_id
         WSOL_MINT,
         Array.from(nullifier),
-        Array.from(new Uint8Array(32)),
+        Array.from(dummyNullifier),
         0, // dest_tree_id
         USDC_MINT,
-        Array.from(outputCommitment),
+        Array.from(destCommitment),
         Array.from(changeCommitment),
         swapParams,
         new BN(swapAmount.toString()),
-        Array.from(swapData),
+        swapData,
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -541,17 +986,111 @@ describe("Privacy Pool Jupiter Swap", () => {
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       })
       .remainingAccounts(remainingAccounts)
-      .preInstructions([
+      .instruction();
+
+    // Create Address Lookup Table to compress transaction size
+    const recentSlot = await connection.getSlot("finalized");
+    const [createAltIx, altAddress] =
+      AddressLookupTableProgram.createLookupTable({
+        authority: payer.publicKey,
+        payer: payer.publicKey,
+        recentSlot,
+      });
+
+    // Collect unique account keys from the swap instruction for the ALT
+    const altKeys: PublicKey[] = [];
+    const seen = new Set<string>();
+    for (const meta of swapIx.keys) {
+      const key = meta.pubkey.toBase58();
+      if (!seen.has(key)) {
+        seen.add(key);
+        altKeys.push(meta.pubkey);
+      }
+    }
+    if (!seen.has(swapIx.programId.toBase58())) {
+      altKeys.push(swapIx.programId);
+    }
+
+    // Send ALT creation first
+    await provider.sendAndConfirm(new Transaction().add(createAltIx));
+
+    // Extend ALT in batches of 20 addresses (each address is 32 bytes)
+    const BATCH_SIZE = 20;
+    for (let i = 0; i < altKeys.length; i += BATCH_SIZE) {
+      const extendIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: altAddress,
+        addresses: altKeys.slice(i, i + BATCH_SIZE),
+      });
+      await provider.sendAndConfirm(new Transaction().add(extendIx));
+    }
+
+    // Wait for ALT to activate
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // Fetch the ALT
+    const altAccountInfo =
+      await connection.getAddressLookupTable(altAddress);
+    const lookupTable = altAccountInfo.value!;
+
+    // Build versioned transaction with ALT
+    const { blockhash } = await connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-      ])
-      .rpc();
+        swapIx,
+      ],
+    }).compileToV0Message([lookupTable]);
+
+    const versionedTx = new VersionedTransaction(messageV0);
+    versionedTx.sign([payer]);
+
+    const tx = await connection.sendTransaction(versionedTx);
+    await connection.confirmTransaction(tx, "confirmed");
 
     console.log(`✅ Jupiter swap tx: ${tx}`);
 
-    // Update off-chain trees
-    destOffchainTree.insert(outputCommitment);
-    sourceOffchainTree.insert(changeCommitment);
+    // Verify nullifiers marked as spent
+    const nullifierMarker0Account = await program.account.nullifierMarker.fetch(
+      nullifierMarker0,
+    );
+    expect(
+      Buffer.from(nullifierMarker0Account.nullifier).toString("hex"),
+    ).to.equal(Buffer.from(nullifier).toString("hex"));
 
-    console.log(`✅ Swap completed successfully`);
+    const nullifierMarker1Account = await program.account.nullifierMarker.fetch(
+      nullifierMarker1,
+    );
+    expect(
+      Buffer.from(nullifierMarker1Account.nullifier).toString("hex"),
+    ).to.equal(Buffer.from(dummyNullifier).toString("hex"));
+
+    console.log("✅ Nullifiers marked as spent correctly");
+
+    // Update off-chain trees
+    const destLeafIndex = destOffchainTree.insert(destCommitment);
+    const sourceLeafIndex = sourceOffchainTree.insert(changeCommitment);
+
+    console.log(`✅ Output commitment inserted at index ${destLeafIndex}`);
+    console.log(`✅ Change commitment inserted at index ${sourceLeafIndex}`);
+
+    // Verify TVL updates
+    const sourceConfigAccount = await program.account.privacyConfig.fetch(
+      sourceConfig,
+    );
+    const destConfigAccount = await program.account.privacyConfig.fetch(
+      destConfig,
+    );
+
+    console.log(`  Source TVL: ${sourceConfigAccount.totalTvl}`);
+    console.log(`  Dest TVL: ${destConfigAccount.totalTvl}`);
+
+    // Source TVL should decrease by swapAmount
+    // Dest TVL should increase by (swappedAmount - relayerFee)
+
+    console.log(`✅ Swap completed successfully with ZK proof verification`);
   });
 });
