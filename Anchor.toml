@@ -22,7 +22,7 @@ url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
-wallet = "/Users/jaybee/.config/solana/id.json"
+wallet = "/Users/admin/.config/solana/id.json"
 
 [test]
 startup_wait = 60000
