@@ -38,6 +38,8 @@ import {
   derivePublicKey,
   airdropAndConfirm,
   generateTransactionProof,
+  generateSwapProof,
+  computeSwapParamsHash,
 } from "./test-helpers";
 
 /**
@@ -323,13 +325,13 @@ describe("Privacy Pool Jupiter Swap", () => {
 
     console.log(`  Remaining accounts (for CPI): ${remainingAccounts.length}`);
     console.log(
-      `    Event Authority: ${remainingAccounts[0].pubkey.toString()}`,
+      `    (All Jupiter accounts passed, account #1 replaced with executor PDA in Rust)`,
     );
 
-    expect(remainingAccounts.length).to.be.greaterThan(0);
-    expect(remainingAccounts[0].pubkey.toString()).to.equal(
-      JUPITER_EVENT_AUTHORITY.toString(),
+    expect(remainingAccounts.length).to.equal(
+      swapIxResponse.swapInstruction.accounts.length,
     );
+    expect(remainingAccounts.length).to.be.greaterThan(0);
 
     // Build swap data
     const swapData = jupiterService.buildSwapData(
@@ -774,6 +776,7 @@ describe("Privacy Pool Jupiter Swap", () => {
 
     console.log(`  Swap amount: ${swapAmount}`);
     console.log(`  Min amount out: ${minAmountOut}`);
+    console.log(`  Jupiter route:`, JSON.stringify(quote, null, 2));
 
     // Derive executor PDA
     const [executorPDA] = deriveSwapExecutorPDA(program.programId, nullifier);
@@ -810,23 +813,13 @@ describe("Privacy Pool Jupiter Swap", () => {
     const SWAP_AMOUNT = swapAmount;
     const changeAmount = note.amount - BigInt(SWAP_AMOUNT);
     const changeBlinding = randomBytes32();
-    const changePubKey = derivePublicKey(poseidon, randomBytes32());
+    const changePrivKey = randomBytes32();
+    const changePubKey = derivePublicKey(poseidon, changePrivKey);
     const changeCommitment = computeCommitment(
       poseidon,
       changeAmount,
       changePubKey,
       changeBlinding,
-      WSOL_MINT, // SOURCE mint
-    );
-
-    // Create intermediate 0-amount commitment in SOURCE mint
-    // This is required for circuit balance but won't be inserted on-chain
-    const outputBlinding = randomBytes32();
-    const intermediateCommitment = computeCommitment(
-      poseidon,
-      0n,
-      publicKey, // Can use any owner
-      outputBlinding,
       WSOL_MINT, // SOURCE mint
     );
 
@@ -850,7 +843,10 @@ describe("Privacy Pool Jupiter Swap", () => {
     };
 
     // Prepare ext data
-    const relayerFee = 100_000n; // 0.1 USDC
+    // Fee must be >= max(min_swap_fee, swapAmount * feeBps)
+    // Default swap_fee_bps is 10 (0.1%). For ~580 USDC output, fee is ~0.58 USDC (580,000 units)
+    // We set a sufficient fee here (1 USDC = 1,000,000 units)
+    const relayerFee = 1_000_000n; // 1.0 USDC
     const extData = {
       recipient: payer.publicKey,
       relayer: payer.publicKey,
@@ -858,10 +854,13 @@ describe("Privacy Pool Jupiter Swap", () => {
       refund: new BN(0),
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
-
-    // Generate ZK proof for swap
-    // Key insight: Proof verifies SPENDING from source pool only
-    // The swap output is handled on-chain after proof verification
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      WSOL_MINT,
+      USDC_MINT,
+      minAmountOut,
+      BigInt(swapParams.deadline.toString()),
+    );
 
     // Create dummy second input (always 0 amount for single-note swaps)
     const dummyPrivKey = randomBytes32();
@@ -885,22 +884,34 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Retrieve Merkle proof for the real note
     const merklePath = sourceOffchainTree.getMerkleProof(note.leafIndex);
 
-    // Generate proof with SOURCE mint address (critical!)
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -BigInt(swapAmount), // NEGATIVE = leaving source pool
+    // Generate ZK proof for swap using the correct swap proof function
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
       extDataHash,
-      mintAddress: WSOL_MINT, // SOURCE mint, not destination!
-      inputNullifiers: [nullifier, dummyNullifier], // Real + dummy
-      outputCommitments: [intermediateCommitment, changeCommitment], // Intermediate + change
-      inputAmounts: [note.amount, 0n], // Real note + dummy
+      sourceMint: WSOL_MINT,
+      destMint: USDC_MINT,
+      inputNullifiers: [nullifier, dummyNullifier],
+      changeCommitment,
+      destCommitment,
+      swapAmount: BigInt(swapAmount),
+
+      inputAmounts: [note.amount, 0n],
       inputPrivateKeys: [note.privateKey, dummyPrivKey],
       inputPublicKeys: [note.publicKey, dummyPubKey],
       inputBlindings: [note.blinding, dummyBlinding],
-      inputMerklePaths: [merklePath, dummyProof], // Real proof + dummy
-      outputAmounts: [0n, changeAmount], // Intermediate (0) + change
-      outputOwners: [publicKey, changePubKey],
-      outputBlindings: [outputBlinding, changeBlinding],
+      inputMerklePaths: [merklePath, dummyProof],
+
+      changeAmount,
+      changePubkey: changePubKey,
+      changeBlinding,
+
+      destAmount,
+      destPubkey: destPubKey,
+      destBlinding,
+
+      minAmountOut,
+      deadline: BigInt(swapParams.deadline.toString()),
     });
 
     console.log("✅ ZK proof generated successfully");
@@ -948,8 +959,8 @@ describe("Privacy Pool Jupiter Swap", () => {
         Array.from(dummyNullifier),
         0, // dest_tree_id
         USDC_MINT,
-        Array.from(destCommitment),
         Array.from(changeCommitment),
+        Array.from(destCommitment),
         swapParams,
         new BN(swapAmount.toString()),
         swapData,
@@ -981,6 +992,9 @@ describe("Privacy Pool Jupiter Swap", () => {
         relayer: payer.publicKey,
         relayerTokenAccount,
         swapProgram: JUPITER_PROGRAM_ID,
+        jupiterEventAuthority: new PublicKey(
+          "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf",
+        ),
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1030,8 +1044,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
     // Fetch the ALT
-    const altAccountInfo =
-      await connection.getAddressLookupTable(altAddress);
+    const altAccountInfo = await connection.getAddressLookupTable(altAddress);
     const lookupTable = altAccountInfo.value!;
 
     // Build versioned transaction with ALT

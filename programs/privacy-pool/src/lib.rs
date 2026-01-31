@@ -792,6 +792,12 @@ pub struct TransactSwap<'info> {
     // 4: observation_state - Oracle observation (optional)
     //
     // Only 5 accounts needed! Much simpler than legacy AMM.
+    
+    // ---- Jupiter Integration ----
+    /// Jupiter Event Authority (required for Jupiter V6 swaps)
+    /// CHECK: Validated in handler if Jupiter swap is detected
+    pub jupiter_event_authority: UncheckedAccount<'info>,
+
     // ---- Programs ----
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,

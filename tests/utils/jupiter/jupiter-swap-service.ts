@@ -56,6 +56,7 @@ export class JupiterSwapService {
       amount: amount.toString(),
       slippageBps: slippageBps.toString(),
       onlyDirectRoutes: "true", // Simple routes only (no ALTs)
+      dexes: "Raydium,Raydium CPMM", // Only use Raydium AMM V4 and CPMM (already cloned in localnet)
     });
 
     const response = await fetch(`${this.apiUrl}/quote?${params}`);
@@ -97,28 +98,19 @@ export class JupiterSwapService {
 
   /**
    * Extract remaining_accounts for privacy pool CPI
-   * Filters out the base accounts (first 9) and returns DEX routing accounts
+   * Returns ALL Jupiter instruction accounts
+   * Jupiter needs complete account structure to route properly to underlying DEXs
    */
   extractRemainingAccounts(swapInstruction: any): AccountMeta[] {
     const accounts = swapInstruction.accounts;
+    const remainingAccounts: AccountMeta[] = [];
 
-    // Jupiter route instruction has 9 base accounts + routing accounts
-    // We need to pass routing accounts via remaining_accounts
-    // Plus event authority as first item
-    const remainingAccounts: AccountMeta[] = [
-      {
-        pubkey: JUPITER_EVENT_AUTHORITY,
-        isWritable: false,
-        isSigner: false,
-      },
-    ];
-
-    // Add routing accounts (accounts 9+)
-    for (let i = 9; i < accounts.length; i++) {
+    // Pass ALL Jupiter accounts - Jupiter will handle its own account structure
+    for (let i = 0; i < accounts.length; i++) {
       remainingAccounts.push({
         pubkey: new PublicKey(accounts[i].pubkey),
         isWritable: accounts[i].isWritable,
-        isSigner: false,
+        isSigner: false, // All signing handled by program via invoke_signed
       });
     }
 
