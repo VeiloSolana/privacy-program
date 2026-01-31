@@ -34,8 +34,51 @@ pub struct SwapParams {
 }
 
 impl SwapParams {
+    /// Reduce 32-byte value modulo BN254 Fr field
+    fn reduce_to_field(bytes: [u8; 32]) -> [u8; 32] {
+        use num_bigint::BigUint;
+
+        // BN254 Fr modulus as 32-byte BE
+        const FR_MODULUS: [u8; 32] = [
+            0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81,
+            0x58, 0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93,
+            0xf0, 0x00, 0x00, 0x01,
+        ];
+
+        // Quick check: if bytes < modulus, no reduction needed
+        let mut needs_reduction = false;
+        for i in 0..32 {
+            if bytes[i] < FR_MODULUS[i] {
+                break;
+            }
+            if bytes[i] > FR_MODULUS[i] {
+                needs_reduction = true;
+                break;
+            }
+        }
+
+        if !needs_reduction {
+            return bytes;
+        }
+
+        // Use BigUint for proper modulo reduction
+        let val = BigUint::from_bytes_be(&bytes);
+        let modulus = BigUint::from_bytes_be(&FR_MODULUS);
+        let reduced = val % modulus;
+
+        let mut result = [0u8; 32];
+        let reduced_bytes = reduced.to_bytes_be();
+        let offset = 32 - reduced_bytes.len();
+        result[offset..].copy_from_slice(&reduced_bytes);
+        result
+    }
+
     pub fn hash(&self) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
+
+        // Reduce mints to field elements (pubkeys may exceed Fr modulus)
+        let source_mint_bytes = Self::reduce_to_field(self.source_mint.to_bytes());
+        let dest_mint_bytes = Self::reduce_to_field(self.dest_mint.to_bytes());
 
         let mut min_out_bytes = [0u8; 32];
         min_out_bytes[24..].copy_from_slice(&self.min_amount_out.to_be_bytes());
@@ -43,9 +86,8 @@ impl SwapParams {
         let mut deadline_bytes = [0u8; 32];
         deadline_bytes[24..].copy_from_slice(&self.deadline.to_be_bytes());
 
-        let hash1 =
-            PoseidonHasher::hashv(&[&self.source_mint.to_bytes(), &self.dest_mint.to_bytes()])
-                .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash1 = PoseidonHasher::hashv(&[&source_mint_bytes, &dest_mint_bytes])
+            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
         let hash2 = PoseidonHasher::hashv(&[&min_out_bytes, &deadline_bytes])
             .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
@@ -104,9 +146,18 @@ pub fn transact_swap<'info>(
     );
     require!(source_mint != dest_mint, PrivacyError::InvalidMintAddress);
 
+    // Check relayer is whitelisted in BOTH source and dest pools
+    // This prevents relayers authorized only for one pool from facilitating
+    // swaps across pool boundaries they shouldn't access
     require!(
         ctx.accounts
             .source_config
+            .is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
+    require!(
+        ctx.accounts
+            .dest_config
             .is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
@@ -151,16 +202,22 @@ pub fn transact_swap<'info>(
     // ╚══════════════════════════════════════════════════════════════════════════╝
     // #[cfg(feature = "zk-verify")]
     // {
+    let swap_params_hash = swap_params.hash()?;
+    let ext_data_hash_val = ext_data.hash()?;
+
     let public_inputs = SwapPublicInputs {
         source_root,
-        swap_params_hash: swap_params.hash()?,
-        ext_data_hash: ext_data.hash()?,
+        swap_params_hash,
+        ext_data_hash: ext_data_hash_val,
         source_mint,
         dest_mint,
         input_nullifiers,
         output_commitments,
         swap_amount,
     };
+    // ZK verification consumes ~400K CUs (4 pairings + 10 scalar muls)
+    // Clients must prepend ComputeBudgetInstruction::SetComputeUnitLimit(500_000)
+    // to prevent ComputeBudgetExceeded failures during network congestion
     verify_swap_transaction_groth16(proof, &public_inputs)?;
     // }
     // #[cfg(not(feature = "zk-verify"))]
@@ -173,6 +230,18 @@ pub fn transact_swap<'info>(
         PrivacyError::UnknownRoot
     );
     drop(source_tree);
+
+    // Validate tree_id matches to prevent cross-tree nullifier reuse
+    require!(
+        ctx.accounts.source_nullifier_marker_0.tree_id == 0
+            || ctx.accounts.source_nullifier_marker_0.tree_id == source_tree_id,
+        PrivacyError::NullifierTreeMismatch
+    );
+    require!(
+        ctx.accounts.source_nullifier_marker_1.tree_id == 0
+            || ctx.accounts.source_nullifier_marker_1.tree_id == source_tree_id,
+        PrivacyError::NullifierTreeMismatch
+    );
 
     // Mark nullifiers as spent
     crate::mark_nullifier_spent(
@@ -192,25 +261,9 @@ pub fn transact_swap<'info>(
         source_tree_id,
     )?;
 
-    // Initialize executor PDA
-    // and allow reclaiming it. In practice, Solana's atomic transactions prevent this,
-    // but this provides defense-in-depth.
+    // Initialize executor PDA (uses 'init' so always fresh, no staleness check needed)
     let executor = &mut ctx.accounts.executor;
     let current_slot = Clock::get()?.slot;
-
-    // If executor already has data, verify it's stale before reclaiming
-    if executor.created_slot != 0 {
-        let slots_elapsed = current_slot.saturating_sub(executor.created_slot);
-        require!(
-            slots_elapsed >= SwapExecutor::STALE_THRESHOLD_SLOTS,
-            PrivacyError::ExecutorNotStale
-        );
-        // Stale executor - reclaim it
-        msg!(
-            "Reclaiming stale executor from slot {}",
-            executor.created_slot
-        );
-    }
 
     executor.source_mint = source_mint;
     executor.dest_mint = dest_mint;
@@ -220,6 +273,15 @@ pub fn transact_swap<'info>(
 
     // Transfer from source vault to executor
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    // Validate vault has sufficient balance before transfer
+    let vault_token_data = crate::deserialize_token_account(
+        &ctx.accounts.source_vault_token_account.to_account_info(),
+    )?;
+    require!(
+        vault_token_data.amount >= swap_amount,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
 
     let source_vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
@@ -277,9 +339,9 @@ pub fn transact_swap<'info>(
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
-        // remaining[0] = CPMM config - must be owned by CPMM program
+        // remaining[1] = CPMM config - must be owned by CPMM program
         require!(
-            remaining[0].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
+            remaining[1].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
         // remaining[2] = pool state - must be owned by CPMM program
@@ -584,43 +646,48 @@ pub fn transact_swap<'info>(
     }
 
     // Insert swap output (commitment 0) into destination tree
+    // Insert commitments into trees
+    // output_commitments[0] = changeCommitment (goes back to source tree)
+    // output_commitments[1] = destCommitment (goes to dest tree)
+
+    // Insert dest note (commitment 1) into dest tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
 
     let max_capacity = 1u64 << (dest_tree.height as u64);
     let remaining = max_capacity.saturating_sub(dest_tree.next_index);
     require!(remaining >= 1, PrivacyError::MerkleTreeFull);
 
-    let leaf_index_0 = dest_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *dest_tree)?;
+    let leaf_index_dest = dest_tree.next_index;
+    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *dest_tree)?;
 
     let dest_new_root = dest_tree.root;
     drop(dest_tree);
 
     emit!(crate::CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_0,
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_dest,
         new_root: dest_new_root,
         timestamp: clock.unix_timestamp,
         mint_address: dest_mint,
         tree_id: dest_tree_id,
     });
 
-    // Insert change note (commitment 1) back into source tree
+    // Insert change note (commitment 0) back into source tree
     let mut source_tree = ctx.accounts.source_tree.load_mut()?;
 
     let max_capacity = 1u64 << (source_tree.height as u64);
     let remaining = max_capacity.saturating_sub(source_tree.next_index);
     require!(remaining >= 1, PrivacyError::MerkleTreeFull);
 
-    let leaf_index_1 = source_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *source_tree)?;
+    let leaf_index_change = source_tree.next_index;
+    MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *source_tree)?;
 
     let source_new_root = source_tree.root;
     drop(source_tree);
 
     emit!(crate::CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_1,
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_change,
         new_root: source_new_root,
         timestamp: clock.unix_timestamp,
         mint_address: source_mint,

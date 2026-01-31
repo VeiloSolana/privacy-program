@@ -32,6 +32,8 @@ import {
   computeExtDataHash,
   derivePublicKey,
   generateTransactionProof,
+  generateSwapProof,
+  computeSwapParamsHash,
 } from "./test-helpers";
 import {
   RAYDIUM_AMM_V4_PROGRAM,
@@ -1037,29 +1039,6 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    const proof = await generateTransactionProof({
-      root: solOffchainTree.getRoot(),
-      publicAmount: -BigInt(SWAP_AMOUNT),
-      extDataHash,
-      mintAddress: solTokenMint,
-      inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [
-        computeCommitment(poseidon, 0n, destPubKey, destBlinding, solTokenMint),
-        changeCommitment,
-      ],
-      inputAmounts: [note.amount, 0n],
-      inputPrivateKeys: [note.privateKey, dummyPrivKey],
-      inputPublicKeys: [note.publicKey, dummyPubKey],
-      inputBlindings: [note.blinding, dummyBlinding],
-      inputMerklePaths: [
-        solOffchainTree.getMerkleProof(note.leafIndex),
-        solOffchainTree.getMerkleProof(0),
-      ],
-      outputAmounts: [0n, changeAmount],
-      outputOwners: [destPubKey, changePubKey],
-      outputBlindings: [destBlinding, changeBlinding],
-    });
-
     const minAmountOut = new BN(1); // Force 1 for test environment with stale state
     // const minAmountOut = computedMinAmountOut.raw; // Original SDK value
     console.log(
@@ -1076,6 +1055,42 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       sourceMint: solTokenMint,
       destMint: jupTokenMint,
     };
+
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      solTokenMint,
+      jupTokenMint,
+      BigInt(minAmountOut.toString()),
+      BigInt(swapParams.deadline.toString()),
+    );
+
+    const proof = await generateSwapProof({
+      sourceRoot: solOffchainTree.getRoot(),
+      swapParamsHash,
+      extDataHash,
+      sourceMint: solTokenMint,
+      destMint: jupTokenMint,
+      inputNullifiers: [note.nullifier, dummyNullifier],
+      changeCommitment: changeCommitment,
+      destCommitment: destCommitment,
+      swapAmount: BigInt(SWAP_AMOUNT),
+      inputAmounts: [note.amount, 0n],
+      inputPrivateKeys: [note.privateKey, dummyPrivKey],
+      inputPublicKeys: [note.publicKey, dummyPubKey],
+      inputBlindings: [note.blinding, dummyBlinding],
+      inputMerklePaths: [
+        solOffchainTree.getMerkleProof(note.leafIndex),
+        solOffchainTree.getMerkleProof(0),
+      ],
+      changeAmount,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: swappedAmount,
+      destPubkey: destPubKey,
+      destBlinding,
+      minAmountOut: BigInt(minAmountOut.toString()),
+      deadline: BigInt(swapParams.deadline.toString()),
+    });
 
     const [executorPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -1163,6 +1178,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
 
     const swapIx = await (program.methods as any)
       .transactSwap(
+        proof,
         Array.from(solOffchainTree.getRoot()),
         0,
         solTokenMint,
@@ -1170,8 +1186,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier),
         0,
         jupTokenMint,
-        Array.from(destCommitment),
         Array.from(changeCommitment),
+        Array.from(destCommitment),
         swapParams,
         new BN(SWAP_AMOUNT.toString()),
         swapData,
@@ -2162,26 +2178,6 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    // Generate ZK proof
-    console.log("   Generating ZK proof...");
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -swapAmount, // All JUP leaves pool for swap
-      extDataHash,
-      mintAddress: jupTokenMint,
-      inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [solOutputCommitmentForProof, changeCommitment],
-      inputAmounts: [note.amount, 0n],
-      inputPrivateKeys: [note.privateKey, dummyPrivKey],
-      inputPublicKeys: [note.publicKey, dummyPubKey],
-      inputBlindings: [note.blinding, dummyBlinding],
-      inputMerklePaths: [merkleProof, dummyProof],
-      outputAmounts: [0n, 0n],
-      outputOwners: [solOutputPubKey, changePubKey],
-      outputBlindings: [solOutputBlinding, changeBlinding],
-    });
-    console.log("   ✅ ZK proof generated");
-
     // Build AMM swap data (JUP → SOL = swap_base_in with JUP as base)
     const minSolOut = new BN(1); // Accept any output for test environment
     const swapData = buildAmmSwapData(new BN(swapAmount.toString()), minSolOut);
@@ -2193,6 +2189,42 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       sourceMint: jupTokenMint, // JUP
       destMint: solTokenMint, // SOL
     };
+
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      jupTokenMint,
+      solTokenMint,
+      BigInt(minSolOut.toString()),
+      BigInt(swapParams.deadline.toString()),
+    );
+
+    // Generate ZK proof
+    console.log("   Generating ZK proof...");
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
+      extDataHash,
+      sourceMint: jupTokenMint,
+      destMint: solTokenMint,
+      inputNullifiers: [note.nullifier, dummyNullifier],
+      changeCommitment: changeCommitment,
+      destCommitment: solOutputCommitment,
+      swapAmount,
+      inputAmounts: [note.amount, 0n],
+      inputPrivateKeys: [note.privateKey, dummyPrivKey],
+      inputPublicKeys: [note.publicKey, dummyPubKey],
+      inputBlindings: [note.blinding, dummyBlinding],
+      inputMerklePaths: [merkleProof, dummyProof],
+      changeAmount: 0n,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: expectedSol,
+      destPubkey: solOutputPubKey,
+      destBlinding: solOutputBlinding,
+      minAmountOut: BigInt(minSolOut.toString()),
+      deadline: BigInt(swapParams.deadline.toString()),
+    });
+    console.log("   ✅ ZK proof generated");
 
     // Derive executor PDA
     const [executorPda] = PublicKey.findProgramAddressSync(
@@ -2303,6 +2335,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       // For JUP → SOL swap
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof,
           Array.from(root),
           0,
           jupTokenMint, // Source is JUP
@@ -2310,8 +2343,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
           Array.from(dummyNullifier),
           0,
           solTokenMint, // Dest is SOL
-          Array.from(solOutputCommitment),
           Array.from(changeCommitment),
+          Array.from(solOutputCommitment),
           swapParams,
           new BN(swapAmount.toString()),
           swapData,

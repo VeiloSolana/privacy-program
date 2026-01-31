@@ -32,6 +32,8 @@ import {
   computeExtDataHash,
   derivePublicKey,
   generateTransactionProof,
+  generateSwapProof,
+  computeSwapParamsHash,
 } from "./test-helpers";
 import {
   RAYDIUM_AMM_V4_PROGRAM,
@@ -1051,29 +1053,6 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    const proof = await generateTransactionProof({
-      root: solOffchainTree.getRoot(),
-      publicAmount: -BigInt(SWAP_AMOUNT),
-      extDataHash,
-      mintAddress: solTokenMint,
-      inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [
-        computeCommitment(poseidon, 0n, destPubKey, destBlinding, solTokenMint),
-        changeCommitment,
-      ],
-      inputAmounts: [note.amount, 0n],
-      inputPrivateKeys: [note.privateKey, dummyPrivKey],
-      inputPublicKeys: [note.publicKey, dummyPubKey],
-      inputBlindings: [note.blinding, dummyBlinding],
-      inputMerklePaths: [
-        solOffchainTree.getMerkleProof(note.leafIndex),
-        solOffchainTree.getMerkleProof(0),
-      ],
-      outputAmounts: [0n, changeAmount],
-      outputOwners: [destPubKey, changePubKey],
-      outputBlindings: [destBlinding, changeBlinding],
-    });
-
     // NOTE: For testing with cloned mainnet accounts, we use minAmountOut = 1
     // The SDK's computed estimate is based on pool reserves that may not match
     // the local validator's cloned state. In production, use computedMinAmountOut.raw
@@ -1094,6 +1073,42 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       sourceMint: solTokenMint,
       destMint: usd1TokenMint,
     };
+
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      solTokenMint,
+      usd1TokenMint,
+      BigInt(minAmountOut.toString()),
+      BigInt(swapParams.deadline.toString()),
+    );
+
+    const proof = await generateSwapProof({
+      sourceRoot: solOffchainTree.getRoot(),
+      swapParamsHash,
+      extDataHash,
+      sourceMint: solTokenMint,
+      destMint: usd1TokenMint,
+      inputNullifiers: [note.nullifier, dummyNullifier],
+      changeCommitment: changeCommitment,
+      destCommitment: destCommitment,
+      swapAmount: BigInt(SWAP_AMOUNT),
+      inputAmounts: [note.amount, 0n],
+      inputPrivateKeys: [note.privateKey, dummyPrivKey],
+      inputPublicKeys: [note.publicKey, dummyPubKey],
+      inputBlindings: [note.blinding, dummyBlinding],
+      inputMerklePaths: [
+        solOffchainTree.getMerkleProof(note.leafIndex),
+        solOffchainTree.getMerkleProof(0),
+      ],
+      changeAmount,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: swappedAmount,
+      destPubkey: destPubKey,
+      destBlinding,
+      minAmountOut: BigInt(minAmountOut.toString()),
+      deadline: BigInt(swapParams.deadline.toString()),
+    });
 
     const [executorPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -1188,6 +1203,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
 
     const swapIx = await (program.methods as any)
       .transactSwap(
+        proof,
         Array.from(solOffchainTree.getRoot()),
         0,
         solTokenMint,
@@ -1195,8 +1211,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier),
         0,
         usd1TokenMint,
-        Array.from(destCommitment),
         Array.from(changeCommitment),
+        Array.from(destCommitment),
         swapParams,
         new BN(SWAP_AMOUNT.toString()),
         swapData,
@@ -2137,40 +2153,50 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
 
     // Generate ZK proof
     console.log("   Generating ZK proof...");
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -swapAmount, // All USD1 leaves pool for swap
+    // Swap params (reversed: USD1 → SOL)
+    const minSolOut = new BN(1);
+    const swapParams = {
+      minAmountOut: minSolOut,
+      deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+      sourceMint: usd1TokenMint,
+      destMint: solTokenMint,
+    };
+
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      swapParams.sourceMint,
+      swapParams.destMint,
+      BigInt(swapParams.minAmountOut.toString()),
+      BigInt(swapParams.deadline.toString()),
+    );
+
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
       extDataHash,
-      mintAddress: usd1TokenMint,
+      sourceMint: usd1TokenMint,
+      destMint: solTokenMint,
       inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [solOutputCommitmentForProof, changeCommitment],
+      changeCommitment,
+      destCommitment: solOutputCommitment,
+      swapAmount: note.amount,
       inputAmounts: [note.amount, 0n],
       inputPrivateKeys: [note.privateKey, dummyPrivKey],
       inputPublicKeys: [note.publicKey, dummyPubKey],
       inputBlindings: [note.blinding, dummyBlinding],
       inputMerklePaths: [merkleProof, dummyProof],
-      outputAmounts: [0n, 0n],
-      outputOwners: [solOutputPubKey, changePubKey],
-      outputBlindings: [solOutputBlinding, changeBlinding],
+      changeAmount: 0n,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: expectedSol,
+      destPubkey: solOutputPubKey,
+      destBlinding: solOutputBlinding,
+      minAmountOut: BigInt(swapParams.minAmountOut.toString()),
+      deadline: BigInt(swapParams.deadline.toString()),
     });
     console.log("   ✅ ZK proof generated");
 
-    // Build AMM swap data (USD1 → SOL = swap_base_in with USD1 as base)
-    // For reverse swap, we need to check the pool direction
-    // In SOL/USD1 pool, SOL is base (coin) and USD1 is quote (pc)
-    // So swapping USD1 → SOL is swap_base_out (0x0a) or we swap with reversed accounts
-    // Actually for AMM V4, swap_base_in always uses the "in" token as base
-    // We'll use swap_base_in with amount_in = USD1 amount
-    const minSolOut = new BN(1); // Accept any output for test environment
     const swapData = buildAmmSwapData(new BN(swapAmount.toString()), minSolOut);
-
-    // Swap params (reversed: USD1 → SOL)
-    const swapParams = {
-      minAmountOut: minSolOut,
-      deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-      sourceMint: usd1TokenMint, // USD1
-      destMint: solTokenMint, // SOL
-    };
 
     // Derive executor PDA
     const [executorPda] = PublicKey.findProgramAddressSync(
@@ -2311,6 +2337,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       // - Output: SOL (base/coin)
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof,
           Array.from(root),
           0,
           usd1TokenMint, // Source is USD1
@@ -2318,8 +2345,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
           Array.from(dummyNullifier),
           0,
           solTokenMint, // Dest is SOL
-          Array.from(solOutputCommitment),
-          Array.from(changeCommitment),
+          Array.from(changeCommitment), // Change (USD1)
+          Array.from(solOutputCommitment), // Dest (SOL)
           swapParams,
           new BN(swapAmount.toString()),
           swapData,

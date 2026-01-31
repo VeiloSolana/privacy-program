@@ -18,6 +18,7 @@ import {
   getAssociatedTokenAddress,
   getOrCreateAssociatedTokenAccount,
   createWrappedNativeAccount,
+  createAssociatedTokenAccountIdempotentInstruction,
   createSyncNativeInstruction,
 } from "@solana/spl-token";
 import { expect } from "chai";
@@ -34,6 +35,8 @@ import {
   computeExtDataHash,
   derivePublicKey,
   generateTransactionProof,
+  generateSwapProof,
+  computeSwapParamsHash,
 } from "./test-helpers";
 import {
   RAYDIUM_AMM_V4_PROGRAM,
@@ -410,14 +413,23 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Depositing SOL for USDC swap...");
 
-      // Create vault's token account first (required for the deposit)
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        payer,
+      // Create vault's token account via idempotent instruction
+      const vaultAta = await getAssociatedTokenAddress(
         sol.mint,
         sol.vault,
-        true, // allowOwnerOffCurve - required for PDA vaults
+        true,
       );
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        vaultAta,
+        sol.vault,
+        sol.mint,
+      );
+      try {
+        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
+      } catch (e: any) {
+        console.log("   ⚠️ ATA creation note:", e.message);
+      }
 
       // Create wSOL account for the user
       const wsolAccount = await createWrappedNativeAccount(
@@ -660,34 +672,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(50_000_000); // 50 USDC min
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: sol.mint,
+        destMint: usdc.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        sol.mint,
+        usdc.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: sol.mint,
+        sourceMint: sol.mint,
+        destMint: usdc.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_USDC_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(50_000_000); // 50 USDC min
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
-
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: sol.mint,
-        destMint: usdc.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -799,6 +833,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             sol.mint,
@@ -806,8 +841,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             usdc.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(SWAP_AMOUNT),
             swapData,
@@ -1030,14 +1065,19 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
       // Vault token account should already exist from previous tests
       console.log("   Creating vault token account...");
+      const vaultAta = await getAssociatedTokenAddress(
+        sol.mint,
+        sol.vault,
+        true,
+      );
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        vaultAta,
+        sol.vault,
+        sol.mint,
+      );
       try {
-        await getOrCreateAssociatedTokenAccount(
-          provider.connection,
-          payer,
-          sol.mint,
-          sol.vault,
-          true,
-        );
+        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
         console.log("   ✅ Vault token account ready");
       } catch (e: any) {
         console.log(
@@ -1286,33 +1326,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(40_000_000); // 40 USDT min
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: sol.mint,
+        destMint: usdt.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        sol.mint,
+        usdt.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: sol.mint,
+        sourceMint: sol.mint,
+        destMint: usdt.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_USDT_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(50_000_000);
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: sol.mint,
-        destMint: usdt.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -1423,6 +1486,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             sol.mint,
@@ -1430,8 +1494,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             usdt.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(SWAP_AMOUNT),
             swapData,
@@ -1652,14 +1716,19 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       console.log("\n🎁 Depositing SOL for JUP swap...");
 
       // Vault token account should already exist from previous tests
+      const vaultAta = await getAssociatedTokenAddress(
+        sol.mint,
+        sol.vault,
+        true,
+      );
       try {
-        await getOrCreateAssociatedTokenAccount(
-          provider.connection,
-          payer,
-          sol.mint,
+        const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+          payer.publicKey,
+          vaultAta,
           sol.vault,
-          true,
+          sol.mint,
         );
+        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
       } catch (e) {
         // Account may already exist, which is fine
       }
@@ -1899,33 +1968,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(50_000_000); // 50 JUP
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: sol.mint,
+        destMint: jup.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        sol.mint,
+        jup.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: sol.mint,
+        sourceMint: sol.mint,
+        destMint: jup.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_JUP_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(50_000_000);
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: sol.mint,
-        destMint: jup.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -2036,6 +2128,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             sol.mint,
@@ -2043,8 +2136,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             jup.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(SWAP_AMOUNT),
             swapData,
@@ -2261,14 +2354,19 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       console.log("\n🎁 Depositing SOL for USD1 swap...");
 
       // Vault token account should already exist from previous tests
+      const vaultAta = await getAssociatedTokenAddress(
+        sol.mint,
+        sol.vault,
+        true,
+      );
       try {
-        await getOrCreateAssociatedTokenAccount(
-          provider.connection,
-          payer,
-          sol.mint,
+        const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+          payer.publicKey,
+          vaultAta,
           sol.vault,
-          true,
+          sol.mint,
         );
+        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
       } catch (e) {
         // Account may already exist, which is fine
       }
@@ -2508,33 +2606,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(15_000_000); // 15 USD1 (safe slippage vs 20)
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: sol.mint,
+        destMint: usd1.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        sol.mint,
+        usd1.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: sol.mint,
+        sourceMint: sol.mint,
+        destMint: usd1.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_USD1_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(50_000_000);
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: sol.mint,
-        destMint: usd1.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -2645,6 +2766,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             sol.mint,
@@ -2652,8 +2774,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             usd1.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(SWAP_AMOUNT),
             swapData,
@@ -2925,13 +3047,20 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       await provider.sendAndConfirm(tx);
 
       // Create vault's token account
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        payer,
+      const vaultAta = await getAssociatedTokenAddress(
         sol.mint,
         sol.vault,
         true,
       );
+      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        vaultAta,
+        sol.vault,
+        sol.mint,
+      );
+      try {
+        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
+      } catch (e) {}
 
       const userSolAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
@@ -3170,34 +3299,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(15_000_000); // 15 USDC
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: sol.mint,
+        destMint: usdc.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        sol.mint,
+        usdc.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(SOL_SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: sol.mint,
+        sourceMint: sol.mint,
+        destMint: usdc.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(SOL_SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_USDC_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(100_000_000); // 100 USDC min
       const swapData = buildAmmSwapData(new BN(SOL_SWAP_AMOUNT), minAmountOut);
-
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: sol.mint,
-        destMint: usdc.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -3307,6 +3458,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             sol.mint,
@@ -3314,8 +3466,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             usdc.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(SOL_SWAP_AMOUNT),
             swapData,
@@ -3556,33 +3708,56 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
+      const minAmountOut = new BN(100_000_000); // 100 JUP
+      const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
+
+      const swapParams = {
+        minAmountOut,
+        deadline,
+        sourceMint: usdc.mint,
+        destMint: jup.mint,
+      };
+
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        usdc.mint,
+        jup.mint,
+        BigInt(minAmountOut.toString()),
+        BigInt(deadline.toString()),
+      );
+
       console.log("   Generating ZK proof...");
-      const proof = await generateTransactionProof({
-        root,
-        publicAmount: -BigInt(USDC_SWAP_AMOUNT),
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
         extDataHash,
-        mintAddress: usdc.mint,
+        sourceMint: usdc.mint,
+        destMint: jup.mint,
         inputNullifiers: [note.nullifier, dummyNullifier],
-        outputCommitments: [destCommitmentForProof, changeCommitment],
+        changeCommitment,
+        destCommitment,
+        swapAmount: BigInt(USDC_SWAP_AMOUNT),
+
         inputAmounts: [note.amount, 0n],
         inputPrivateKeys: [note.privateKey, dummyPrivKey],
         inputPublicKeys: [note.publicKey, dummyPubKey],
         inputBlindings: [note.blinding, dummyBlinding],
         inputMerklePaths: [merkleProof, dummyProof],
-        outputAmounts: [0n, changeAmount],
-        outputOwners: [destPubKey, changePubKey],
-        outputBlindings: [destBlinding, changeBlinding],
+
+        changeAmount,
+        changePubkey: changePubKey,
+        changeBlinding,
+
+        destAmount: EXPECTED_JUP_OUT,
+        destPubkey: destPubKey,
+        destBlinding,
+
+        minAmountOut: BigInt(minAmountOut.toString()),
+        deadline: BigInt(deadline.toString()),
       });
       console.log("   ✅ ZK proof generated");
 
-      const minAmountOut = new BN(50_000_000);
       const swapData = buildAmmSwapData(new BN(USDC_SWAP_AMOUNT), minAmountOut);
-      const swapParams = {
-        minAmountOut,
-        deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-        sourceMint: usdc.mint,
-        destMint: jup.mint,
-      };
 
       const [executorPda] = PublicKey.findProgramAddressSync(
         [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
@@ -3693,6 +3868,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
+            proof,
             Array.from(root),
             0,
             usdc.mint,
@@ -3700,8 +3876,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             Array.from(dummyNullifier),
             0,
             jup.mint,
-            Array.from(destCommitment),
             Array.from(changeCommitment),
+            Array.from(destCommitment),
             swapParams,
             new BN(USDC_SWAP_AMOUNT),
             swapData,
