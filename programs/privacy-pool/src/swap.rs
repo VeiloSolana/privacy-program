@@ -334,7 +334,10 @@ pub fn transact_swap<'info>(
     let is_jupiter = !is_cpmm
         && !is_amm
         && swap_data.len() >= 8
-        && swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a];
+        && (swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a] // Route
+            || swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] // SharedAccountsRoute
+            || swap_data[0..8] == [0xd0, 0x33, 0xef, 0x97, 0x7b, 0x2b, 0xed, 0x5c] // ExactOutRoute
+            || swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e]); // SharedAccountsExactOutRoute
 
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
@@ -514,45 +517,105 @@ pub fn transact_swap<'info>(
             ctx.accounts.jupiter_event_authority.key()
         );
 
-        // Use ALL accounts from remaining_accounts
-        // BUT replace accounts #1, #2, #3 with our executor PDA and its token accounts
-        // Account #1: user transfer authority -> executor PDA (signer)
-        // Account #2: user source token account -> executor_source_token
-        // Account #3: user destination token account -> executor_dest_token
         let mut jupiter_accounts = Vec::new();
         let mut account_infos = Vec::new();
 
-        for (i, acc) in remaining.iter().enumerate() {
-            match i {
-                1 => {
-                    // Replace account #1 with executor PDA (marked as signer)
-                    jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
-                    account_infos.push(executor.to_account_info());
+        let is_shared_accounts = swap_data[0..8]
+            == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81]
+            || swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e];
+
+        if is_shared_accounts {
+            // SharedAccountsRoute Layout:
+            // 0: TokenProgram
+            // 1: ProgramAuthority (from remaining[0])
+            // 2: UserTransferAuthority (signer) -> Protocol Authority (our executor)
+            // 3: UserSourceTokenAccount -> Executor Source Token
+            // 4: ProgramSourceTokenAccount (from remaining[1])
+            // 5: ProgramDestTokenAccount (from remaining[2])
+            // 6: UserDestTokenAccount -> Executor Dest Token
+            // 7: SourceMint
+            // 8: DestMint
+            // ...
+
+            // We need to inject our executor accounts at indices 2, 3, and 6
+            // The `remaining` array contains the accounts Jupiter expects, so we iterate through them
+            // and replace the user-specific ones with our executor ones.
+
+            for (i, acc) in remaining.iter().enumerate() {
+                match i {
+                    2 => {
+                        // Index 2: User Transfer Authority -> Executor (Signer)
+                        jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
+                        account_infos.push(executor.to_account_info());
+                    }
+                    3 => {
+                        // Index 3: User Source Token Account -> Executor Source Token
+                        jupiter_accounts.push(AccountMeta::new(
+                            ctx.accounts.executor_source_token.key(),
+                            false,
+                        ));
+                        account_infos.push(ctx.accounts.executor_source_token.to_account_info());
+                    }
+                    6 => {
+                        // Index 6: User Destination Token Account -> Executor Dest Token
+                        jupiter_accounts.push(AccountMeta::new(
+                            ctx.accounts.executor_dest_token.key(),
+                            false,
+                        ));
+                        account_infos.push(ctx.accounts.executor_dest_token.to_account_info());
+                    }
+                    _ => {
+                        // Pass through other accounts (Project Authority, Mints, etc.)
+                        jupiter_accounts.push(if acc.is_writable {
+                            AccountMeta::new(acc.key(), false)
+                        } else {
+                            AccountMeta::new_readonly(acc.key(), false)
+                        });
+                        account_infos.push(acc.to_account_info());
+                    }
                 }
-                2 => {
-                    // Replace account #2 with executor's source token account
-                    jupiter_accounts.push(AccountMeta::new(
-                        ctx.accounts.executor_source_token.key(),
-                        false,
-                    ));
-                    account_infos.push(ctx.accounts.executor_source_token.to_account_info());
-                }
-                3 => {
-                    // Replace account #3 with executor's dest token account
-                    jupiter_accounts.push(AccountMeta::new(
-                        ctx.accounts.executor_dest_token.key(),
-                        false,
-                    ));
-                    account_infos.push(ctx.accounts.executor_dest_token.to_account_info());
-                }
-                _ => {
-                    // Use account from remaining_accounts as-is
-                    jupiter_accounts.push(if acc.is_writable {
-                        AccountMeta::new(acc.key(), false)
-                    } else {
-                        AccountMeta::new_readonly(acc.key(), false)
-                    });
-                    account_infos.push(acc.to_account_info());
+            }
+        } else {
+            // Standard Route / ExactOutRoute Layout:
+            // 0: TokenProgram
+            // 1: UserTransferAuthority -> Executor
+            // 2: UserSourceTokenAccount -> Executor Source Token
+            // 3: UserDestTokenAccount -> Executor Dest Token
+            // 4: DestMint (or other optional)
+            // ...
+
+            for (i, acc) in remaining.iter().enumerate() {
+                match i {
+                    1 => {
+                        // Replace account #1 with executor PDA (marked as signer)
+                        jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
+                        account_infos.push(executor.to_account_info());
+                    }
+                    2 => {
+                        // Replace account #2 with executor's source token account
+                        jupiter_accounts.push(AccountMeta::new(
+                            ctx.accounts.executor_source_token.key(),
+                            false,
+                        ));
+                        account_infos.push(ctx.accounts.executor_source_token.to_account_info());
+                    }
+                    3 => {
+                        // Replace account #3 with executor's dest token account
+                        jupiter_accounts.push(AccountMeta::new(
+                            ctx.accounts.executor_dest_token.key(),
+                            false,
+                        ));
+                        account_infos.push(ctx.accounts.executor_dest_token.to_account_info());
+                    }
+                    _ => {
+                        // Use account from remaining_accounts as-is
+                        jupiter_accounts.push(if acc.is_writable {
+                            AccountMeta::new(acc.key(), false)
+                        } else {
+                            AccountMeta::new_readonly(acc.key(), false)
+                        });
+                        account_infos.push(acc.to_account_info());
+                    }
                 }
             }
         }
