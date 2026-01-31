@@ -742,11 +742,11 @@ pub struct TransactSwap<'info> {
 
     // ---- Ephemeral Swap Executor PDA ----
     /// Executor PDA - holds tokens during swap
-    /// Seeds ensure this is unique per swap (bound to nullifier)
+    /// Seeds include source_mint and dest_mint to prevent cross-pool collisions
     #[account(
         init,
         payer = relayer,
-        seeds = [b"swap_executor", input_nullifier_0.as_ref()],
+        seeds = [b"swap_executor", source_mint.as_ref(), dest_mint.as_ref(), input_nullifier_0.as_ref()],
         bump,
         space = SwapExecutor::LEN
     )]
@@ -900,11 +900,8 @@ pub mod privacy_pool {
         let cfg = &mut ctx.accounts.config;
         let payer = &ctx.accounts.payer;
 
-        // Validate payer is either admin or relayer
-        require!(
-            payer.key() == cfg.admin || cfg.is_relayer(&payer.key()),
-            PrivacyError::Unauthorized
-        );
+        // Only admin can create trees to prevent rent drain attacks
+        require!(payer.key() == cfg.admin, PrivacyError::Unauthorized);
 
         // Validate tree_id is sequential
         require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
@@ -1061,10 +1058,7 @@ pub mod privacy_pool {
         let output_commitments = [output_commitment_0, output_commitment_1];
         let cfg = &mut ctx.accounts.config;
 
-        // AUDIT-004: Validate both tree IDs are valid BEFORE loading trees
-        // This early check prevents compute waste on invalid tree_ids
-        // Tree accounts are derived from tree_id, so invalid IDs would create valid PDAs
-        // but point to uninitialized trees, causing load failures after rent/compute consumption
+        // Validate tree IDs are valid before loading trees to prevent compute waste
         require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
         require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
 
@@ -1074,8 +1068,7 @@ pub mod privacy_pool {
         // Must use zero nullifiers (enforced by circuit and validated here)
         let zero_nullifier = [0u8; 32];
         if public_amount > 0 {
-            // AUDIT-001 FIX: Deposits must use zero nullifiers (no inputs consumed)
-            // This prevents unlimited minting by ensuring deposits don't consume real notes
+            // Deposits must use zero nullifiers (no inputs consumed)
             require!(
                 input_nullifiers[0] == zero_nullifier && input_nullifiers[1] == zero_nullifier,
                 PrivacyError::InvalidNullifiersForDeposit
@@ -1213,9 +1206,9 @@ pub mod privacy_pool {
                     PrivacyError::DepositorTokenAccountMismatch
                 );
 
-                // Prevent delegation bypass - deposits must use direct ownership
+                // Completely prohibit delegation to prevent attacks
                 require!(
-                    user_token.delegate.is_none() || user_token.delegated_amount == 0,
+                    user_token.delegate.is_none(),
                     PrivacyError::InvalidTokenAuthority
                 );
             }
@@ -1291,8 +1284,7 @@ pub mod privacy_pool {
                 PrivacyError::NullifierTreeMismatch
             );
 
-            // AUDIT-001 FIX: With init_if_needed, check if nullifier was already marked
-            // This prevents double-spend even if the marker account already exists
+            // Check if nullifier was already marked to prevent double-spend
             require!(
                 ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
                 PrivacyError::NullifierAlreadyUsed
@@ -1573,9 +1565,7 @@ fn handle_public_amount<'info>(
             .and_then(|x| x.checked_sub(refund))
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-        // AUDIT-010 FIX: Calculate minimum valid withdrawal amount to prevent fee bypass
-        // Minimum withdrawal must be large enough that fee_bps-based fee >= min_withdrawal_fee
-        // This eliminates the "dead zone" and prevents timing attacks via consistent minimum fees
+        // Calculate minimum valid withdrawal amount to prevent fee bypass
         let min_valid_withdrawal = (config.min_withdrawal_fee as u128)
             .checked_mul(10_000)
             .and_then(|x| x.checked_div(config.fee_bps as u128))
@@ -1672,9 +1662,7 @@ fn handle_public_amount<'info>(
             let rent = Rent::get()?;
             let rent_exempt_minimum = rent.minimum_balance(vault_ai.data_len());
 
-            // AUDIT-003 FIX: Ensure vault maintains operational buffer above rent exemption
-            // Use 0.01 SOL (10,000,000 lamports) buffer to handle multiple withdrawals in same slot
-            // and protect against account size changes
+            // Ensure vault maintains operational buffer above rent exemption
             let total_required = withdrawal_amount
                 .checked_add(rent_exempt_minimum)
                 .and_then(|x| x.checked_add(10_000_000)) // 0.01 SOL buffer

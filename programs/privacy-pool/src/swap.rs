@@ -146,6 +146,16 @@ pub fn transact_swap<'info>(
     );
     require!(source_mint != dest_mint, PrivacyError::InvalidMintAddress);
 
+    // Validate tree IDs are within bounds before proof verification
+    require!(
+        source_tree_id < ctx.accounts.source_config.num_trees,
+        PrivacyError::InvalidTreeId
+    );
+    require!(
+        dest_tree_id < ctx.accounts.dest_config.num_trees,
+        PrivacyError::InvalidTreeId
+    );
+
     // Check relayer is whitelisted in BOTH source and dest pools
     // This prevents relayers authorized only for one pool from facilitating
     // swaps across pool boundaries they shouldn't access
@@ -192,7 +202,7 @@ pub fn transact_swap<'info>(
 
     // ╔══════════════════════════════════════════════════════════════════════════╗
     // ║ ZK PROOF VERIFICATION - ALWAYS ENABLED                                  ║
-    // ║ AUDIT-007: This verification MUST NEVER be disabled via feature flags   ║
+    // ║ This verification MUST NEVER be disabled via feature flags              ║
     // ║ Verifies:                                                                ║
     // ║   1. User owns input notes (knows preimages for nullifiers)              ║
     // ║   2. Input notes exist in source Merkle tree (root membership)           ║
@@ -309,6 +319,8 @@ pub fn transact_swap<'info>(
     // CPI to Swap Program (Raydium CPMM or AMM)
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
+        source_mint.as_ref(),
+        dest_mint.as_ref(),
         input_nullifiers[0].as_ref(),
         &[executor.bump],
     ];
