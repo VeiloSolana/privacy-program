@@ -1,10 +1,16 @@
-import { Connection, PublicKey, AccountMeta } from '@solana/web3.js';
+import { Connection, PublicKey, AccountMeta } from "@solana/web3.js";
 
-export const JUPITER_PROGRAM_ID = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
-export const JUPITER_EVENT_AUTHORITY = new PublicKey('D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf');
+export const JUPITER_PROGRAM_ID = new PublicKey(
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+);
+export const JUPITER_EVENT_AUTHORITY = new PublicKey(
+  "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf",
+);
 
 // Jupiter "route" instruction discriminator
-export const JUPITER_ROUTE_DISCRIMINATOR = Buffer.from([0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a]);
+export const JUPITER_ROUTE_DISCRIMINATOR = Buffer.from([
+  0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a,
+]);
 
 interface QuoteResponse {
   inputMint: string;
@@ -29,7 +35,7 @@ interface SwapInstructionsResponse {
 
 export class JupiterSwapService {
   private connection: Connection;
-  private apiUrl: string = 'https://quote-api.jup.ag/v6';
+  private apiUrl: string = "https://lite-api.jup.ag/swap/v1";
 
   constructor(connection: Connection) {
     this.connection = connection;
@@ -42,14 +48,14 @@ export class JupiterSwapService {
     inputMint: PublicKey,
     outputMint: PublicKey,
     amount: number,
-    slippageBps: number = 50
+    slippageBps: number = 50,
   ): Promise<QuoteResponse> {
     const params = new URLSearchParams({
       inputMint: inputMint.toString(),
       outputMint: outputMint.toString(),
       amount: amount.toString(),
       slippageBps: slippageBps.toString(),
-      onlyDirectRoutes: 'true',  // Simple routes only (no ALTs)
+      onlyDirectRoutes: "true", // Simple routes only (no ALTs)
     });
 
     const response = await fetch(`${this.apiUrl}/quote?${params}`);
@@ -66,22 +72,24 @@ export class JupiterSwapService {
   async getSwapInstruction(
     quote: QuoteResponse,
     userPublicKey: PublicKey,
-    wrapUnwrapSOL: boolean = true
+    wrapUnwrapSOL: boolean = true,
   ): Promise<SwapInstructionsResponse> {
     const response = await fetch(`${this.apiUrl}/swap-instructions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         quoteResponse: quote,
         userPublicKey: userPublicKey.toString(),
         wrapAndUnwrapSol: wrapUnwrapSOL,
         dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 'auto',
+        prioritizationFeeLamports: "auto",
       }),
     });
 
     if (!response.ok) {
-      throw new Error(`Jupiter swap instruction failed: ${response.statusText}`);
+      throw new Error(
+        `Jupiter swap instruction failed: ${response.statusText}`,
+      );
     }
 
     return await response.json();
@@ -102,7 +110,7 @@ export class JupiterSwapService {
         pubkey: JUPITER_EVENT_AUTHORITY,
         isWritable: false,
         isSigner: false,
-      }
+      },
     ];
 
     // Add routing accounts (accounts 9+)
@@ -123,7 +131,7 @@ export class JupiterSwapService {
    */
   buildSwapData(swapInstruction: any): Buffer {
     // Jupiter API returns base64 encoded instruction data
-    const instructionData = Buffer.from(swapInstruction.data, 'base64');
+    const instructionData = Buffer.from(swapInstruction.data, "base64");
 
     // Data already includes discriminator + route_plan + params
     return instructionData;
@@ -136,8 +144,11 @@ export class JupiterSwapService {
     return quote.routePlan
       .map((step, i) => {
         const swapInfo = step.swapInfo;
-        return `Step ${i + 1}: ${swapInfo.label} (${swapInfo.inputMint.slice(0, 8)}...→${swapInfo.outputMint.slice(0, 8)}...)`;
+        return `Step ${i + 1}: ${swapInfo.label} (${swapInfo.inputMint.slice(
+          0,
+          8,
+        )}...→${swapInfo.outputMint.slice(0, 8)}...)`;
       })
-      .join(' → ');
+      .join(" → ");
   }
 }

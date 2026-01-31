@@ -15,7 +15,7 @@ pub use zk::SwapProof;
 
 use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
 
-declare_id!("6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU");
+declare_id!("AaWZfKYkZdF1zFMb4VAYKLF176Lpqe7hE6eLr65NFvgw");
 
 // ---- Constants ----
 

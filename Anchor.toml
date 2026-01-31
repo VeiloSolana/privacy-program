@@ -8,13 +8,13 @@ skip-lint = false
 privacy_pool = ["zk-verify", "localnet"]
 
 [programs.localnet]
-privacy_pool = "6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU"
+privacy_pool = "AaWZfKYkZdF1zFMb4VAYKLF176Lpqe7hE6eLr65NFvgw"
 
 [programs.devnet]
-privacy_pool = "6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU"
+privacy_pool = "AaWZfKYkZdF1zFMb4VAYKLF176Lpqe7hE6eLr65NFvgw"
 
 [programs.mainnet]
-privacy_pool = "6Cq2rfH7hcreu6Lz4LFoVvZC37Q5uzNq1cStuTnjFdBU"
+privacy_pool = "AaWZfKYkZdF1zFMb4VAYKLF176Lpqe7hE6eLr65NFvgw"
 
 [registry]
 url = "https://api.apr.dev"
@@ -22,7 +22,7 @@ url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
-wallet = "/Users/admin/.config/solana/id.json"
+wallet = "/Users/jaybee/.config/solana/id.json"
 
 [test]
 startup_wait = 60000
@@ -53,6 +53,14 @@ address = "So11111111111111111111111111111111111111112"
 # Clone USDC Mint
 [[test.validator.clone]]
 address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+# Clone Jupiter V6 Program
+[[test.validator.clone]]
+address = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+
+# Clone Jupiter Event Authority
+[[test.validator.clone]]
+address = "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"
 
 # Clone LP Mint
 [[test.validator.clone]]
@@ -99,7 +107,7 @@ address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
 address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 
 [scripts]
-test = "npm run test:spl"
+test = "npm run test:jupiter"
 
 # ============================================
 # Raydium AMM V4 Configuration (SOL/USDC)
