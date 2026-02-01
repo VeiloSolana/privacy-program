@@ -146,10 +146,17 @@ function deriveNullifierMarkerPDA(
  */
 function deriveSwapExecutorPDA(
   programId: PublicKey,
-  nullifier: Uint8Array,
+  sourceMint: PublicKey,
+  destMint: PublicKey,
+  inputNullifier0: Uint8Array,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("swap_executor"), Buffer.from(nullifier)],
+    [
+      Buffer.from("swap_executor"),
+      sourceMint.toBuffer(),
+      destMint.toBuffer(),
+      Buffer.from(inputNullifier0),
+    ],
     programId,
   );
 }
@@ -299,6 +306,8 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Get swap instruction
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
+      WSOL_MINT,
+      USDC_MINT,
       new Uint8Array(32),
     );
     const swapIxResponse = await jupiterService.getSwapInstruction(
@@ -779,7 +788,12 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`  Jupiter route:`, JSON.stringify(quote, null, 2));
 
     // Derive executor PDA
-    const [executorPDA] = deriveSwapExecutorPDA(program.programId, nullifier);
+    const [executorPDA] = deriveSwapExecutorPDA(
+      program.programId,
+      WSOL_MINT,
+      USDC_MINT,
+      nullifier,
+    );
 
     // Get swap instruction from Jupiter
     const swapIxResponse = await jupiterService.getSwapInstruction(

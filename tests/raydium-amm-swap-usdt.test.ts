@@ -1006,7 +1006,12 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
 
     // Derive executor PDA
     const [executorPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+      [
+        Buffer.from("swap_executor"),
+        solTokenMint.toBuffer(),
+        usdtTokenMint.toBuffer(),
+        Buffer.from(note.nullifier),
+      ],
       program.programId,
     );
     const executorSourceToken = await getAssociatedTokenAddress(
@@ -1163,6 +1168,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerTokenAccount.address,
           swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,

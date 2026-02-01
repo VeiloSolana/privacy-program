@@ -724,7 +724,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          sol.mint.toBuffer(),
+          usdc.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
@@ -1379,7 +1384,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          sol.mint.toBuffer(),
+          usdt.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
@@ -2022,7 +2032,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          sol.mint.toBuffer(),
+          jup.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
@@ -2661,7 +2676,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          sol.mint.toBuffer(),
+          usd1.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
@@ -3355,7 +3375,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(SOL_SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          sol.mint.toBuffer(),
+          usdc.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
@@ -3765,7 +3790,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapData = buildAmmSwapData(new BN(USDC_SWAP_AMOUNT), minAmountOut);
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          usdc.mint.toBuffer(),
+          jup.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(

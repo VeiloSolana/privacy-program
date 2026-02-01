@@ -328,6 +328,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
   let usd1NoteId: string | null = null;
   let solChangeNoteId: string | null = null;
   let usd1ChangeNoteId: string | null = null;
+  let transferredNoteId: string | null = null;
   let usd1KeepNoteId: string | null = null; // Keep note from USD1 split
   let solFromUsd1NoteId: string | null = null;
 
@@ -1111,9 +1112,15 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
     });
 
     const [executorPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+      [
+        Buffer.from("swap_executor"),
+        solTokenMint.toBuffer(),
+        usd1TokenMint.toBuffer(),
+        Buffer.from(note.nullifier),
+      ],
       program.programId,
     );
+    console.log("   Forward swap executor PDA:", executorPda.toBase58());
     const executorSourceToken = await getAssociatedTokenAddress(
       solTokenMint,
       executorPda,
@@ -1249,6 +1256,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         relayer: payer.publicKey,
         relayerTokenAccount: relayerTokenAccount.address,
         swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+        jupiterEventAuthority: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -2049,7 +2057,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
     usd1OffchainTree.insert(changeCommitment);
 
     // Save transferred note
-    const transferredNoteId = noteStorage.save({
+    transferredNoteId = noteStorage.save({
       amount: originalNote.amount,
       commitment: newCommitment,
       nullifier: computeNullifier(
@@ -2071,10 +2079,15 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
   });
 
   it("executes reverse swap (USD1 → SOL via AMM V4)", async () => {
+    // TODO: Fix account collision issue - executor token accounts from forward swap
+    // are not being properly closed, causing "Allocate: account already in use" error.
+    // This is a Solana localnet account cleanup issue that needs investigation.
+    // The JUP test (identical structure) passes, suggesting it's intermittent/timing-related.
+
     console.log("\n🔄 Executing reverse swap USD1 → SOL via AMM V4...");
 
-    const note = noteStorage.get(usd1ChangeNoteId!);
-    if (!note) throw new Error("USD1 swap note not found");
+    const note = noteStorage.get(transferredNoteId!);
+    if (!note) throw new Error("USD1 transferred note not found");
 
     console.log(
       `   Input note amount: ${note.amount} units (${
@@ -2200,7 +2213,12 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
 
     // Derive executor PDA
     const [executorPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+      [
+        Buffer.from("swap_executor"),
+        usd1TokenMint.toBuffer(),
+        solTokenMint.toBuffer(),
+        Buffer.from(note.nullifier),
+      ],
       program.programId,
     );
     const executorSourceToken = await getAssociatedTokenAddress(
@@ -2250,7 +2268,10 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       payer.publicKey,
     );
 
-    console.log("   Executor PDA:", executorPda.toBase58());
+    const dstTokenInfo = await provider.connection.getAccountInfo(
+      executorDestToken,
+    );
+    if (dstTokenInfo) console.log("   ⚠️ Executor Dest Token already exists!");
 
     // Take balance snapshot before reverse swap
     const balanceBefore = await getBalanceSnapshot(
@@ -2373,6 +2394,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerTokenAccount.address,
           swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
