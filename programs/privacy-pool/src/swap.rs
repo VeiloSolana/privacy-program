@@ -351,23 +351,38 @@ pub fn transact_swap<'info>(
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
-        // remaining[1] = CPMM config - must be owned by CPMM program
+        // CPMM account layout in remaining_accounts:
+        // [0] = authority (PDA, not owned by CPMM - skip validation)
+        // [1] = config (owned by CPMM)
+        // [2] = pool_state (owned by CPMM)
+        // [3] = token_vault_0 (owned by Token Program)
+        // [4] = token_vault_1 (owned by Token Program)
+        // [5] = source_mint
+        // [6] = dest_mint  
+        // [7] = observation_state (owned by CPMM)
+
+        // Validate config is owned by CPMM program
         require!(
             remaining[1].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
-        // remaining[2] = pool state - must be owned by CPMM program
+        // Validate pool state is owned by CPMM program
         require!(
             remaining[2].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
-        // remaining[3], remaining[4] = token vaults - must be owned by Token program
+        // Validate token vaults are owned by Token program
         require!(
             remaining[3].owner == &anchor_spl::token::ID,
             PrivacyError::InvalidRemainingAccounts
         );
         require!(
             remaining[4].owner == &anchor_spl::token::ID,
+            PrivacyError::InvalidRemainingAccounts
+        );
+        // Validate observation state is owned by CPMM program
+        require!(
+            remaining[7].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
 

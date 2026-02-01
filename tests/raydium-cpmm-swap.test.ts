@@ -1071,13 +1071,28 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       minAmountOutBigInt,
       deadlineBigInt,
     );
-    
+
     // Debug: log off-chain computed hashes
-    console.log("   DEBUG off-chain swapParamsHash:", Buffer.from(swapParamsHash).toString('hex'));
-    console.log("   DEBUG off-chain extDataHash:", Buffer.from(extDataHash).toString('hex'));
-    console.log("   DEBUG off-chain sourceRoot:", Buffer.from(root).toString('hex'));
-    console.log("   DEBUG off-chain sourceMint:", Buffer.from(sourceTokenMint.toBytes()).toString('hex'));
-    console.log("   DEBUG off-chain destMint:", Buffer.from(destTokenMint.toBytes()).toString('hex'));
+    console.log(
+      "   DEBUG off-chain swapParamsHash:",
+      Buffer.from(swapParamsHash).toString("hex"),
+    );
+    console.log(
+      "   DEBUG off-chain extDataHash:",
+      Buffer.from(extDataHash).toString("hex"),
+    );
+    console.log(
+      "   DEBUG off-chain sourceRoot:",
+      Buffer.from(root).toString("hex"),
+    );
+    console.log(
+      "   DEBUG off-chain sourceMint:",
+      Buffer.from(sourceTokenMint.toBytes()).toString("hex"),
+    );
+    console.log(
+      "   DEBUG off-chain destMint:",
+      Buffer.from(destTokenMint.toBytes()).toString("hex"),
+    );
     console.log("   DEBUG off-chain swapAmount:", SWAP_AMOUNT.toString());
 
     // Generate ZK swap proof
@@ -1288,9 +1303,14 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       destMint: destTokenMint,
     };
 
-    // Derive executor PDA (seeds: ["swap_executor", nullifier_0])
+    // Derive executor PDA (seeds: ["swap_executor", source_mint, dest_mint, nullifier_0])
     const [executorPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+      [
+        Buffer.from("swap_executor"),
+        sourceTokenMint.toBuffer(),
+        destTokenMint.toBuffer(),
+        Buffer.from(note.nullifier),
+      ],
       program.programId,
     );
 
@@ -1430,6 +1450,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerTokenAccount.address,
           swapProgram: RAYDIUM_CPMM_PROGRAM,
+          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -3494,9 +3515,14 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         dummyNullifier,
       );
 
-      // Derive executor PDA
+      // Derive executor PDA (use WSOL_MINT and USDT_MINT for this swap)
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note!.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          WSOL_MINT.toBuffer(),
+          USDT_MINT.toBuffer(),
+          Buffer.from(note!.nullifier),
+        ],
         program.programId,
       );
 
@@ -3613,6 +3639,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerUsdtAccount.address,
           swapProgram: RAYDIUM_CPMM_PROGRAM,
+          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -3934,7 +3961,12 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       );
 
       const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("swap_executor"), Buffer.from(note.nullifier)],
+        [
+          Buffer.from("swap_executor"),
+          USDT_MINT.toBuffer(),
+          WSOL_MINT.toBuffer(),
+          Buffer.from(note.nullifier),
+        ],
         program.programId,
       );
 
@@ -4071,6 +4103,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerWsolAccount.address,
           swapProgram: RAYDIUM_CPMM_PROGRAM,
+          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,

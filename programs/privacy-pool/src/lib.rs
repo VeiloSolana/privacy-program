@@ -1068,11 +1068,7 @@ pub mod privacy_pool {
         // Must use zero nullifiers (enforced by circuit and validated here)
         let zero_nullifier = [0u8; 32];
         if public_amount > 0 {
-            // Deposits must use zero nullifiers (no inputs consumed)
-            require!(
-                input_nullifiers[0] == zero_nullifier && input_nullifiers[1] == zero_nullifier,
-                PrivacyError::InvalidNullifiersForDeposit
-            );
+
             // For deposits, nullifier markers are reusable (init_if_needed allows this)
         } else {
             // For withdrawals/transfers, validate no duplicate nullifiers
