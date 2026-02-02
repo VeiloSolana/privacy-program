@@ -235,18 +235,33 @@ pub fn transact_swap<'info>(
         MerkleTree::is_known_root(&*source_tree, source_root),
         PrivacyError::UnknownRoot
     );
+
+    // Upfront capacity check for both trees before any state changes
+    // While Solana transactions are atomic (failures revert all state), this:
+    // 1. Provides clearer error messages by failing early
+    // 2. Saves compute units by avoiding partial processing
+    // 3. Improves UX with predictable behavior
+    let source_max_capacity = 1u64 << (source_tree.height as u64);
+    let source_remaining = source_max_capacity.saturating_sub(source_tree.next_index);
+    require!(source_remaining >= 1, PrivacyError::MerkleTreeFull);
     drop(source_tree);
 
-    // Validate tree_id matches to prevent cross-tree nullifier reuse
+    let dest_tree = ctx.accounts.dest_tree.load()?;
+    let dest_max_capacity = 1u64 << (dest_tree.height as u64);
+    let dest_remaining = dest_max_capacity.saturating_sub(dest_tree.next_index);
+    require!(dest_remaining >= 1, PrivacyError::MerkleTreeFull);
+    drop(dest_tree);
+
+    // Check if nullifiers were already marked to prevent double-spend
+    // The PDA derivation includes tree_id in seeds, so cross-tree reuse is already impossible
+    // (Anchor enforces the account matches the PDA seeds during instruction processing)
     require!(
-        ctx.accounts.source_nullifier_marker_0.tree_id == 0
-            || ctx.accounts.source_nullifier_marker_0.tree_id == source_tree_id,
-        PrivacyError::NullifierTreeMismatch
+        ctx.accounts.source_nullifier_marker_0.nullifier == [0u8; 32],
+        PrivacyError::NullifierAlreadyUsed
     );
     require!(
-        ctx.accounts.source_nullifier_marker_1.tree_id == 0
-            || ctx.accounts.source_nullifier_marker_1.tree_id == source_tree_id,
-        PrivacyError::NullifierTreeMismatch
+        ctx.accounts.source_nullifier_marker_1.nullifier == [0u8; 32],
+        PrivacyError::NullifierAlreadyUsed
     );
 
     // Mark nullifiers as spent
@@ -317,11 +332,14 @@ pub fn transact_swap<'info>(
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     // CPI to Swap Program (Raydium CPMM or AMM)
+    // AUDIT-001: Include relayer key in seeds to match PDA derivation and prevent front-running
+    let relayer_key = ctx.accounts.relayer.key();
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
         source_mint.as_ref(),
         dest_mint.as_ref(),
         input_nullifiers[0].as_ref(),
+        relayer_key.as_ref(),
         &[executor.bump],
     ];
 
@@ -358,7 +376,7 @@ pub fn transact_swap<'info>(
         // [3] = token_vault_0 (owned by Token Program)
         // [4] = token_vault_1 (owned by Token Program)
         // [5] = source_mint
-        // [6] = dest_mint  
+        // [6] = dest_mint
         // [7] = observation_state (owned by CPMM)
 
         // Validate config is owned by CPMM program
@@ -691,7 +709,7 @@ pub fn transact_swap<'info>(
     let percentage_fee = (swapped_amount as u128)
         .checked_mul(dest_config.swap_fee_bps as u128)
         .and_then(|x| x.checked_div(10_000))
-        .unwrap_or(0) as u64;
+        .ok_or(PrivacyError::ArithmeticOverflow)? as u64;
     let min_required_fee = std::cmp::max(dest_config.min_swap_fee, percentage_fee);
     require!(
         relayer_fee >= min_required_fee,

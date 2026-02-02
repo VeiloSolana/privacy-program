@@ -144,12 +144,14 @@ function deriveNullifierMarkerPDA(
 
 /**
  * Derive swap executor PDA
+ * AUDIT-001: Now includes relayer key to prevent front-running DoS attacks
  */
 function deriveSwapExecutorPDA(
   programId: PublicKey,
   sourceMint: PublicKey,
   destMint: PublicKey,
   inputNullifier0: Uint8Array,
+  relayer: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [
@@ -157,6 +159,7 @@ function deriveSwapExecutorPDA(
       sourceMint.toBuffer(),
       destMint.toBuffer(),
       Buffer.from(inputNullifier0),
+      relayer.toBuffer(),
     ],
     programId,
   );
@@ -638,12 +641,13 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const minAmountOut = BigInt(quote.otherAmountThreshold);
     console.log(`  Swap in: ${swapAmount}, Min out: ${minAmountOut}`);
 
-    // Executor PDA
+    // Executor PDA - includes relayer key (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
       sourcePool.mint,
       destPool.mint,
       nullifier,
+      payer.publicKey,
     );
 
     // Jupiter Instruction
