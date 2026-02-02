@@ -143,12 +143,14 @@ function deriveNullifierMarkerPDA(
 
 /**
  * Derive swap executor PDA
+ * AUDIT-001: Now includes relayer key to prevent front-running DoS attacks
  */
 function deriveSwapExecutorPDA(
   programId: PublicKey,
   sourceMint: PublicKey,
   destMint: PublicKey,
   inputNullifier0: Uint8Array,
+  relayer: PublicKey,
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [
@@ -156,6 +158,7 @@ function deriveSwapExecutorPDA(
       sourceMint.toBuffer(),
       destMint.toBuffer(),
       Buffer.from(inputNullifier0),
+      relayer.toBuffer(),
     ],
     programId,
   );
@@ -303,12 +306,13 @@ describe("Privacy Pool Jupiter Swap", () => {
       50,
     );
 
-    // Get swap instruction
+    // Get swap instruction - use payer as relayer (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
       WSOL_MINT,
       USDC_MINT,
       new Uint8Array(32),
+      payer.publicKey,
     );
     const swapIxResponse = await jupiterService.getSwapInstruction(
       quote,
@@ -787,12 +791,13 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`  Min amount out: ${minAmountOut}`);
     console.log(`  Jupiter route:`, JSON.stringify(quote, null, 2));
 
-    // Derive executor PDA
+    // Derive executor PDA - includes relayer key (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
       WSOL_MINT,
       USDC_MINT,
       nullifier,
+      payer.publicKey,
     );
 
     // Get swap instruction from Jupiter

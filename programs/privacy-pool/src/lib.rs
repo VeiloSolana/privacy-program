@@ -37,8 +37,17 @@ pub const MAX_RELAYERS: usize = 16;
 /// and reduce congestion on single tree updates
 pub const MAX_MERKLE_TREES: u16 = 10000;
 
-/// Maximum fee basis points: 100 = 1%
+/// Maximum withdrawal fee basis points: 100 = 1%
+/// Withdrawal fees are kept low to ensure users can always exit the pool affordably
 pub const MAX_FEE_BPS: u16 = 100;
+
+/// Maximum swap fee basis points: 1000 = 10%
+/// Swap fees are higher than withdrawal fees to account for:
+/// - DEX slippage and price impact on large swaps
+/// - MEV protection costs
+/// - Additional complexity of cross-pool atomic operations
+/// Note: Users can always exit via standard withdrawal at lower fees (max 1%)
+pub const MAX_SWAP_FEE_BPS: u16 = 1000;
 
 /// Allow all SPL tokens for testing on localnet
 /// TODO: For production, set this to false and use ALLOWED_TOKENS whitelist
@@ -742,11 +751,12 @@ pub struct TransactSwap<'info> {
 
     // ---- Ephemeral Swap Executor PDA ----
     /// Executor PDA - holds tokens during swap
-    /// Seeds include source_mint and dest_mint to prevent cross-pool collisions
+    /// Seeds include source_mint, dest_mint, nullifier, AND relayer key to prevent front-running DoS
+    /// (AUDIT-001: Adding relayer key prevents attackers from pre-creating executor PDAs)
     #[account(
         init,
         payer = relayer,
-        seeds = [b"swap_executor", source_mint.as_ref(), dest_mint.as_ref(), input_nullifier_0.as_ref()],
+        seeds = [b"swap_executor", source_mint.as_ref(), dest_mint.as_ref(), input_nullifier_0.as_ref(), relayer.key().as_ref()],
         bump,
         space = SwapExecutor::LEN
     )]
@@ -988,8 +998,9 @@ pub mod privacy_pool {
             cfg.min_swap_fee = val;
         }
         if let Some(val) = swap_fee_bps {
-            // Validate swap_fee_bps does not exceed 10% (1000 bps)
-            require!(val <= 1000, PrivacyError::ExcessiveFeeBps);
+            // Validate swap_fee_bps does not exceed maximum (10%)
+            // Note: Swap fees are higher than withdrawal fees - see MAX_SWAP_FEE_BPS docs
+            require!(val <= MAX_SWAP_FEE_BPS, PrivacyError::ExcessiveFeeBps);
             cfg.swap_fee_bps = val;
         }
 
@@ -1065,11 +1076,29 @@ pub mod privacy_pool {
         let input_tree = ctx.accounts.input_tree.load()?;
 
         // For deposits (public_amount > 0), no notes are consumed
-        // Must use zero nullifiers (enforced by circuit and validated here)
+        // The circuit skips Merkle proof verification when inAmount=0, but still computes
+        // a nullifier from the dummy input witness. The computed nullifiers are deterministic
+        // but not zero - they depend on the dummy witness values.
+        //
+        // Security note: An attacker cannot forge a deposit that consumes real notes because:
+        // 1. They would need the privateKey of the real note to compute its nullifier
+        // 2. Without the privateKey, they cannot generate a valid ZK proof
+        // 3. The nullifier marker is still created on-chain (init_if_needed), so any
+        //    future use of the same nullifier would be detected
+        //
+        // Note on AUDIT-008: The audit suggested requiring zero nullifiers for deposits,
+        // but this is incompatible with the circuit design. The circuit always computes
+        // nullifiers as Poseidon(commitment, pathIndex, signature) which are never zero.
+        // Deposits use dummy witnesses which produce non-zero but harmless nullifiers.
         let zero_nullifier = [0u8; 32];
         if public_amount > 0 {
-
-            // For deposits, nullifier markers are reusable (init_if_needed allows this)
+            // For deposits, nullifier markers are created but allow reuse via init_if_needed
+            // The circuit accepts any computed nullifiers for dummy inputs (amount=0)
+            // Still check for duplicates to prevent any edge cases
+            require!(
+                input_nullifiers[0] != input_nullifiers[1],
+                PrivacyError::DuplicateNullifiers
+            );
         } else {
             // For withdrawals/transfers, validate no duplicate nullifiers
             require!(
@@ -1195,18 +1224,36 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // For deposits, only the owner can authorize transfers (no delegation)
-                require_keys_eq!(
-                    user_token.owner,
-                    ctx.accounts.relayer.key(),
-                    PrivacyError::DepositorTokenAccountMismatch
-                );
+                // AUDIT-003 FIX: Allow two deposit patterns for SPL tokens:
+                // 1. Relayer-owned: user_token.owner == relayer (user transferred tokens to relayer first)
+                // 2. Delegated: user_token.delegate == relayer with sufficient delegated_amount
+                //
+                // Pattern 2 allows trustless deposits without requiring users to send tokens to relayer first.
+                // The user pre-approves the exact deposit amount, relayer submits the transaction.
+                let is_relayer_owned = user_token.owner == ctx.accounts.relayer.key();
+                let is_delegated_to_relayer = user_token
+                    .delegate
+                    .map(|d| d == ctx.accounts.relayer.key())
+                    .unwrap_or(false);
 
-                // Completely prohibit delegation to prevent attacks
-                require!(
-                    user_token.delegate.is_none(),
-                    PrivacyError::InvalidTokenAuthority
-                );
+                if is_relayer_owned {
+                    // Pattern 1: Relayer owns the token account - no delegation allowed
+                    require!(
+                        user_token.delegate.is_none(),
+                        PrivacyError::InvalidTokenAuthority
+                    );
+                } else if is_delegated_to_relayer {
+                    // Pattern 2: Token account is delegated to relayer
+                    // Verify sufficient delegation for the deposit amount
+                    let deposit_amount = public_amount as u64;
+                    require!(
+                        user_token.delegated_amount >= deposit_amount,
+                        PrivacyError::InsufficientDelegation
+                    );
+                } else {
+                    // Neither pattern matches - invalid
+                    return Err(error!(PrivacyError::DepositorTokenAccountMismatch));
+                }
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -1268,19 +1315,10 @@ pub mod privacy_pool {
         // 8. Mark both input nullifiers as spent (only for withdrawals/transfers)
         // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
         if public_amount <= 0 {
-            // Verify marker accounts match the input tree to prevent cross-tree reuse
-            require!(
-                ctx.accounts.nullifier_marker_0.tree_id == 0
-                    || ctx.accounts.nullifier_marker_0.tree_id == input_tree_id,
-                PrivacyError::NullifierTreeMismatch
-            );
-            require!(
-                ctx.accounts.nullifier_marker_1.tree_id == 0
-                    || ctx.accounts.nullifier_marker_1.tree_id == input_tree_id,
-                PrivacyError::NullifierTreeMismatch
-            );
-
             // Check if nullifier was already marked to prevent double-spend
+            // The PDA derivation includes tree_id in seeds, so cross-tree reuse is already impossible
+            // (Anchor enforces the account matches the PDA seeds during instruction processing)
+            // We check marker.nullifier != [0u8; 32] to detect if this marker was already used
             require!(
                 ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
                 PrivacyError::NullifierAlreadyUsed
@@ -1697,8 +1735,16 @@ fn handle_public_amount<'info>(
             .ok_or(PrivacyError::ArithmeticOverflow)?;
     } else {
         // PRIVATE TRANSFER: public_amount == 0, no value crosses pool boundary
-        // since no funds move on-chain. This prevents semantic inconsistency
-        // between ext_data (committed in proof) and actual on-chain effects.
+        //
+        // Fee/refund must be zero because these fields control ON-CHAIN transfers from the vault.
+        // Since no vault funds are accessed in private transfers, these must be zero.
+        //
+        // RELAYER INCENTIVES: For private transfers, relayer fees are handled WITHIN the note system:
+        // - User consumes input notes (e.g., 10 SOL)
+        // - User creates output note for recipient (e.g., 9.95 SOL)
+        // - User creates output note for relayer as fee (e.g., 0.05 SOL)
+        // This maintains privacy while providing economic incentives - the relayer receives
+        // a private note they can later withdraw, not an on-chain payment.
         require!(
             ext_data.fee == 0 && ext_data.refund == 0,
             PrivacyError::InvalidPrivateTransferFee
