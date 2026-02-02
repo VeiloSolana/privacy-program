@@ -56,19 +56,18 @@ function encodeTreeId(treeId: number): Buffer {
   return buffer;
 }
 
-// Helper function to derive nullifier marker PDA with tree_id
-// New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
+// Helper function to derive nullifier marker PDA (global, no tree_id to prevent cross-tree double-spend)
+// Contract seeds: [b"nullifier_v3", mint_address, nullifier]
 function deriveNullifierMarkerPDA(
   programId: PublicKey,
   mintAddress: PublicKey,
-  treeId: number,
+  _treeId: number, // Kept for API compatibility but unused
   nullifier: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId,

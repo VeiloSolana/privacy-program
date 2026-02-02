@@ -178,6 +178,20 @@ pub fn transact_swap<'info>(
         PrivacyError::InvalidPublicAmount
     );
 
+    // AUDIT-004: Verify swap_params mints match instruction mints
+    // This ensures the swap_params_hash (committed in ZK proof) binds to the actual
+    // mints being swapped. Without this check, an attacker could provide mismatched
+    // mints between swap_params and instruction args, potentially bypassing slippage
+    // protection if the circuit doesn't enforce this binding.
+    require!(
+        swap_params.source_mint == source_mint,
+        PrivacyError::InvalidSwapParams
+    );
+    require!(
+        swap_params.dest_mint == dest_mint,
+        PrivacyError::InvalidSwapParams
+    );
+
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
 
@@ -370,7 +384,7 @@ pub fn transact_swap<'info>(
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
         // CPMM account layout in remaining_accounts:
-        // [0] = authority (PDA, not owned by CPMM - skip validation)
+        // [0] = authority (PDA derived from pool_state)
         // [1] = config (owned by CPMM)
         // [2] = pool_state (owned by CPMM)
         // [3] = token_vault_0 (owned by Token Program)
@@ -379,29 +393,15 @@ pub fn transact_swap<'info>(
         // [6] = dest_mint
         // [7] = observation_state (owned by CPMM)
 
-        // Validate config is owned by CPMM program
+        // Validate mints match expected - ensures swap is for intended token pair
+        // (CPMM will validate all other account ownership/derivations)
         require!(
-            remaining[1].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        // Validate pool state is owned by CPMM program
-        require!(
-            remaining[2].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        // Validate token vaults are owned by Token program
-        require!(
-            remaining[3].owner == &anchor_spl::token::ID,
-            PrivacyError::InvalidRemainingAccounts
+            remaining[5].key() == source_mint || remaining[6].key() == source_mint,
+            PrivacyError::InvalidMintAddress
         );
         require!(
-            remaining[4].owner == &anchor_spl::token::ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        // Validate observation state is owned by CPMM program
-        require!(
-            remaining[7].owner == &crate::RAYDIUM_CPMM_PROGRAM_ID,
-            PrivacyError::InvalidRemainingAccounts
+            remaining[5].key() == dest_mint || remaining[6].key() == dest_mint,
+            PrivacyError::InvalidMintAddress
         );
 
         // Build CPMM swap instruction accounts
@@ -448,55 +448,31 @@ pub fn transact_swap<'info>(
         invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
     } else if is_amm {
         // Raydium AMM V4 Swap
-        // Accounts:
-        // 0. Token Program
-        // 1. Amm Id
-        // 2. Amm Authority
-        // 3. Amm Open Orders
-        // 4. Amm Target Orders
-        // 5. Pool Coin Token Account
-        // 6. Pool Pc Token Account
-        // 7. Serum Program
-        // 8. Serum Market
-        // 9. Serum Bids
-        // 10. Serum Asks
-        // 11. Serum Event Queue
-        // 12. Serum Coin Vault
-        // 13. Serum Pc Vault
-        // 14. Serum Vault Signer
-        // 15. User Source Token
-        // 16. User Dest Token
-        // 17. User Owner
+        // Accounts layout in remaining_accounts:
+        // [0] = Amm Id (owned by AMM program)
+        // [1] = Amm Authority (PDA derived from Amm Id)
+        // [2] = Amm Open Orders (owned by OpenBook)
+        // [3] = Amm Target Orders (owned by AMM program)
+        // [4] = Pool Coin Token Account (owned by Token program)
+        // [5] = Pool Pc Token Account (owned by Token program)
+        // [6] = Serum/OpenBook Program
+        // [7] = Serum Market (owned by OpenBook)
+        // [8] = Serum Bids (owned by OpenBook)
+        // [9] = Serum Asks (owned by OpenBook)
+        // [10] = Serum Event Queue (owned by OpenBook)
+        // [11] = Serum Coin Vault (owned by Token program)
+        // [12] = Serum Pc Vault (owned by Token program)
+        // [13] = Serum Vault Signer (PDA)
 
-        // We expect remaining accounts to contain indices 1..15 (14 accounts)
-        // Token Program is known (ctx.accounts.token_program)
-        // User accounts are known
         require!(
             remaining.len() >= 14,
             PrivacyError::InvalidRemainingAccounts
         );
 
-        // remaining[0] = AMM Id - must be owned by AMM program
+        // Validate Serum/OpenBook Program ID - this is the critical check
+        // (AMM will validate all other account ownership/derivations internally)
         require!(
-            remaining[0].owner == &crate::RAYDIUM_AMM_PROGRAM_ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        // remaining[4], remaining[5] = Pool token accounts - must be owned by Token program
-        require!(
-            remaining[4].owner == &anchor_spl::token::ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        require!(
-            remaining[5].owner == &anchor_spl::token::ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        // remaining[11], remaining[12] = Serum vaults - must be owned by Token program
-        require!(
-            remaining[11].owner == &anchor_spl::token::ID,
-            PrivacyError::InvalidRemainingAccounts
-        );
-        require!(
-            remaining[12].owner == &anchor_spl::token::ID,
+            remaining[6].key() == crate::OPENBOOK_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
         );
 
@@ -568,7 +544,7 @@ pub fn transact_swap<'info>(
         if is_shared_accounts {
             // SharedAccountsRoute Layout:
             // 0: TokenProgram
-            // 1: ProgramAuthority (from remaining[0])
+            // 1: ProgramAuthority (from remaining[0]) - Jupiter's authority PDA
             // 2: UserTransferAuthority (signer) -> Protocol Authority (our executor)
             // 3: UserSourceTokenAccount -> Executor Source Token
             // 4: ProgramSourceTokenAccount (from remaining[1])
@@ -578,10 +554,21 @@ pub fn transact_swap<'info>(
             // 8: DestMint
             // ...
 
-            // Minimum account count check - Jupiter will validate account correctness
+            // Minimum account count check
             require!(
                 remaining.len() >= 9,
                 PrivacyError::JupiterInsufficientAccounts
+            );
+
+            // Validate source and dest mints match expected - ensures correct token pair
+            // (Jupiter will validate all other account ownership/derivations)
+            require!(
+                remaining[7].key() == source_mint,
+                PrivacyError::InvalidMintAddress
+            );
+            require!(
+                remaining[8].key() == dest_mint,
+                PrivacyError::InvalidMintAddress
             );
 
             // We need to inject our executor accounts at indices 2, 3, and 6
@@ -631,11 +618,13 @@ pub fn transact_swap<'info>(
             // 4: DestMint (or other optional)
             // ...
 
-            // Minimum account count check - Jupiter will validate account correctness
+            // Minimum account count check
             require!(
                 remaining.len() >= 4,
                 PrivacyError::JupiterInsufficientAccounts
             );
+
+            // Jupiter validates its own accounts - we just ensure basic structure
 
             for (i, acc) in remaining.iter().enumerate() {
                 match i {

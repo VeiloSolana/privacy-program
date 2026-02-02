@@ -79,6 +79,10 @@ pub const RAYDIUM_CPMM_PROGRAM_ID: Pubkey = pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7
 /// Raydium AMM V4 program ID (mainnet)
 pub const RAYDIUM_AMM_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
 
+/// OpenBook (Serum V3) DEX Program ID (mainnet)
+/// Used by Raydium AMM V4 for orderbook-based swaps
+pub const OPENBOOK_PROGRAM_ID: Pubkey = pubkey!("srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX");
+
 /// Jupiter V6 Aggregator Program ID (mainnet)
 pub const JUPITER_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
 
@@ -557,10 +561,11 @@ pub struct Transact<'info> {
 
     /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -568,10 +573,11 @@ pub struct Transact<'info> {
 
     /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
     /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"nullifier_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -693,20 +699,22 @@ pub struct TransactSwap<'info> {
     pub source_nullifiers: Box<Account<'info, NullifierSet>>,
 
     /// First nullifier marker for source pool
+    /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_0.as_ref()],
+        seeds = [b"nullifier_v3", source_mint.as_ref(), input_nullifier_0.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
     pub source_nullifier_marker_0: Box<Account<'info, NullifierMarker>>,
 
     /// Second nullifier marker for source pool
+    /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
         init,
         payer = relayer,
-        seeds = [b"nullifier_v3", source_mint.as_ref(), &source_tree_id.to_le_bytes(), input_nullifier_1.as_ref()],
+        seeds = [b"nullifier_v3", source_mint.as_ref(), input_nullifier_1.as_ref()],
         bump,
         space = NullifierMarker::LEN
     )]
@@ -1316,8 +1324,7 @@ pub mod privacy_pool {
         // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
         if public_amount <= 0 {
             // Check if nullifier was already marked to prevent double-spend
-            // The PDA derivation includes tree_id in seeds, so cross-tree reuse is already impossible
-            // (Anchor enforces the account matches the PDA seeds during instruction processing)
+            // Nullifier markers are GLOBAL (no tree_id in PDA seeds) to prevent cross-tree double-spend
             // We check marker.nullifier != [0u8; 32] to detect if this marker was already used
             require!(
                 ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
@@ -1888,8 +1895,6 @@ pub enum PrivacyError {
     InvalidNullifierMarkerForDeposit,
     #[msg("Token account delegation amount insufficient for deposit")]
     InsufficientDelegation,
-    #[msg("Nullifier marker tree_id mismatch - nullifier already used in different tree")]
-    NullifierTreeMismatch,
     #[msg("Invalid swap program: must be Raydium CPMM or AMM")]
     InvalidSwapProgram,
     #[msg("Executor PDA exists and is not stale - cannot reclaim yet")]
@@ -1900,4 +1905,6 @@ pub enum PrivacyError {
     JupiterInsufficientAccounts,
     #[msg("Jupiter instruction data invalid or unsupported version")]
     JupiterInvalidInstruction,
+    #[msg("Swap params mints do not match instruction mints")]
+    InvalidSwapParams,
 }
