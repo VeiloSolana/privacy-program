@@ -114,14 +114,15 @@ Nullifiers are used to prevent double-spending of notes.
 
 ### Edge Cases & Errors
 
-| Error                              | Cause                                                               |
-| ---------------------------------- | ------------------------------------------------------------------- |
-| `NullifierAlreadyUsed`             | Nullifier has already been spent (double-spend attempt)             |
-| `DuplicateNullifiers`              | Same nullifier used twice in one transaction                        |
-| `NullifierTableFull`               | Nullifier storage capacity exceeded                                 |
-| `NullifierTreeMismatch`            | Nullifier being used in wrong tree (already used in different tree) |
-| `ZeroNullifier`                    | Nullifier cannot be zero for withdrawals/transfers                  |
-| `InvalidNullifierMarkerForDeposit` | Nullifier marker doesn't correspond to zero nullifier for deposits  |
+| Error                              | Cause                                                              |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `NullifierAlreadyUsed`             | Nullifier has already been spent (double-spend attempt)            |
+| `DuplicateNullifiers`              | Same nullifier used twice in one transaction                       |
+| `NullifierTableFull`               | Nullifier storage capacity exceeded                                |
+| `ZeroNullifier`                    | Nullifier cannot be zero for withdrawals/transfers                 |
+| `InvalidNullifierMarkerForDeposit` | Nullifier marker doesn't correspond to zero nullifier for deposits |
+
+**Note:** Nullifier markers are global per-mint (no tree_id in PDA seeds) to prevent cross-tree double-spend attacks.
 
 ---
 
@@ -372,7 +373,6 @@ Commitments represent new notes being created.
 | `WithdrawalTooSmallForMinFee`      | Withdrawal too small for min fee     |
 | `InvalidNullifierMarkerForDeposit` | Invalid nullifier marker for deposit |
 | `InsufficientDelegation`           | Insufficient delegation              |
-| `NullifierTreeMismatch`            | Nullifier tree mismatch              |
 | `InvalidSwapProgram`               | Invalid swap program                 |
 | `ExecutorNotStale`                 | Executor not stale                   |
 | `InvalidRemainingAccounts`         | Invalid remaining accounts           |

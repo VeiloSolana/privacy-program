@@ -122,21 +122,16 @@ function deriveNoteTreePDA(
 }
 
 /**
- * Derive nullifier marker PDA
+ * Derive nullifier marker PDA (global, no tree_id to prevent cross-tree double-spend)
  */
 function deriveNullifierMarkerPDA(
   programId: PublicKey,
   mint: PublicKey,
-  treeId: number,
+  _treeId: number, // Kept for API compatibility but unused
   nullifier: Uint8Array,
 ): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("nullifier_v3"),
-      mint.toBuffer(),
-      encodeTreeId(treeId),
-      Buffer.from(nullifier),
-    ],
+    [Buffer.from("nullifier_v3"), mint.toBuffer(), Buffer.from(nullifier)],
     programId,
   )[0];
 }

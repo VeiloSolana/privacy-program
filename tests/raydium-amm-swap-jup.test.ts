@@ -255,18 +255,17 @@ function encodeTreeId(treeId: number): Buffer {
   return buffer;
 }
 
-// Helper: Derive nullifier marker PDA with tree_id
+// Helper: Derive nullifier marker PDA (global, no tree_id to prevent cross-tree double-spend)
 function deriveNullifierMarkerPDA(
   programId: PublicKey,
   mintAddress: PublicKey,
-  treeId: number,
+  _treeId: number, // Kept for API compatibility but unused
   nullifier: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId,
@@ -1229,7 +1228,6 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         relayer: payer.publicKey,
         relayerTokenAccount: relayerTokenAccount.address,
         swapProgram: RAYDIUM_AMM_V4_PROGRAM,
-        jupiterEventAuthority: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -2382,7 +2380,6 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
           relayer: payer.publicKey,
           relayerTokenAccount: relayerTokenAccountForTx.address,
           swapProgram: RAYDIUM_AMM_V4_PROGRAM,
-          jupiterEventAuthority: SystemProgram.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,

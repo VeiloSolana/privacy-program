@@ -105,15 +105,15 @@ class InMemoryNoteStorage {
 
 const WASM_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_js/transaction.wasm"
+  "zk/circuits/transaction/transaction_js/transaction.wasm",
 );
 const ZKEY_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_final.zkey"
+  "zk/circuits/transaction/transaction_final.zkey",
 );
 const VK_PATH = path.join(
   process.cwd(),
-  "zk/circuits/transaction/transaction_verification_key.json"
+  "zk/circuits/transaction/transaction_verification_key.json",
 );
 
 // =============================================================================
@@ -140,7 +140,7 @@ function makeProvider(): AnchorProvider {
 async function airdropAndConfirm(
   provider: AnchorProvider,
   pubkey: PublicKey,
-  amount: number
+  amount: number,
 ) {
   const sig = await provider.connection.requestAirdrop(pubkey, amount);
   const latestBlockhash = await provider.connection.getLatestBlockhash();
@@ -161,22 +161,21 @@ function encodeTreeId(treeId: number): Buffer {
   return buffer;
 }
 
-// Helper: Derive nullifier marker PDA with tree_id
-// New contract seeds: [b"nullifier_v3", mint_address, &[tree_id], nullifier]
+// Helper: Derive nullifier marker PDA (global, no tree_id to prevent cross-tree double-spend)
+// Contract seeds: [b"nullifier_v3", mint_address, nullifier]
 function deriveNullifierMarkerPDA(
   programId: PublicKey,
   mintAddress: PublicKey,
-  treeId: number,
-  nullifier: Uint8Array
+  _treeId: number, // Kept for API compatibility but unused
+  nullifier: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
-    programId
+    programId,
   );
   return pda;
 }
@@ -186,13 +185,13 @@ async function createAndFundTokenAccount(
   provider: AnchorProvider,
   mint: PublicKey,
   owner: PublicKey,
-  amount: number
+  amount: number,
 ): Promise<PublicKey> {
   const tokenAccount = await getOrCreateAssociatedTokenAccount(
     provider.connection,
     (provider.wallet as Wallet).payer,
     mint,
-    owner
+    owner,
   );
 
   if (amount > 0) {
@@ -202,7 +201,7 @@ async function createAndFundTokenAccount(
       mint,
       tokenAccount.address,
       (provider.wallet as Wallet).payer,
-      amount
+      amount,
     );
   }
 
@@ -216,7 +215,7 @@ function bytesToBigIntBE(bytes: Uint8Array): bigint {
 // Helper: Reduce value modulo BN254 Fr field
 function reduceToField(bytes: Uint8Array): bigint {
   const FR_MODULUS = BigInt(
-    "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+    "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
   );
   const value = BigInt("0x" + Buffer.from(bytes).toString("hex"));
   return value % FR_MODULUS;
@@ -237,10 +236,10 @@ function computeExtDataHash(
     relayer: PublicKey;
     fee: BN;
     refund: BN;
-  }
+  },
 ): Uint8Array {
   const recipientField = poseidon.F.e(
-    reduceToField(extData.recipient.toBytes())
+    reduceToField(extData.recipient.toBytes()),
   );
   const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
   const feeField = poseidon.F.e(extData.fee.toString());
@@ -261,13 +260,13 @@ function computeCommitment(
   amount: bigint,
   ownerPubkey: bigint, // Already derived from private key
   blinding: Uint8Array,
-  mintAddress: PublicKey
+  mintAddress: PublicKey,
 ): Uint8Array {
   const amountField = poseidon.F.e(amount.toString());
   const ownerField = poseidon.F.e(ownerPubkey.toString());
   const blindingField = poseidon.F.e(bytesToBigIntBE(blinding));
   const mintField = poseidon.F.e(
-    reduceToField(mintAddress.toBytes()).toString()
+    reduceToField(mintAddress.toBytes()).toString(),
   );
 
   // Poseidon hash with 4 inputs (amount, pubkey, blinding, mint)
@@ -289,7 +288,7 @@ function computeNullifier(
   poseidon: any,
   commitment: Uint8Array,
   leafIndex: number,
-  privateKey: Uint8Array
+  privateKey: Uint8Array,
 ): Uint8Array {
   const commitmentField = poseidon.F.e(bytesToBigIntBE(commitment));
   const indexField = poseidon.F.e(BigInt(leafIndex));
@@ -307,7 +306,7 @@ function computeNullifier(
 function createDummyInput(
   poseidon: any,
   owner: bigint,
-  mintAddress: PublicKey
+  mintAddress: PublicKey,
 ) {
   const amount = 0n;
   const blinding = new Uint8Array(32).fill(0);
@@ -319,7 +318,7 @@ function createDummyInput(
     amount,
     owner,
     blinding,
-    mintAddress
+    mintAddress,
   );
   const nullifier = computeNullifier(poseidon, commitment, 0, privateKey);
 
@@ -357,7 +356,7 @@ export function extractRootFromAccount(acc: any): Uint8Array {
 async function fetchAndDisplayEvents(
   connection: Connection,
   txSignature: string,
-  expectedMintAddress: PublicKey
+  expectedMintAddress: PublicKey,
 ): Promise<number> {
   const tx = await connection.getTransaction(txSignature, {
     commitment: "confirmed",
@@ -412,7 +411,7 @@ async function fetchAndDisplayEvents(
           `   Commitment: ${eventData
             .subarray(8, 40)
             .toString("hex")
-            .slice(0, 22)}...`
+            .slice(0, 22)}...`,
         );
         console.log(`   Leaf Index: ${eventData.readBigUInt64LE(40)}`);
         console.log(`   Mint Address: ${mintAddress.toString()}`);
@@ -425,7 +424,7 @@ async function fetchAndDisplayEvents(
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
           throw new Error(
-            `Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+            `Mint address mismatch in CommitmentEvent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`,
           );
         }
       }
@@ -446,7 +445,7 @@ async function fetchAndDisplayEvents(
           `   Nullifier: ${eventData
             .subarray(8, 40)
             .toString("hex")
-            .slice(0, 22)}...`
+            .slice(0, 22)}...`,
         );
         console.log(`   Mint Address: ${mintAddress.toString()}`);
 
@@ -458,7 +457,7 @@ async function fetchAndDisplayEvents(
           console.log(`      Expected: ${expectedMintAddress.toString()}`);
           console.log(`      Got:      ${mintAddress.toString()}`);
           throw new Error(
-            `Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`
+            `Mint address mismatch in NullifierSpent: expected ${expectedMintAddress.toString()}, got ${mintAddress.toString()}`,
           );
         }
       }
@@ -471,7 +470,7 @@ async function fetchAndDisplayEvents(
   console.log(
     `   Mint addresses verified: ${mintAddressMatches}/${
       commitmentEventCount + nullifierSpentCount
-    }`
+    }`,
   );
   console.log(`   Expected mint_address: ${expectedMintAddress.toString()}`);
 
@@ -483,7 +482,7 @@ async function fetchAndDisplayEvents(
 
   if (mintAddressMatches !== totalEvents) {
     throw new Error(
-      `Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`
+      `Mint address verification failed: ${mintAddressMatches}/${totalEvents} events matched`,
     );
   }
 
@@ -669,7 +668,7 @@ async function generateTransactionProof(inputs: {
   inputBlindings: [Uint8Array, Uint8Array];
   inputMerklePaths: [
     { pathElements: bigint[]; pathIndices: number[] },
-    { pathElements: bigint[]; pathIndices: number[] }
+    { pathElements: bigint[]; pathIndices: number[] },
   ];
 
   outputAmounts: [bigint, bigint];
@@ -685,7 +684,7 @@ async function generateTransactionProof(inputs: {
     publicAmount: (() => {
       if (inputs.publicAmount < 0n) {
         const FR_MODULUS = BigInt(
-          "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001"
+          "0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001",
         );
         return (FR_MODULUS + inputs.publicAmount).toString();
       }
@@ -696,10 +695,10 @@ async function generateTransactionProof(inputs: {
 
     // Public inputs (arrays)
     inputNullifier: inputs.inputNullifiers.map((n) =>
-      bytesToBigIntBE(n).toString()
+      bytesToBigIntBE(n).toString(),
     ),
     outputCommitment: inputs.outputCommitments.map((c) =>
-      bytesToBigIntBE(c).toString()
+      bytesToBigIntBE(c).toString(),
     ),
 
     // Private inputs - input UTXOs (arrays)
@@ -707,26 +706,26 @@ async function generateTransactionProof(inputs: {
     inPubkey: inputs.inputPublicKeys.map((pk) => pk.toString()),
     inBlinding: inputs.inputBlindings.map((b) => bytesToBigIntBE(b).toString()),
     inPathIndex: inputs.inputMerklePaths.map((p) =>
-      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0)
+      p.pathIndices.reduce((acc, bit, i) => acc + (bit << i), 0),
     ),
     inPathElements: inputs.inputMerklePaths.map((p) =>
-      p.pathElements.map((e) => e.toString())
+      p.pathElements.map((e) => e.toString()),
     ),
     inPrivateKey: inputs.inputPrivateKeys.map((pk) =>
-      bytesToBigIntBE(pk).toString()
+      bytesToBigIntBE(pk).toString(),
     ),
 
     // Private inputs - output UTXOs (arrays)
     outAmount: inputs.outputAmounts.map((a) => a.toString()),
     outPubkey: inputs.outputOwners.map((o) => o.toString()),
     outBlinding: inputs.outputBlindings.map((b) =>
-      bytesToBigIntBE(b).toString()
+      bytesToBigIntBE(b).toString(),
     ),
   };
 
   console.log(
     "Generating proof with inputs:",
-    JSON.stringify(circuitInputs, null, 2)
+    JSON.stringify(circuitInputs, null, 2),
   );
 
   // Generate proof
@@ -735,7 +734,7 @@ async function generateTransactionProof(inputs: {
     ({ proof, publicSignals } = await groth16.fullProve(
       circuitInputs,
       WASM_PATH,
-      ZKEY_PATH
+      ZKEY_PATH,
     ));
   } catch (e: any) {
     console.error("\n❌ Proof generation failed!");
@@ -746,7 +745,7 @@ async function generateTransactionProof(inputs: {
     console.error("  2. Flat signals: inputNullifier0, inputNullifier1");
     console.error("  3. Different names: nullifier0, nullifier1");
     console.error(
-      "\nPlease check your circuit's signal declarations in transaction.circom\n"
+      "\nPlease check your circuit's signal declarations in transaction.circom\n",
     );
     throw e;
   }
@@ -810,11 +809,11 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Get PDAs (v3 with mint_address in seeds)
     [config] = PublicKey.findProgramAddressSync(
       [Buffer.from("privacy_config_v3"), SOL_MINT.toBuffer()],
-      program.programId
+      program.programId,
     );
     [vault] = PublicKey.findProgramAddressSync(
       [Buffer.from("privacy_vault_v3"), SOL_MINT.toBuffer()],
-      program.programId
+      program.programId,
     );
     [noteTree] = PublicKey.findProgramAddressSync(
       [
@@ -822,15 +821,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         SOL_MINT.toBuffer(),
         encodeTreeId(0),
       ],
-      program.programId
+      program.programId,
     );
     [nullifiers] = PublicKey.findProgramAddressSync(
       [Buffer.from("privacy_nullifiers_v3"), SOL_MINT.toBuffer()],
-      program.programId
+      program.programId,
     );
     [globalConfig] = PublicKey.findProgramAddressSync(
       [Buffer.from("global_config_v1")],
-      program.programId
+      program.programId,
     );
 
     console.log("Program ID:", program.programId.toBase58());
@@ -850,7 +849,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(1_000_000), // min_deposit_amount: 0.001 SOL
           new BN(1_000_000_000_000), // max_deposit_amount: 1000 SOL
           new BN(1_000_000), // min_withdraw_amount: 0.001 SOL
-          new BN(1_000_000_000_000) // max_withdraw_amount: 1000 SOL
+          new BN(1_000_000_000_000), // max_withdraw_amount: 1000 SOL
         )
         .accounts({
           config,
@@ -863,12 +862,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         .rpc();
 
       const configAcc = await (program.account as any).privacyConfig.fetch(
-        config
+        config,
       );
       console.log("✅ Pool initialized");
       console.log(`   Fee BPS: ${configAcc.feeBps}`);
       console.log(
-        `   Min Withdrawal Fee: ${configAcc.minWithdrawalFee} lamports`
+        `   Min Withdrawal Fee: ${configAcc.minWithdrawalFee} lamports`,
       );
       console.log(`   Max Deposit: ${configAcc.maxDepositAmount} lamports`);
     } catch (e: any) {
@@ -892,7 +891,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         .rpc();
 
       const globalConfigAcc = await (program.account as any).globalConfig.fetch(
-        globalConfig
+        globalConfig,
       );
       console.log("✅ Global config initialized");
       console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
@@ -929,7 +928,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // 💰 BALANCE CHECK: Before deposit
     const beforeSender = BigInt(
-      await provider.connection.getBalance(sender.publicKey)
+      await provider.connection.getBalance(sender.publicKey),
     );
     const beforeVault = BigInt(await provider.connection.getBalance(vault));
 
@@ -938,18 +937,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `                   ${beforeSender} lamports (${
         Number(beforeSender) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Vault:          ${vault.toBase58()}`);
     console.log(
       `                   ${beforeVault} lamports (${
         Number(beforeVault) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(
       `   Deposit amount: ${depositAmount} lamports (${
         Number(depositAmount) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
 
     // Generate keypair for the note
@@ -963,7 +962,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       depositAmount,
       publicKey,
       blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Create dummy output (will be inserted as second output on-chain)
@@ -977,7 +976,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       dummyOutputAmount,
       dummyOutputPubKey,
       dummyOutputBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Insert into off-chain tree - INSERT BOTH outputs to match on-chain behavior
@@ -989,7 +988,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       commitment,
       leafIndex,
-      privateKey
+      privateKey,
     );
 
     // For deposit: use dummy inputs - MUST BE INTERNALLY CONSISTENT
@@ -1011,14 +1010,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey0,
       dummyBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyCommitment1 = computeCommitment(
       poseidon,
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // 3. Compute Nullifiers for Dummy Inputs (pathIndex = 0)
@@ -1026,13 +1025,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       dummyCommitment0,
       0,
-      dummyPrivKey0
+      dummyPrivKey0,
     );
     const dummyNullifier1 = computeNullifier(
       poseidon,
       dummyCommitment1,
       0,
-      dummyPrivKey1
+      dummyPrivKey1,
     );
 
     // --- Restore context variables (extData, onchainRoot) ---
@@ -1090,13 +1089,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       inputTreeId,
-      dummyNullifier0
+      dummyNullifier0,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       inputTreeId,
-      dummyNullifier1
+      dummyNullifier1,
     );
 
     const publicAmount = new BN(depositAmount.toString());
@@ -1115,7 +1114,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(commitment),
           Array.from(dummyOutputCommitment),
           extData,
-          proof
+          proof,
         )
         .accounts({
           config,
@@ -1162,7 +1161,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // 💰 BALANCE CHECK: After deposit
     const afterSender = BigInt(
-      await provider.connection.getBalance(sender.publicKey)
+      await provider.connection.getBalance(sender.publicKey),
     );
     const afterVault = BigInt(await provider.connection.getBalance(vault));
 
@@ -1174,20 +1173,20 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `                   ${afterSender} lamports (${
         Number(afterSender) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Vault:          ${vault.toBase58()}`);
     console.log(
       `                   ${afterVault} lamports (${
         Number(afterVault) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
 
     console.log("\n📊 Balance Changes:");
     console.log(
       `   Sender spent:     ${senderSpent} lamports (${depositAmount} deposit + ${
         senderSpent - depositAmount
-      } tx fees)`
+      } tx fees)`,
     );
     console.log(`   Vault received:   ${vaultReceived} lamports`);
     console.log(`   Expected deposit: ${depositAmount} lamports`);
@@ -1195,14 +1194,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Verify vault received exactly the deposit amount
     if (vaultReceived !== depositAmount) {
       throw new Error(
-        `Vault delta mismatch: expected ${depositAmount}, got ${vaultReceived}`
+        `Vault delta mismatch: expected ${depositAmount}, got ${vaultReceived}`,
       );
     }
 
     // Verify sender paid deposit + tx fees
     if (senderSpent < depositAmount) {
       throw new Error(
-        `Sender spent too little: expected at least ${depositAmount}, got ${senderSpent}`
+        `Sender spent too little: expected at least ${depositAmount}, got ${senderSpent}`,
       );
     }
 
@@ -1211,7 +1210,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `   ✓ Sender paid ${senderSpent} lamports (${depositAmount} deposit + ${
         senderSpent - depositAmount
-      } tx fees)`
+      } tx fees)`,
     );
 
     // Recompute Merkle path now that tree has both outputs inserted
@@ -1243,7 +1242,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `   ✅ commitment is public: ${Buffer.from(commitment)
         .toString("hex")
-        .slice(0, 22)}...`
+        .slice(0, 22)}...`,
     );
     console.log(`   💡 In production: use encrypted storage (NoteManager)`);
 
@@ -1284,7 +1283,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       recipient.publicKey,
-      0.2 * LAMPORTS_PER_SOL
+      0.2 * LAMPORTS_PER_SOL,
     );
 
     // Register relayer
@@ -1308,13 +1307,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // 💰 BALANCE CHECK: Before withdrawal
     const beforeVaultWithdraw = BigInt(
-      await provider.connection.getBalance(vault)
+      await provider.connection.getBalance(vault),
     );
     const beforeRelayerWithdraw = BigInt(
-      await provider.connection.getBalance(relayer.publicKey)
+      await provider.connection.getBalance(relayer.publicKey),
     );
     const beforeRecipientWithdraw = BigInt(
-      await provider.connection.getBalance(recipient.publicKey)
+      await provider.connection.getBalance(recipient.publicKey),
     );
 
     console.log("\n💰 Balance Check - Before Withdrawal:");
@@ -1322,24 +1321,24 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `              ${beforeVaultWithdraw} lamports (${
         Number(beforeVaultWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Relayer:   ${relayer.publicKey.toBase58()}`);
     console.log(
       `              ${beforeRelayerWithdraw} lamports (${
         Number(beforeRelayerWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Recipient: ${recipient.publicKey.toBase58()}`);
     console.log(
       `              ${beforeRecipientWithdraw} lamports (${
         Number(beforeRecipientWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(
       `   Withdrawal amount: ${withdrawAmount} lamports (${
         Number(withdrawAmount) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Fee (${feeBps} BPS): ${fee} lamports`);
     console.log(`   Expected to recipient: ${toRecipient} lamports`);
@@ -1366,7 +1365,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   Off-chain root:", bytesToBigIntBE(offchainRoot).toString());
     console.log(
       "   Deposit commitment:",
-      bytesToBigIntBE(depositNote.commitment).toString()
+      bytesToBigIntBE(depositNote.commitment).toString(),
     );
     console.log("   Leaf index:", depositNote.leafIndex);
 
@@ -1376,12 +1375,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Recompute Merkle path from off-chain tree (now includes deposited note)
     const updatedMerklePath = offchainTree.getMerkleProof(
-      depositNote.leafIndex
+      depositNote.leafIndex,
     );
 
     console.log(
       "   Updated path[0]:",
-      updatedMerklePath.pathElements[0].toString()
+      updatedMerklePath.pathElements[0].toString(),
     );
     console.log("   Path indices:", updatedMerklePath.pathIndices);
 
@@ -1395,14 +1394,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyNullifier1 = computeNullifier(
       poseidon,
       dummyCommitment1,
       0,
-      dummyPrivKey1
+      dummyPrivKey1,
     );
 
     // Create change output (0.001 SOL stays in vault/pool)
@@ -1414,7 +1413,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       changeAmount,
       changePubKey,
       changeBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Create dummy second output (amount 0)
@@ -1426,7 +1425,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutputPubKey1,
       dummyOutputBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Get zero path for dummy input
@@ -1466,13 +1465,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       withdrawInputTreeId,
-      depositNote.nullifier
+      depositNote.nullifier,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       withdrawInputTreeId,
-      dummyNullifier1
+      dummyNullifier1,
     );
 
     try {
@@ -1489,7 +1488,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(changeCommitment),
           Array.from(dummyOutputCommitment1),
           extData,
-          proof
+          proof,
         )
         .accounts({
           config,
@@ -1540,13 +1539,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // 💰 BALANCE CHECK: After withdrawal
     const afterVaultWithdraw = BigInt(
-      await provider.connection.getBalance(vault)
+      await provider.connection.getBalance(vault),
     );
     const afterRelayerWithdraw = BigInt(
-      await provider.connection.getBalance(relayer.publicKey)
+      await provider.connection.getBalance(relayer.publicKey),
     );
     const afterRecipientWithdraw = BigInt(
-      await provider.connection.getBalance(recipient.publicKey)
+      await provider.connection.getBalance(recipient.publicKey),
     );
 
     const vaultPaid = beforeVaultWithdraw - afterVaultWithdraw;
@@ -1558,25 +1557,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `              ${afterVaultWithdraw} lamports (${
         Number(afterVaultWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Relayer:   ${relayer.publicKey.toBase58()}`);
     console.log(
       `              ${afterRelayerWithdraw} lamports (${
         Number(afterRelayerWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
     console.log(`   Recipient: ${recipient.publicKey.toBase58()}`);
     console.log(
       `              ${afterRecipientWithdraw} lamports (${
         Number(afterRecipientWithdraw) / LAMPORTS_PER_SOL
-      } SOL)`
+      } SOL)`,
     );
 
     console.log("\n📊 Balance Changes:");
     console.log(`   Vault paid:          ${vaultPaid} lamports`);
     console.log(
-      `   Relayer received:    ${relayerReceived} lamports (after tx fees)`
+      `   Relayer received:    ${relayerReceived} lamports (after tx fees)`,
     );
     console.log(`   Recipient received:  ${recipientReceived} lamports`);
     console.log(`   Expected withdrawal: ${withdrawAmount} lamports`);
@@ -1586,14 +1585,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Verify vault paid exactly the withdrawal amount
     if (vaultPaid !== withdrawAmount) {
       throw new Error(
-        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`,
       );
     }
 
     // Verify recipient received exactly the expected amount (withdrawal - fee)
     if (recipientReceived !== toRecipient) {
       throw new Error(
-        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`
+        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`,
       );
     }
 
@@ -1602,20 +1601,20 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const expectedRelayerMin = fee - 10_000_000n; // Allow up to 0.01 SOL for tx fees
     if (relayerReceived < expectedRelayerMin) {
       console.warn(
-        `   ⚠️  Relayer received less than expected (likely due to tx fees): ${relayerReceived} < ${expectedRelayerMin}`
+        `   ⚠️  Relayer received less than expected (likely due to tx fees): ${relayerReceived} < ${expectedRelayerMin}`,
       );
     }
 
     console.log("\n✅ Balance verification passed!");
     console.log(`   ✓ Vault paid exactly ${withdrawAmount} lamports`);
     console.log(
-      `   ✓ Recipient received exactly ${toRecipient} lamports (${withdrawAmount} - ${fee} fee)`
+      `   ✓ Recipient received exactly ${toRecipient} lamports (${withdrawAmount} - ${fee} fee)`,
     );
     console.log(
-      `   ✓ Relayer received ${relayerReceived} lamports (${fee} fee - tx costs)`
+      `   ✓ Relayer received ${relayerReceived} lamports (${fee} fee - tx costs)`,
     );
     console.log(
-      `   ✓ Total accounted: ${vaultPaid} = ${recipientReceived} + ${fee} (sent to relayer)`
+      `   ✓ Total accounted: ${vaultPaid} = ${recipientReceived} + ${fee} (sent to relayer)`,
     );
 
     console.log("\n✅ Withdrawal successful");
@@ -1627,7 +1626,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     noteStorage.markSpent(depositNoteId!);
     console.log(`\n🗑️  Note marked as spent (nullifier published on-chain)`);
     console.log(
-      `   ⚠️  Note can NEVER be spent again (double-spend protection)`
+      `   ⚠️  Note can NEVER be spent again (double-spend protection)`,
     );
   });
 
@@ -1665,7 +1664,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       deposit1Amount,
       deposit1PublicKey,
       deposit1Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Dummy output for first deposit
@@ -1677,7 +1676,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       deposit1DummyPubKey,
       deposit1DummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const deposit1LeafIndex = offchainTree.nextIndex;
@@ -1694,26 +1693,26 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey0,
       dummyBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyCommitment1 = computeCommitment(
       poseidon,
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyNullifier0 = computeNullifier(
       poseidon,
       dummyCommitment0,
       0,
-      dummyPrivKey0
+      dummyPrivKey0,
     );
     const dummyNullifier1 = computeNullifier(
       poseidon,
       dummyCommitment1,
       0,
-      dummyPrivKey1
+      dummyPrivKey1,
     );
 
     const extDataDeposit1 = {
@@ -1757,13 +1756,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       deposit1InputTreeId,
-      dummyNullifier0
+      dummyNullifier0,
     );
     const nullifierMarker1_d1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       deposit1InputTreeId,
-      dummyNullifier1
+      dummyNullifier1,
     );
 
     const deposit1Tx = await (program.methods as any)
@@ -1779,7 +1778,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(deposit1Commitment),
         Array.from(deposit1DummyCommitment),
         extDataDeposit1,
-        deposit1Proof
+        deposit1Proof,
       )
       .accounts({
         config,
@@ -1837,7 +1836,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       deposit2Amount,
       deposit2PublicKey,
       deposit2Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Dummy output for second deposit
@@ -1849,7 +1848,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       deposit2DummyPubKey,
       deposit2DummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const deposit2LeafIndex = offchainTree.nextIndex;
@@ -1866,26 +1865,26 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey2,
       dummyBlinding2,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyCommitment3 = computeCommitment(
       poseidon,
       0n,
       dummyPubKey3,
       dummyBlinding3,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyNullifier2 = computeNullifier(
       poseidon,
       dummyCommitment2,
       0,
-      dummyPrivKey2
+      dummyPrivKey2,
     );
     const dummyNullifier3 = computeNullifier(
       poseidon,
       dummyCommitment3,
       0,
-      dummyPrivKey3
+      dummyPrivKey3,
     );
 
     const extDataDeposit2 = {
@@ -1897,7 +1896,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const extDataHashDeposit2 = computeExtDataHash(poseidon, extDataDeposit2);
 
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
 
@@ -1926,13 +1925,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       deposit2InputTreeId,
-      dummyNullifier2
+      dummyNullifier2,
     );
     const nullifierMarker1_d2 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       deposit2InputTreeId,
-      dummyNullifier3
+      dummyNullifier3,
     );
 
     const deposit2Tx = await (program.methods as any)
@@ -1948,7 +1947,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(deposit2Commitment),
         Array.from(deposit2DummyCommitment),
         extDataDeposit2,
-        deposit2Proof
+        deposit2Proof,
       )
       .accounts({
         config,
@@ -2002,12 +2001,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       withdrawRelayer.publicKey,
-      1 * LAMPORTS_PER_SOL
+      1 * LAMPORTS_PER_SOL,
     );
     await airdropAndConfirm(
       provider,
       withdrawRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     // Register withdrawal relayer
@@ -2036,14 +2035,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       deposit1Commitment,
       deposit1LeafIndex,
-      deposit1PrivateKey
+      deposit1PrivateKey,
     );
 
     const deposit2Nullifier = computeNullifier(
       poseidon,
       deposit2Commitment,
       deposit2LeafIndex,
-      deposit2PrivateKey
+      deposit2PrivateKey,
     );
 
     // Create change output (user keeps 0.5 SOL)
@@ -2055,7 +2054,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       changeAmount,
       changePublicKey,
       changeBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Dummy output (withdrawal only has change as real output)
@@ -2067,7 +2066,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutputPubKey,
       dummyOutputBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const extDataWithdraw = {
@@ -2079,7 +2078,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
 
@@ -2114,19 +2113,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       multiInputTreeId,
-      deposit1Nullifier
+      deposit1Nullifier,
     );
     const deposit2NullifierMarker = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       multiInputTreeId,
-      deposit2Nullifier
+      deposit2Nullifier,
     );
 
     // Check balances before withdrawal
     const beforeVault = BigInt(await provider.connection.getBalance(vault));
     const beforeRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const withdrawTx = await (program.methods as any)
@@ -2142,7 +2141,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(changeCommitment),
         Array.from(dummyOutputCommitment),
         extDataWithdraw,
-        withdrawProof
+        withdrawProof,
       )
       .accounts({
         config,
@@ -2186,7 +2185,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Check balances after withdrawal
     const afterVault = BigInt(await provider.connection.getBalance(vault));
     const afterRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const vaultPaid = beforeVault - afterVault;
@@ -2202,27 +2201,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     if (vaultPaid !== withdrawAmount) {
       throw new Error(
-        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+        `Vault paid mismatch: expected ${withdrawAmount}, got ${vaultPaid}`,
       );
     }
 
     if (recipientReceived !== toRecipient) {
       throw new Error(
-        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`
+        `Recipient received mismatch: expected ${toRecipient}, got ${recipientReceived}`,
       );
     }
 
     console.log("🎉 UTXO Model Demonstration Complete!");
     console.log(
-      "   ✅ Combined two deposits (1 SOL + 0.8 SOL) into one withdrawal"
+      "   ✅ Combined two deposits (1 SOL + 0.8 SOL) into one withdrawal",
     );
     console.log("   ✅ Withdrew 1.3 SOL with proper accounting");
     console.log("   ✅ Created 0.5 SOL change note for future use");
     console.log(
-      "   ✅ Both input notes permanently spent (nullifiers on-chain)"
+      "   ✅ Both input notes permanently spent (nullifiers on-chain)",
     );
     console.log(
-      "   ✅ Privacy preserved: no link between deposits and withdrawal\n"
+      "   ✅ Privacy preserved: no link between deposits and withdrawal\n",
     );
   });
 
@@ -2232,16 +2231,16 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
   it("combines 4 deposits (1, 2, 3, 8 SOL) progressively to withdraw 13 SOL (batch proofs)", async () => {
     console.log(
-      "\n🔄 Multi-Step Note Combining Test (WITH BATCH PROOF GENERATION):\n"
+      "\n🔄 Multi-Step Note Combining Test (WITH BATCH PROOF GENERATION):\n",
     );
     console.log(
-      "💡 Circuit constraint: 2-in-2-out (cannot spend 3+ notes at once)"
+      "💡 Circuit constraint: 2-in-2-out (cannot spend 3+ notes at once)",
     );
     console.log(
-      "💡 Solution: Combine notes progressively through multiple transactions"
+      "💡 Solution: Combine notes progressively through multiple transactions",
     );
     console.log(
-      "⚡ Efficiency: Generate ALL proofs in parallel, then submit sequentially\n"
+      "⚡ Efficiency: Generate ALL proofs in parallel, then submit sequentially\n",
     );
 
     const user = Keypair.generate();
@@ -2256,7 +2255,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Helper function to deposit
     const depositNote = async (amount: bigint, label: string) => {
       console.log(
-        `📥 Depositing ${Number(amount) / LAMPORTS_PER_SOL} SOL (${label})`
+        `📥 Depositing ${Number(amount) / LAMPORTS_PER_SOL} SOL (${label})`,
       );
 
       const privateKey = randomBytes32();
@@ -2268,7 +2267,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         amount,
         publicKey,
         blinding,
-        SOL_MINT
+        SOL_MINT,
       );
 
       const dummyPrivKey = randomBytes32();
@@ -2279,7 +2278,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         0n,
         dummyPubKey,
         dummyBlinding,
-        SOL_MINT
+        SOL_MINT,
       );
 
       const leafIndex = offchainTree.nextIndex;
@@ -2295,26 +2294,26 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         0n,
         dummyIn0PubKey,
         dummyIn0Blinding,
-        SOL_MINT
+        SOL_MINT,
       );
       const dummyIn1Commitment = computeCommitment(
         poseidon,
         0n,
         dummyIn1PubKey,
         dummyIn1Blinding,
-        SOL_MINT
+        SOL_MINT,
       );
       const dummyIn0Nullifier = computeNullifier(
         poseidon,
         dummyIn0Commitment,
         0,
-        dummyIn0PrivKey
+        dummyIn0PrivKey,
       );
       const dummyIn1Nullifier = computeNullifier(
         poseidon,
         dummyIn1Commitment,
         0,
-        dummyIn1PrivKey
+        dummyIn1PrivKey,
       );
 
       const extData = {
@@ -2366,13 +2365,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         program.programId,
         SOL_MINT,
         batchDepositTreeId,
-        dummyIn0Nullifier
+        dummyIn0Nullifier,
       );
       const nullifierMarker1 = deriveNullifierMarkerPDA(
         program.programId,
         SOL_MINT,
         batchDepositTreeId,
-        dummyIn1Nullifier
+        dummyIn1Nullifier,
       );
 
       const tx = await (program.methods as any)
@@ -2388,7 +2387,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(commitment),
           Array.from(dummyCommitment),
           extData,
-          proof
+          proof,
         )
         .accounts({
           config,
@@ -2433,7 +2432,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const combineToTwoNotes = async (
       notes: any[],
       relayer: any,
-      label: string = "Batch combine"
+      label: string = "Batch combine",
     ) => {
       if (notes.length === 0) {
         throw new Error("No notes to combine");
@@ -2449,7 +2448,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       }
 
       console.log(
-        `\n🔄 ${label}: Combining ${notes.length} notes into 2 (BATCH PROOF GENERATION)\n`
+        `\n🔄 ${label}: Combining ${notes.length} notes into 2 (BATCH PROOF GENERATION)\n`,
       );
 
       // =============================================================================
@@ -2458,7 +2457,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
       // Sort notes by amount (smallest first)
       const sortedNotes = [...notes].sort((a, b) =>
-        Number(a.amount - b.amount)
+        Number(a.amount - b.amount),
       );
 
       const combineOps: any[] = [];
@@ -2486,7 +2485,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       }
 
       console.log(
-        `   📋 Planned ${combineOps.length} combine operations (all independent)\n`
+        `   📋 Planned ${combineOps.length} combine operations (all independent)\n`,
       );
 
       // =============================================================================
@@ -2494,7 +2493,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       // =============================================================================
 
       console.log(
-        `   ⚡ Generating ${combineOps.length} proofs in parallel...\n`
+        `   ⚡ Generating ${combineOps.length} proofs in parallel...\n`,
       );
       const proofStartTime = Date.now();
 
@@ -2506,13 +2505,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             poseidon,
             note1.commitment,
             note1.leafIndex,
-            note1.privateKey
+            note1.privateKey,
           );
           const nullifier2 = computeNullifier(
             poseidon,
             note2.commitment,
             note2.leafIndex,
-            note2.privateKey
+            note2.privateKey,
           );
 
           const outputPrivateKey = randomBytes32();
@@ -2523,7 +2522,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             combinedAmount,
             outputPublicKey,
             outputBlinding,
-            SOL_MINT
+            SOL_MINT,
           );
 
           const dummyPrivKey = randomBytes32();
@@ -2534,7 +2533,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             0n,
             dummyPubKey,
             dummyBlinding,
-            SOL_MINT
+            SOL_MINT,
           );
 
           const extData = {
@@ -2586,12 +2585,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             proof,
             onchainRoot,
           };
-        })
+        }),
       );
 
       const proofTime = Date.now() - proofStartTime;
       console.log(
-        `   ✅ Generated ${proofData.length} proofs in ${proofTime}ms (parallel)\n`
+        `   ✅ Generated ${proofData.length} proofs in ${proofTime}ms (parallel)\n`,
       );
 
       // =============================================================================
@@ -2599,7 +2598,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       // =============================================================================
 
       console.log(
-        `   📡 Submitting ${proofData.length} transactions on-chain...\n`
+        `   📡 Submitting ${proofData.length} transactions on-chain...\n`,
       );
 
       // Start with all original notes
@@ -2613,7 +2612,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             Number(data.note1.amount) / LAMPORTS_PER_SOL
           } + ${Number(data.note2.amount) / LAMPORTS_PER_SOL} = ${
             Number(data.combinedAmount) / LAMPORTS_PER_SOL
-          } SOL`
+          } SOL`,
         );
 
         // Remove the two notes we're combining (check by commitment to be safe)
@@ -2628,7 +2627,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
               n.commitment &&
               data.note2.commitment &&
               n.commitment.toString() === data.note2.commitment.toString()
-            )
+            ),
         );
 
         const combineInputTreeId = 0;
@@ -2636,13 +2635,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           program.programId,
           SOL_MINT,
           combineInputTreeId,
-          data.nullifier1
+          data.nullifier1,
         );
         const nullifierMarker2 = deriveNullifierMarkerPDA(
           program.programId,
           SOL_MINT,
           combineInputTreeId,
-          data.nullifier2
+          data.nullifier2,
         );
 
         const tx = await (program.methods as any)
@@ -2658,7 +2657,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             Array.from(data.outputCommitment),
             Array.from(data.dummyCommitment),
             data.extData,
-            data.proof
+            data.proof,
           )
           .accounts({
             config,
@@ -2712,10 +2711,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       console.log(
         `\n   ✅ Final 2 notes: ${
           Number(updatedNotes[0].amount) / LAMPORTS_PER_SOL
-        } SOL + ${Number(updatedNotes[1].amount) / LAMPORTS_PER_SOL} SOL\n`
+        } SOL + ${Number(updatedNotes[1].amount) / LAMPORTS_PER_SOL} SOL\n`,
       );
       console.log(
-        `   ⚡ Batch proof generation saved time by generating proofs in parallel!\n`
+        `   ⚡ Batch proof generation saved time by generating proofs in parallel!\n`,
       );
 
       return updatedNotes;
@@ -2739,7 +2738,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // =============================================================================
 
     console.log(
-      "🔄 Step 2: Auto-combining 4 notes into 2 notes for withdrawal\n"
+      "🔄 Step 2: Auto-combining 4 notes into 2 notes for withdrawal\n",
     );
 
     // Automatically combine all 4 notes into 2 notes (ready for withdrawal)
@@ -2747,7 +2746,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const [combinedNote1, combinedNote2] = await combineToTwoNotes(
       [note1, note2, note3, note8],
       user,
-      "Automatic combine"
+      "Automatic combine",
     );
 
     console.log("\n✅ Notes combined. Ready to withdraw!\n");
@@ -2764,12 +2763,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       withdrawRelayer.publicKey,
-      1 * LAMPORTS_PER_SOL
+      1 * LAMPORTS_PER_SOL,
     );
     await airdropAndConfirm(
       provider,
       withdrawRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     await (program.methods as any)
@@ -2787,41 +2786,43 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `     - Combined note 1: ${
         Number(combinedNote1.amount) / LAMPORTS_PER_SOL
-      } SOL`
+      } SOL`,
     );
     console.log(
       `     - Combined note 2: ${
         Number(combinedNote2.amount) / LAMPORTS_PER_SOL
-      } SOL`
+      } SOL`,
     );
     console.log(
       `     Total: ${
         Number(combinedNote1.amount + combinedNote2.amount) / LAMPORTS_PER_SOL
-      } SOL`
+      } SOL`,
     );
     console.log("\n   Outputs:");
     console.log(
-      `     - Withdrawal: ${Number(withdrawAmount) / LAMPORTS_PER_SOL} SOL`
+      `     - Withdrawal: ${Number(withdrawAmount) / LAMPORTS_PER_SOL} SOL`,
     );
     console.log(
-      `     - Change: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL`
+      `     - Change: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL`,
     );
     console.log(`     - Fee: ${Number(withdrawFee) / LAMPORTS_PER_SOL} SOL`);
     console.log(
-      `     - Net to recipient: ${Number(toRecipient) / LAMPORTS_PER_SOL} SOL\n`
+      `     - Net to recipient: ${
+        Number(toRecipient) / LAMPORTS_PER_SOL
+      } SOL\n`,
     );
 
     const nullifier1 = computeNullifier(
       poseidon,
       combinedNote1.commitment,
       combinedNote1.leafIndex,
-      combinedNote1.privateKey
+      combinedNote1.privateKey,
     );
     const nullifier2 = computeNullifier(
       poseidon,
       combinedNote2.commitment,
       combinedNote2.leafIndex,
-      combinedNote2.privateKey
+      combinedNote2.privateKey,
     );
 
     const changePrivateKey = randomBytes32();
@@ -2832,7 +2833,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       changeAmount,
       changePublicKey,
       changeBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyOutPrivKey = randomBytes32();
@@ -2843,7 +2844,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutPubKey,
       dummyOutBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const extDataWithdraw = {
@@ -2886,18 +2887,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       batchWithdrawInputTreeId,
-      nullifier1
+      nullifier1,
     );
     const nullifierMarker2 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       batchWithdrawInputTreeId,
-      nullifier2
+      nullifier2,
     );
 
     const beforeVault = BigInt(await provider.connection.getBalance(vault));
     const beforeRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const withdrawTx = await (program.methods as any)
@@ -2913,7 +2914,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(changeCommitment),
         Array.from(dummyOutCommitment),
         extDataWithdraw,
-        withdrawProof
+        withdrawProof,
       )
       .accounts({
         config,
@@ -2947,7 +2948,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     withdrawTransaction.add(
       withdrawComputeUnits,
       withdrawPriorityFee,
-      withdrawTx
+      withdrawTx,
     );
     await provider.sendAndConfirm(withdrawTransaction, [withdrawRelayer]);
 
@@ -2956,7 +2957,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     const afterVault = BigInt(await provider.connection.getBalance(vault));
     const afterRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const vaultPaid = beforeVault - afterVault;
@@ -2968,35 +2969,35 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `   Recipient received: ${
         Number(recipientReceived) / LAMPORTS_PER_SOL
-      } SOL`
+      } SOL`,
     );
     console.log(
-      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`
+      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`,
     );
 
     if (vaultPaid !== withdrawAmount) {
       throw new Error(
-        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`,
       );
     }
 
     console.log("🎉 4-Note Batch Proof Generation Success!");
     console.log("   ✅ Step 1: Created 4 deposit notes (1, 2, 3, 8 SOL)");
     console.log(
-      "   ✅ Step 2: Generated ALL combine proofs in parallel (batch proof gen)"
+      "   ✅ Step 2: Generated ALL combine proofs in parallel (batch proof gen)",
     );
     console.log("   ✅ Step 2b: Submitted combine transactions sequentially");
     console.log(
-      `   ✅ Step 3: Withdrew 13 SOL from 2 combined notes, kept 1 SOL change`
+      `   ✅ Step 3: Withdrew 13 SOL from 2 combined notes, kept 1 SOL change`,
     );
     console.log("   ✅ Total: 4 original deposits → 13 SOL withdrawal");
     console.log("   ✅ All done with 2-in-2-out constraint!");
     console.log("   ✅ Privacy preserved across all transactions");
     console.log(
-      "   ⚡ Batch proof generation: Proofs generated offline in parallel!"
+      "   ⚡ Batch proof generation: Proofs generated offline in parallel!",
     );
     console.log(
-      "   💡 This mimics wallet extension workflow: user generates all proofs locally\n"
+      "   💡 This mimics wallet extension workflow: user generates all proofs locally\n",
     );
   });
 
@@ -3038,10 +3039,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     console.log("   🔐 User generates secrets locally (NEVER shared):");
     console.log(
-      `      Note 1: ${Number(userNote1.amount) / LAMPORTS_PER_SOL} SOL`
+      `      Note 1: ${Number(userNote1.amount) / LAMPORTS_PER_SOL} SOL`,
     );
     console.log(
-      `      Note 2: ${Number(userNote2.amount) / LAMPORTS_PER_SOL} SOL`
+      `      Note 2: ${Number(userNote2.amount) / LAMPORTS_PER_SOL} SOL`,
     );
     console.log("      Private keys: [HIDDEN]\n");
 
@@ -3054,7 +3055,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       userNote1.amount,
       userNote1.publicKey,
       userNote1.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const commitment2 = computeCommitment(
@@ -3062,7 +3063,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       userNote2.amount,
       userNote2.publicKey,
       userNote2.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Dummy outputs for deposits
@@ -3074,7 +3075,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyDeposit1PubKey,
       dummyDeposit1Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyDeposit2PrivKey = randomBytes32();
@@ -3085,7 +3086,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyDeposit2PubKey,
       dummyDeposit2Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Dummy inputs for deposits
@@ -3101,13 +3102,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyIn0.publicKey,
       dummyIn0.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyIn0Nullifier = computeNullifier(
       poseidon,
       dummyIn0Commitment,
       0,
-      dummyIn0.privateKey
+      dummyIn0.privateKey,
     );
 
     const dummyIn1PrivKey = randomBytes32();
@@ -3122,13 +3123,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyIn1.publicKey,
       dummyIn1.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyIn1Nullifier = computeNullifier(
       poseidon,
       dummyIn1Commitment,
       0,
-      dummyIn1.privateKey
+      dummyIn1.privateKey,
     );
 
     const dummyIn2PrivKey = randomBytes32();
@@ -3143,13 +3144,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyIn2.publicKey,
       dummyIn2.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyIn2Nullifier = computeNullifier(
       poseidon,
       dummyIn2Commitment,
       0,
-      dummyIn2.privateKey
+      dummyIn2.privateKey,
     );
 
     const dummyIn3PrivKey = randomBytes32();
@@ -3164,13 +3165,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyIn3.publicKey,
       dummyIn3.blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyIn3Nullifier = computeNullifier(
       poseidon,
       dummyIn3Commitment,
       0,
-      dummyIn3.privateKey
+      dummyIn3.privateKey,
     );
 
     // User wallet for deposits
@@ -3225,7 +3226,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     });
 
     console.log(
-      "   📝 Generating Deposit Proof #2 (Note: uses same root - relies on zero-path)..."
+      "   📝 Generating Deposit Proof #2 (Note: uses same root - relies on zero-path)...",
     );
     const deposit2Proof = await generateTransactionProof({
       root: initialRoot, // Same initial root - deposits use zero-path proofs
@@ -3258,13 +3259,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       commitment1,
       predictedLeafIndex1,
-      userNote1.privateKey
+      userNote1.privateKey,
     );
     const nullifier2 = computeNullifier(
       poseidon,
       commitment2,
       predictedLeafIndex2,
-      userNote2.privateKey
+      userNote2.privateKey,
     );
 
     const changePrivateKey = randomBytes32();
@@ -3275,7 +3276,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       changeAmount,
       changePublicKey,
       changeBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyOutPrivKey = randomBytes32();
@@ -3286,7 +3287,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutPubKey,
       dummyOutBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const extDataWithdraw = {
@@ -3298,7 +3299,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
     console.log(
-      "   📝 Simulating tree state after both deposits for withdrawal proof..."
+      "   📝 Simulating tree state after both deposits for withdrawal proof...",
     );
 
     // Simulate BOTH deposits in local tree
@@ -3310,17 +3311,17 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Verify our predictions match
     if (actualLeafIndex1 !== predictedLeafIndex1) {
       throw new Error(
-        `Leaf index mismatch: predicted ${predictedLeafIndex1}, got ${actualLeafIndex1}`
+        `Leaf index mismatch: predicted ${predictedLeafIndex1}, got ${actualLeafIndex1}`,
       );
     }
     if (actualLeafIndex2 !== predictedLeafIndex2) {
       throw new Error(
-        `Leaf index mismatch: predicted ${predictedLeafIndex2}, got ${actualLeafIndex2}`
+        `Leaf index mismatch: predicted ${predictedLeafIndex2}, got ${actualLeafIndex2}`,
       );
     }
 
     console.log(
-      "   📝 Generating Withdrawal Proof (with predicted future tree state)..."
+      "   📝 Generating Withdrawal Proof (with predicted future tree state)...",
     );
 
     // Get Merkle paths from simulated tree
@@ -3350,7 +3351,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     console.log(`   ✅ Got Merkle paths (depth: ${path1.pathElements.length})`);
     console.log(
-      `   ✅ Path 1 elements: ${path1.pathElements.length}, Path 2 elements: ${path2.pathElements.length}`
+      `   ✅ Path 1 elements: ${path1.pathElements.length}, Path 2 elements: ${path2.pathElements.length}`,
     );
 
     // Debug blindings
@@ -3393,12 +3394,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       relayerWallet.publicKey,
-      10 * LAMPORTS_PER_SOL
+      10 * LAMPORTS_PER_SOL,
     );
     await airdropAndConfirm(
       provider,
       withdrawRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     await (program.methods as any)
@@ -3409,16 +3410,16 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(`   Relayer: ${relayerWallet.publicKey.toBase58()}`);
     console.log("   ✅ Relayer registered");
     console.log(
-      "   💰 Relayer has funds to deposit (simulated via airdrop in test)"
+      "   💰 Relayer has funds to deposit (simulated via airdrop in test)",
     );
     console.log(
-      "   ⚠️  Note: In production, user must transfer SOL to relayer first"
+      "   ⚠️  Note: In production, user must transfer SOL to relayer first",
     );
     console.log(
-      "      (off-chain via CEX, or on-chain which requires ONE user signature)"
+      "      (off-chain via CEX, or on-chain which requires ONE user signature)",
     );
     console.log(
-      "   ✅ For deposits: Relayer signs blockchain transactions (user doesn't)\n"
+      "   ✅ For deposits: Relayer signs blockchain transactions (user doesn't)\n",
     );
 
     // Transaction 1: Deposit #1
@@ -3429,13 +3430,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       userSessionInputTreeId,
-      dummyIn0Nullifier
+      dummyIn0Nullifier,
     );
     const nullifierMarker1_d1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       userSessionInputTreeId,
-      dummyIn1Nullifier
+      dummyIn1Nullifier,
     );
 
     const deposit1Tx = await (program.methods as any)
@@ -3451,7 +3452,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(commitment1),
         Array.from(dummyDeposit1Commitment),
         extDataDeposit1,
-        deposit1Proof
+        deposit1Proof,
       )
       .accounts({
         config,
@@ -3492,20 +3493,20 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Transaction 2: Deposit #2
     console.log("   📡 Tx 2: Submitting Deposit #2...");
     console.log(
-      "   💡 Using same initial root (zero-path proofs work with any root)"
+      "   💡 Using same initial root (zero-path proofs work with any root)",
     );
 
     const nullifierMarker0_d2 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       userSessionInputTreeId,
-      dummyIn2Nullifier
+      dummyIn2Nullifier,
     );
     const nullifierMarker1_d2 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       userSessionInputTreeId,
-      dummyIn3Nullifier
+      dummyIn3Nullifier,
     );
 
     const deposit2Tx = await (program.methods as any)
@@ -3521,7 +3522,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(commitment2),
         Array.from(dummyDeposit2Commitment),
         extDataDeposit2,
-        deposit2Proof
+        deposit2Proof,
       )
       .accounts({
         config,
@@ -3565,14 +3566,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   📡 Tx 3: Submitting Withdrawal...");
 
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
 
     // Verify predicted root matches actual root
     if (Buffer.compare(predictedRoot, onchainRoot) !== 0) {
       throw new Error(
-        "Root mismatch! User's prediction doesn't match actual tree state"
+        "Root mismatch! User's prediction doesn't match actual tree state",
       );
     }
 
@@ -3583,18 +3584,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       userWithdrawInputTreeId,
-      nullifier1
+      nullifier1,
     );
     const nullifierMarker2 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       userWithdrawInputTreeId,
-      nullifier2
+      nullifier2,
     );
 
     const beforeVault = BigInt(await provider.connection.getBalance(vault));
     const beforeRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const withdrawTx = await (program.methods as any)
@@ -3610,7 +3611,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(changeCommitment),
         Array.from(dummyOutCommitment),
         extDataWithdraw,
-        withdrawProof
+        withdrawProof,
       )
       .accounts({
         config,
@@ -3649,7 +3650,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     const afterVault = BigInt(await provider.connection.getBalance(vault));
     const afterRecipient = BigInt(
-      await provider.connection.getBalance(withdrawRecipient.publicKey)
+      await provider.connection.getBalance(withdrawRecipient.publicKey),
     );
 
     const vaultPaid = beforeVault - afterVault;
@@ -3662,15 +3663,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `   Recipient received: ${
         Number(recipientReceived) / LAMPORTS_PER_SOL
-      } SOL`
+      } SOL`,
     );
     console.log(
-      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`
+      `   Change created: ${Number(changeAmount) / LAMPORTS_PER_SOL} SOL\n`,
     );
 
     if (vaultPaid !== withdrawAmount) {
       throw new Error(
-        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`
+        `Vault mismatch: expected ${withdrawAmount}, got ${vaultPaid}`,
       );
     }
 
@@ -3681,15 +3682,15 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("      - Predicted future tree state correctly");
     console.log("   2. User transfers SOL to relayer (production options):");
     console.log(
-      "      - Off-chain: CEX transfer, cash, etc. (no on-chain trace)"
+      "      - Off-chain: CEX transfer, cash, etc. (no on-chain trace)",
     );
     console.log(
-      "      - On-chain: Direct transfer (requires ONE user signature)"
+      "      - On-chain: Direct transfer (requires ONE user signature)",
     );
     console.log("      - Test: Simulated via airdrop");
     console.log("   3. Relayer submitted ALL 3 privacy pool transactions");
     console.log(
-      "      - Signed deposits & withdrawal (user didn't sign these!)"
+      "      - Signed deposits & withdrawal (user didn't sign these!)",
     );
     console.log("      - Deposited on behalf of user");
     console.log("      - Withdrew to user's recipient address");
@@ -3700,7 +3701,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   ✅ User NEVER signs privacy pool transactions");
     console.log("   ✅ User only online ONCE to generate all proofs");
     console.log(
-      "   ✅ Relayer handles ALL privacy pool blockchain interaction"
+      "   ✅ Relayer handles ALL privacy pool blockchain interaction",
     );
     console.log("   ✅ User's secrets never leave their device");
     console.log("   ✅ User's deposit wallet can remain off-chain (via CEX)");
@@ -3710,7 +3711,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
   it("creates a second tree and uses cross-tree transactions", async () => {
     console.log("\n🌳 Cross-Tree Transaction Test:\n");
     console.log(
-      "Testing multi-tree architecture with separate input/output trees"
+      "Testing multi-tree architecture with separate input/output trees",
     );
 
     // Step 1: Fetch current config to get next sequential tree ID
@@ -3718,7 +3719,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const currentConfig = await program.account.privacyConfig.fetch(config);
     const destinationTreeId = currentConfig.numTrees;
     console.log(
-      `\n📥 Step 1: Adding fresh output Merkle tree (tree_id = ${destinationTreeId})...`
+      `\n📥 Step 1: Adding fresh output Merkle tree (tree_id = ${destinationTreeId})...`,
     );
 
     const [noteTreeDestination] = PublicKey.findProgramAddressSync(
@@ -3727,7 +3728,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         SOL_MINT.toBuffer(),
         encodeTreeId(destinationTreeId),
       ],
-      program.programId
+      program.programId,
     );
 
     // Create the tree
@@ -3742,7 +3743,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         })
         .rpc();
       console.log(
-        `✅ Destination tree created successfully: ${noteTreeDestination.toBase58()}`
+        `✅ Destination tree created successfully: ${noteTreeDestination.toBase58()}`,
       );
     } catch (e) {
       // Should not happen with random ID, but log if it does
@@ -3766,7 +3767,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       depositAmount,
       publicKey,
       blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyOutputPrivKey = randomBytes32();
@@ -3777,7 +3778,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutputPubKey,
       dummyOutputBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Predict the leaf index where commitment will be inserted in Tree 0
@@ -3789,7 +3790,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       commitment,
       commitmentLeafIndex,
-      privateKey
+      privateKey,
     );
 
     // Generate dummy inputs for deposit
@@ -3805,32 +3806,32 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey0,
       dummyBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyCommitment1 = computeCommitment(
       poseidon,
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyNullifier0 = computeNullifier(
       poseidon,
       dummyCommitment0,
       0,
-      dummyPrivKey0
+      dummyPrivKey0,
     );
     const dummyNullifier1 = computeNullifier(
       poseidon,
       dummyCommitment1,
       0,
-      dummyPrivKey1
+      dummyPrivKey1,
     );
 
     // Fetch current on-chain root of Tree 0
     const noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     const onchainRoot = extractRootFromAccount(noteTreeAcc);
     const onchainNextIndex = noteTreeAcc.nextIndex.toNumber();
@@ -3880,7 +3881,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(
       `📍 Inserted commitments into offchain tree at indices ${commitmentLeafIndex}, ${
         commitmentLeafIndex + 1
-      }`
+      }`,
     );
 
     const crossTreeDepositInputTreeId = 0;
@@ -3888,13 +3889,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       crossTreeDepositInputTreeId,
-      dummyNullifier0
+      dummyNullifier0,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       crossTreeDepositInputTreeId,
-      dummyNullifier1
+      dummyNullifier1,
     );
 
     const depositTx = await (program.methods as any)
@@ -3910,7 +3911,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(commitment),
         Array.from(dummyOutputCommitment),
         extDataDeposit,
-        depositProof
+        depositProof,
       )
       .accounts({
         config,
@@ -3963,10 +3964,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     if (offchainRootHex !== onchainRootHex) {
       console.log(
-        "⚠️ Roots mismatch for Tree 0 (likely due to shared state from previous tests)"
+        "⚠️ Roots mismatch for Tree 0 (likely due to shared state from previous tests)",
       );
       console.log(
-        "   Using offchain root for consistency with local tree tracking"
+        "   Using offchain root for consistency with local tree tracking",
       );
     } else {
       console.log("✅ Roots match!");
@@ -3985,7 +3986,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Step 3: Transfer from Tree 0 -> Destination Tree (Fresh Tree)
     console.log(
-      `\n🔄 Step 3: Cross-tree transfer (input: Tree 0, output: destination tree ${destinationTreeId})...`
+      `\n🔄 Step 3: Cross-tree transfer (input: Tree 0, output: destination tree ${destinationTreeId})...`,
     );
 
     // Create new output commitment for Destination tree
@@ -3997,7 +3998,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       depositAmount,
       outputPubKey,
       outputBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyOutput2PrivKey = randomBytes32();
@@ -4008,7 +4009,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOutput2PubKey,
       dummyOutput2Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Create NEW dummy nullifier for second input
@@ -4020,13 +4021,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey2,
       dummyBlinding2,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyNullifier2 = computeNullifier(
       poseidon,
       dummyCommitment2,
       0,
-      dummyPrivKey2
+      dummyPrivKey2,
     );
 
     // Get merkle path from Tree 0
@@ -4067,13 +4068,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       crossTreeInputTreeId,
-      nullifier
+      nullifier,
     );
     const dummyNullifierMarker = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       crossTreeInputTreeId,
-      dummyNullifier2
+      dummyNullifier2,
     );
 
     const crossTreeTx = await (program.methods as any)
@@ -4089,7 +4090,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(outputCommitment),
         Array.from(dummyOutput2Commitment),
         extDataTransfer,
-        transferProof
+        transferProof,
       )
       .accounts({
         config,
@@ -4127,21 +4128,21 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Verify leaves in output tree (Destination)
     const destTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTreeDestination
+      noteTreeDestination,
     );
 
     console.log(`\n📊 Verification:`);
     console.log(`   Destination Tree ID: ${destinationTreeId}`);
     console.log(
-      `   Offchain Destination Tree NextIndex: ${offchainTreeDestination.nextIndex}`
+      `   Offchain Destination Tree NextIndex: ${offchainTreeDestination.nextIndex}`,
     );
     // Note: Due to struct padding issues in account deserialization,
     // nextIndex.toNumber() returns garbage values. We track this via offchain tree instead.
     console.log(
-      `   Destination tree: 2 outputs inserted (tracked via offchain tree)`
+      `   Destination tree: 2 outputs inserted (tracked via offchain tree)`,
     );
     console.log(
-      `   ⚠️  On-chain nextIndex shows: ${destTreeAcc.nextIndex.toNumber()} (deserialization bug)`
+      `   ⚠️  On-chain nextIndex shows: ${destTreeAcc.nextIndex.toNumber()} (deserialization bug)`,
     );
 
     // =============================================================================
@@ -4153,7 +4154,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Test 1: Try to spend commitment from Destination Tree using Tree 0 as input
     console.log(
-      `   Test 1: Attempting to spend commitment from Tree ${destinationTreeId} using Tree 0...`
+      `   Test 1: Attempting to spend commitment from Tree ${destinationTreeId} using Tree 0...`,
     );
 
     // The outputCommitment is in destination tree at index 0
@@ -4162,12 +4163,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       outputCommitment,
       outputCommitmentLeafIndex,
-      outputPrivKey
+      outputPrivKey,
     );
 
     // Get merkle path from DESTINATION tree (where commitment actually is)
     const destTreePath = offchainTreeDestination.getMerkleProof(
-      outputCommitmentLeafIndex
+      outputCommitmentLeafIndex,
     );
 
     // Fetch roots
@@ -4185,7 +4186,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       withdrawRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     const extDataWithdraw = {
@@ -4205,13 +4206,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyWithdrawPubKey,
       dummyWithdrawBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyWithdrawNullifier = computeNullifier(
       poseidon,
       dummyWithdrawCommitment,
       0,
-      dummyWithdrawPrivKey
+      dummyWithdrawPrivKey,
     );
 
     // Create dummy outputs
@@ -4223,7 +4224,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOut1PubKey,
       dummyOut1Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const dummyOut2PrivKey = randomBytes32();
@@ -4234,7 +4235,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyOut2PubKey,
       dummyOut2Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     try {
@@ -4268,13 +4269,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         program.programId,
         SOL_MINT,
         wrongTreeInputId,
-        outputNullifier
+        outputNullifier,
       );
       const wrongNullifierMarker1 = deriveNullifierMarkerPDA(
         program.programId,
         SOL_MINT,
         wrongTreeInputId,
-        dummyWithdrawNullifier
+        dummyWithdrawNullifier,
       );
 
       const wrongTreeTx = await (program.methods as any)
@@ -4290,7 +4291,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyOut1Commitment),
           Array.from(dummyOut2Commitment),
           extDataWithdraw,
-          wrongTreeProof
+          wrongTreeProof,
         )
         .accounts({
           config,
@@ -4318,7 +4319,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       await provider.sendAndConfirm(wrongTreeTransaction, [user]);
 
       console.log(
-        `   ❌ SECURITY FAILURE: Should have rejected spending from wrong tree!`
+        `   ❌ SECURITY FAILURE: Should have rejected spending from wrong tree!`,
       );
       throw new Error("Security vulnerability: cross-tree spending allowed!");
     } catch (e: any) {
@@ -4327,24 +4328,24 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         e.message.includes("Assert Failed")
       ) {
         console.log(
-          `   ✅ Proof generation FAILED (merkle path doesn't match root)`
+          `   ✅ Proof generation FAILED (merkle path doesn't match root)`,
         );
         console.log(
-          `   ✅ Circuit correctly enforces: commitment must be in specified tree`
+          `   ✅ Circuit correctly enforces: commitment must be in specified tree`,
         );
       } else if (e.message.includes("Security vulnerability")) {
         throw e; // Re-throw if it's our custom error
       } else {
         console.log(`   ✅ Transaction REJECTED by program validation`);
         console.log(
-          `   ✅ On-chain protection: merkle proof verification failed`
+          `   ✅ On-chain protection: merkle proof verification failed`,
         );
       }
     }
 
     // Test 2: Add a new commitment to Tree 0, try to spend it via Destination Tree
     console.log(
-      `\n   Test 2: Adding commitment to Tree 0, attempting to spend via Tree ${destinationTreeId}...`
+      `\n   Test 2: Adding commitment to Tree 0, attempting to spend via Tree ${destinationTreeId}...`,
     );
 
     const tree0PrivKey = randomBytes32();
@@ -4355,14 +4356,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       depositAmount,
       tree0PubKey,
       tree0Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Create dummy output for deposit (reuse existing values)
     const dummyTree0OutputPrivKey = randomBytes32();
     const dummyTree0OutputPubKey = derivePublicKey(
       poseidon,
-      dummyTree0OutputPrivKey
+      dummyTree0OutputPrivKey,
     );
     const dummyTree0OutputBlinding = randomBytes32();
     const dummyTree0Output = computeCommitment(
@@ -4370,14 +4371,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyTree0OutputPubKey,
       dummyTree0OutputBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Create dummy inputs for deposit (generate once and reuse)
     const dummyDepositIn0PrivKey = randomBytes32();
     const dummyDepositIn0PubKey = derivePublicKey(
       poseidon,
-      dummyDepositIn0PrivKey
+      dummyDepositIn0PrivKey,
     );
     const dummyDepositIn0Blinding = randomBytes32();
     const dummyDepositIn0Commitment = computeCommitment(
@@ -4385,19 +4386,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyDepositIn0PubKey,
       dummyDepositIn0Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyDepositIn0Nullifier = computeNullifier(
       poseidon,
       dummyDepositIn0Commitment,
       0,
-      dummyDepositIn0PrivKey
+      dummyDepositIn0PrivKey,
     );
 
     const dummyDepositIn1PrivKey = randomBytes32();
     const dummyDepositIn1PubKey = derivePublicKey(
       poseidon,
-      dummyDepositIn1PrivKey
+      dummyDepositIn1PrivKey,
     );
     const dummyDepositIn1Blinding = randomBytes32();
     const dummyDepositIn1Commitment = computeCommitment(
@@ -4405,13 +4406,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyDepositIn1PubKey,
       dummyDepositIn1Blinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyDepositIn1Nullifier = computeNullifier(
       poseidon,
       dummyDepositIn1Commitment,
       0,
-      dummyDepositIn1PrivKey
+      dummyDepositIn1PrivKey,
     );
 
     // Predict leaf index in Tree 0
@@ -4443,13 +4444,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       tree0DepositInputTreeId,
-      dummyDepositIn0Nullifier
+      dummyDepositIn0Nullifier,
     );
     const tree0DepositNull1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       tree0DepositInputTreeId,
-      dummyDepositIn1Nullifier
+      dummyDepositIn1Nullifier,
     );
 
     // Deposit to Tree 0
@@ -4466,7 +4467,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(tree0Commitment),
         Array.from(dummyTree0Output),
         extDataDeposit,
-        tree0DepositProof
+        tree0DepositProof,
       )
       .accounts({
         config,
@@ -4493,7 +4494,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     tree0DepositTransaction.add(
       modifyComputeUnits,
       addPriorityFee,
-      tree0DepositTx
+      tree0DepositTx,
     );
     await provider.sendAndConfirm(tree0DepositTransaction, [user]);
 
@@ -4501,7 +4502,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     offchainTree.insert(dummyTree0Output);
 
     console.log(
-      `   ✅ New commitment added to Tree 0 at index ${tree0LeafIndex}`
+      `   ✅ New commitment added to Tree 0 at index ${tree0LeafIndex}`,
     );
 
     // Now try to spend it via Destination Tree
@@ -4509,7 +4510,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       tree0Commitment,
       tree0LeafIndex,
-      tree0PrivKey
+      tree0PrivKey,
     );
     const tree0Path = offchainTree.getMerkleProof(tree0LeafIndex);
     const updatedTree0Root = offchainTree.getRoot();
@@ -4543,13 +4544,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         program.programId,
         SOL_MINT,
         destinationTreeId,
-        tree0Nullifier
+        tree0Nullifier,
       );
       const wrongNullifierMarker3 = deriveNullifierMarkerPDA(
         program.programId,
         SOL_MINT,
         destinationTreeId,
-        dummyWithdrawNullifier
+        dummyWithdrawNullifier,
       );
 
       const wrongTreeTx2 = await (program.methods as any)
@@ -4565,7 +4566,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyOut1Commitment),
           Array.from(dummyOut2Commitment),
           extDataWithdraw,
-          wrongTreeProof2
+          wrongTreeProof2,
         )
         .accounts({
           config,
@@ -4592,12 +4593,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       wrongTreeTransaction2.add(
         modifyComputeUnits,
         addPriorityFee,
-        wrongTreeTx2
+        wrongTreeTx2,
       );
       await provider.sendAndConfirm(wrongTreeTransaction2, [user]);
 
       console.log(
-        `   ❌ SECURITY FAILURE: Should have rejected spending from wrong tree!`
+        `   ❌ SECURITY FAILURE: Should have rejected spending from wrong tree!`,
       );
       throw new Error("Security vulnerability: cross-tree spending allowed!");
     } catch (e: any) {
@@ -4606,27 +4607,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         e.message.includes("Assert Failed")
       ) {
         console.log(
-          `   ✅ Proof generation FAILED (merkle path doesn't match root)`
+          `   ✅ Proof generation FAILED (merkle path doesn't match root)`,
         );
         console.log(
-          `   ✅ Circuit correctly enforces: commitment must be in specified tree`
+          `   ✅ Circuit correctly enforces: commitment must be in specified tree`,
         );
       } else if (e.message.includes("Security vulnerability")) {
         throw e; // Re-throw if it's our custom error
       } else {
         console.log(`   ✅ Transaction REJECTED by program validation`);
         console.log(
-          `   ✅ On-chain protection: merkle proof verification failed`
+          `   ✅ On-chain protection: merkle proof verification failed`,
         );
       }
     }
 
     console.log(`\n✅ Tree Isolation Security Test Passed!`);
     console.log(
-      `   ✅ Commitments in Tree 0 cannot be spent via Tree ${destinationTreeId}`
+      `   ✅ Commitments in Tree 0 cannot be spent via Tree ${destinationTreeId}`,
     );
     console.log(
-      `   ✅ Commitments in Tree ${destinationTreeId} cannot be spent via Tree 0`
+      `   ✅ Commitments in Tree ${destinationTreeId} cannot be spent via Tree 0`,
     );
     console.log(`   ✅ Each tree maintains independent state and security`);
   });
@@ -4660,7 +4661,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       aliceDepositAmount,
       alicePublicKey,
       aliceBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const aliceDummyOutput = randomBytes32();
@@ -4671,7 +4672,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       aliceDummyPubKey,
       aliceDummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Remember the index where Alice's commitment will be (but don't insert yet)
@@ -4681,7 +4682,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       aliceCommitment,
       aliceLeafIndex,
-      alicePrivateKey
+      alicePrivateKey,
     );
 
     // Generate deposit proof for Alice
@@ -4696,26 +4697,26 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       dummyPubKey0,
       dummyBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyCommitment1 = computeCommitment(
       poseidon,
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
     const dummyNullifier0 = computeNullifier(
       poseidon,
       dummyCommitment0,
       0,
-      dummyPrivKey0
+      dummyPrivKey0,
     );
     const dummyNullifier1 = computeNullifier(
       poseidon,
       dummyCommitment1,
       0,
-      dummyPrivKey1
+      dummyPrivKey1,
     );
 
     const extDataDeposit = {
@@ -4759,13 +4760,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       privateTransferInputTreeId,
-      dummyNullifier0
+      dummyNullifier0,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       privateTransferInputTreeId,
-      dummyNullifier1
+      dummyNullifier1,
     );
 
     const depositTx = await (program.methods as any)
@@ -4781,7 +4782,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(aliceCommitment),
         Array.from(aliceDummyCommitment),
         extDataDeposit,
-        depositProof
+        depositProof,
       )
       .accounts({
         config,
@@ -4826,12 +4827,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Verify prediction was correct
     if (actualAliceLeafIndex !== aliceLeafIndex) {
       throw new Error(
-        `Alice leaf index mismatch: predicted ${aliceLeafIndex}, got ${actualAliceLeafIndex}`
+        `Alice leaf index mismatch: predicted ${aliceLeafIndex}, got ${actualAliceLeafIndex}`,
       );
     }
 
     console.log(
-      `✅ Alice deposited ${aliceDepositAmount} lamports (Leaf ${actualAliceLeafIndex})\n`
+      `✅ Alice deposited ${aliceDepositAmount} lamports (Leaf ${actualAliceLeafIndex})\n`,
     );
 
     // =============================================================================
@@ -4843,12 +4844,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Create and register a separate relayer (for enhanced privacy)
     const transferRelayer = Keypair.generate();
     console.log(
-      `   Relayer: ${transferRelayer.publicKey.toBase58()} (will sign tx)`
+      `   Relayer: ${transferRelayer.publicKey.toBase58()} (will sign tx)`,
     );
     await airdropAndConfirm(
       provider,
       transferRelayer.publicKey,
-      1 * LAMPORTS_PER_SOL
+      1 * LAMPORTS_PER_SOL,
     );
 
     // Register the relayer
@@ -4858,7 +4859,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       .rpc();
 
     console.log(
-      "   ✅ Relayer registered (Alice will send proof to relayer off-chain)\n"
+      "   ✅ Relayer registered (Alice will send proof to relayer off-chain)\n",
     );
 
     // Bob generates his keypair (only Bob has this private key)
@@ -4866,10 +4867,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const bobPublicKey = derivePublicKey(poseidon, bobPrivateKey);
     const bobBlinding = randomBytes32();
     console.log(
-      `   Bob (recipient): ${Keypair.generate().publicKey.toBase58()} (for display only)`
+      `   Bob (recipient): ${Keypair.generate().publicKey.toBase58()} (for display only)`,
     );
     console.log(
-      `   ⚠️  Bob's real identity hidden - only commitment visible on-chain\n`
+      `   ⚠️  Bob's real identity hidden - only commitment visible on-chain\n`,
     );
 
     // Transfer amounts
@@ -4882,7 +4883,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(`   Output 2: Alice keeps ${changeAmount} lamports (change)`);
     console.log(`   On-chain trace: NONE - fully private! 🎭`);
     console.log(
-      `   🔐 Privacy: Relayer signs tx, Alice's wallet never appears on-chain!\n`
+      `   🔐 Privacy: Relayer signs tx, Alice's wallet never appears on-chain!\n`,
     );
 
     // Create Alice's change note (new privateKey for security)
@@ -4896,7 +4897,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       transferAmount,
       bobPublicKey,
       bobBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const aliceChangeCommitment = computeCommitment(
@@ -4904,7 +4905,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       changeAmount,
       aliceChangePubKey,
       aliceChangeBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Generate dummy input (2-in-2-out requirement)
@@ -4916,13 +4917,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       transferDummyPubKey,
       transferDummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const transferDummyNullifier = computeNullifier(
       poseidon,
       transferDummyCommitment,
       0,
-      transferDummyPrivKey
+      transferDummyPrivKey,
     );
 
     // Prepare transaction (publicAmount = 0 for pure transfer, no deposit/withdrawal)
@@ -4936,7 +4937,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
 
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
 
@@ -4946,7 +4947,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("🔐 Alice generates proof locally (off-chain):");
     console.log("   ✅ Alice computes ZK proof with her private key (locally)");
     console.log(
-      "   ✅ Alice sends proof + public inputs to relayer (off-chain)"
+      "   ✅ Alice sends proof + public inputs to relayer (off-chain)",
     );
     console.log("   ✅ Relayer will sign and submit transaction (on-chain)\n");
 
@@ -4982,13 +4983,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       transferInputTreeId,
-      aliceNullifier
+      aliceNullifier,
     );
     const transferDummyNullifierMarker = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       transferInputTreeId,
-      transferDummyNullifier
+      transferDummyNullifier,
     );
 
     const transferTx = await (program.methods as any)
@@ -5004,7 +5005,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(bobCommitment),
         Array.from(aliceChangeCommitment),
         extDataTransfer,
-        transferProof
+        transferProof,
       )
       .accounts({
         config,
@@ -5044,7 +5045,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log(`   Signer: ${transferRelayer.publicKey.toBase58()} (relayer)`);
     console.log("   ✅ Alice's wallet NEVER appears on-chain");
     console.log(
-      "   ✅ On-chain observer sees: relayer submits anonymous transfer\n"
+      "   ✅ On-chain observer sees: relayer submits anonymous transfer\n",
     );
 
     await provider.sendAndConfirm(transferTransaction, [transferRelayer]);
@@ -5056,25 +5057,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("✅ Private transfer complete!\n");
     console.log("📦 Notes Created:");
     console.log(
-      `   Bob's note: ${transferAmount} lamports (Leaf ${bobLeafIndex})`
+      `   Bob's note: ${transferAmount} lamports (Leaf ${bobLeafIndex})`,
     );
     console.log(
-      `   Alice's change: ${changeAmount} lamports (Leaf ${aliceChangeLeafIndex})`
+      `   Alice's change: ${changeAmount} lamports (Leaf ${aliceChangeLeafIndex})`,
     );
     console.log(
-      `   🔒 Bob needs his secrets to spend (Alice sends these off-chain)\n`
+      `   🔒 Bob needs his secrets to spend (Alice sends these off-chain)\n`,
     );
 
     console.log("🎭 Privacy Benefits:");
     console.log(
-      "   ✅ Alice generated proof with her private key (proves ownership)"
+      "   ✅ Alice generated proof with her private key (proves ownership)",
     );
     console.log(
-      "   ✅ Relayer signed transaction (Alice's wallet never on-chain)"
+      "   ✅ Relayer signed transaction (Alice's wallet never on-chain)",
     );
     console.log("   ✅ Bob receives note without on-chain link to Alice");
     console.log(
-      "   ✅ On-chain: only see nullifiers + commitments (no identities!)\n"
+      "   ✅ On-chain: only see nullifiers + commitments (no identities!)\n",
     );
 
     // =============================================================================
@@ -5088,12 +5089,12 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       bobCommitment,
       bobLeafIndex,
-      alicePrivateKey // Alice tries to use her own key - WRONG!
+      alicePrivateKey, // Alice tries to use her own key - WRONG!
     );
 
     // Get current on-chain state
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
     const bobPathForAliceAttempt = offchainTree.getMerkleProof(bobLeafIndex);
@@ -5102,7 +5103,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const aliceAttemptDummyPrivKey = randomBytes32();
     const aliceAttemptDummyPubKey = derivePublicKey(
       poseidon,
-      aliceAttemptDummyPrivKey
+      aliceAttemptDummyPrivKey,
     );
     const aliceAttemptDummyBlinding = randomBytes32();
     const aliceAttemptDummyCommitment = computeCommitment(
@@ -5110,19 +5111,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       aliceAttemptDummyPubKey,
       aliceAttemptDummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const aliceAttemptDummyNullifier = computeNullifier(
       poseidon,
       aliceAttemptDummyCommitment,
       0,
-      aliceAttemptDummyPrivKey
+      aliceAttemptDummyPrivKey,
     );
 
     const aliceAttemptDummyOutput0 = randomBytes32();
     const aliceAttemptDummyOutputPubKey0 = derivePublicKey(
       poseidon,
-      aliceAttemptDummyOutput0
+      aliceAttemptDummyOutput0,
     );
     const aliceAttemptDummyOutputBlinding0 = randomBytes32();
     const aliceAttemptDummyOutputCommitment0 = computeCommitment(
@@ -5130,13 +5131,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       aliceAttemptDummyOutputPubKey0,
       aliceAttemptDummyOutputBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const aliceAttemptDummyOutput1 = randomBytes32();
     const aliceAttemptDummyOutputPubKey1 = derivePublicKey(
       poseidon,
-      aliceAttemptDummyOutput1
+      aliceAttemptDummyOutput1,
     );
     const aliceAttemptDummyOutputBlinding1 = randomBytes32();
     const aliceAttemptDummyOutputCommitment1 = computeCommitment(
@@ -5144,14 +5145,14 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       aliceAttemptDummyOutputPubKey1,
       aliceAttemptDummyOutputBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const aliceAttemptRecipient = Keypair.generate();
     await airdropAndConfirm(
       provider,
       aliceAttemptRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     const aliceAttemptFee = (transferAmount * BigInt(feeBps)) / 10_000n;
@@ -5163,7 +5164,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     };
     const aliceAttemptExtDataHash = computeExtDataHash(
       poseidon,
-      aliceAttemptExtData
+      aliceAttemptExtData,
     );
 
     let aliceAttemptFailed = false;
@@ -5201,41 +5202,41 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         ],
       });
       console.log(
-        "   ❌ SECURITY FAILURE: Alice generated proof with wrong privateKey!"
+        "   ❌ SECURITY FAILURE: Alice generated proof with wrong privateKey!",
       );
     } catch (error: any) {
       aliceAttemptFailed = true;
       console.log("   ✅ Alice's withdrawal attempt FAILED (as expected)");
       console.log(
-        "   ✅ Proof generation failed: wrong privateKey/blinding combination"
+        "   ✅ Proof generation failed: wrong privateKey/blinding combination",
       );
       console.log(
-        "   ✅ ZK circuit enforces: commitment = hash(amount, publicKey, blinding)"
+        "   ✅ ZK circuit enforces: commitment = hash(amount, publicKey, blinding)",
       );
       console.log(
-        "   ✅ Only Bob's privateKey produces correct publicKey for Bob's commitment\n"
+        "   ✅ Only Bob's privateKey produces correct publicKey for Bob's commitment\n",
       );
     }
 
     if (!aliceAttemptFailed) {
       throw new Error(
-        "SECURITY VIOLATION: Alice should NOT be able to generate valid proof with wrong privateKey!"
+        "SECURITY VIOLATION: Alice should NOT be able to generate valid proof with wrong privateKey!",
       );
     }
 
     console.log("✅ Security Check Passed:");
     console.log(
-      "   ✅ Alice CANNOT withdraw Bob's note (she doesn't have bobPrivateKey)"
+      "   ✅ Alice CANNOT withdraw Bob's note (she doesn't have bobPrivateKey)",
     );
     console.log("   ✅ No on-chain link between Alice and Bob");
     console.log(
-      "   ✅ Transfer is fully private (publicAmount = 0, no vault movement)"
+      "   ✅ Transfer is fully private (publicAmount = 0, no vault movement)",
     );
     console.log(
-      "   ✅ Relayer signing enhances privacy (Alice's wallet never on-chain)"
+      "   ✅ Relayer signing enhances privacy (Alice's wallet never on-chain)",
     );
     console.log(
-      "   ✅ Recipient-only withdrawal enforced by ZK circuit requiring privateKey knowledge\n"
+      "   ✅ Recipient-only withdrawal enforced by ZK circuit requiring privateKey knowledge\n",
     );
 
     // =============================================================================
@@ -5250,7 +5251,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     console.log(`   Bob's wallet: ${bob.publicKey.toBase58()}`);
     console.log(
-      `   Withdrawal destination: ${bobRecipient.publicKey.toBase58()}`
+      `   Withdrawal destination: ${bobRecipient.publicKey.toBase58()}`,
     );
 
     // Airdrop to Bob (for tx fees) and recipient (for account rent)
@@ -5258,7 +5259,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     await airdropAndConfirm(
       provider,
       bobRecipient.publicKey,
-      0.1 * LAMPORTS_PER_SOL
+      0.1 * LAMPORTS_PER_SOL,
     );
 
     // Register Bob as relayer
@@ -5272,7 +5273,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       poseidon,
       bobCommitment,
       bobLeafIndex,
-      bobPrivateKey
+      bobPrivateKey,
     );
 
     const bobWithdrawAmount = transferAmount;
@@ -5291,11 +5292,11 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     };
     const extDataHashBobWithdraw = computeExtDataHash(
       poseidon,
-      extDataBobWithdraw
+      extDataBobWithdraw,
     );
 
     noteTreeAcc = await (program.account as any).merkleTreeAccount.fetch(
-      noteTree
+      noteTree,
     );
     onchainRoot = extractRootFromAccount(noteTreeAcc);
 
@@ -5311,20 +5312,20 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       bobDummyPubKey,
       bobDummyBlinding,
-      SOL_MINT
+      SOL_MINT,
     );
     const bobDummyNullifier = computeNullifier(
       poseidon,
       bobDummyCommitment,
       0,
-      bobDummyPrivKey
+      bobDummyPrivKey,
     );
 
     // Dummy outputs (withdrawal has no outputs)
     const bobDummyOutputPrivKey0 = randomBytes32();
     const bobDummyOutputPubKey0 = derivePublicKey(
       poseidon,
-      bobDummyOutputPrivKey0
+      bobDummyOutputPrivKey0,
     );
     const bobDummyOutputBlinding0 = randomBytes32();
     const bobDummyOutputCommitment0 = computeCommitment(
@@ -5332,13 +5333,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       bobDummyOutputPubKey0,
       bobDummyOutputBlinding0,
-      SOL_MINT
+      SOL_MINT,
     );
 
     const bobDummyOutputPrivKey1 = randomBytes32();
     const bobDummyOutputPubKey1 = derivePublicKey(
       poseidon,
-      bobDummyOutputPrivKey1
+      bobDummyOutputPrivKey1,
     );
     const bobDummyOutputBlinding1 = randomBytes32();
     const bobDummyOutputCommitment1 = computeCommitment(
@@ -5346,7 +5347,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       0n,
       bobDummyOutputPubKey1,
       bobDummyOutputBlinding1,
-      SOL_MINT
+      SOL_MINT,
     );
 
     // Bob generates proof using HIS private key (not Alice's!)
@@ -5378,26 +5379,26 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       program.programId,
       SOL_MINT,
       bobInputTreeId,
-      bobNullifier
+      bobNullifier,
     );
     const bobDummyNullifierMarker = deriveNullifierMarkerPDA(
       program.programId,
       SOL_MINT,
       bobInputTreeId,
-      bobDummyNullifier
+      bobDummyNullifier,
     );
 
     // Check balances before
     const beforeVault = BigInt(await provider.connection.getBalance(vault));
     const beforeBobRecipient = BigInt(
-      await provider.connection.getBalance(bobRecipient.publicKey)
+      await provider.connection.getBalance(bobRecipient.publicKey),
     );
 
     console.log("🔐 Proof of Ownership:");
     console.log(`   ✅ Bob generated valid ZK proof with his privateKey`);
     console.log(`   ✅ Only Bob could generate this proof`);
     console.log(
-      `   ⚠️  Alice CANNOT withdraw Bob's note (she doesn't have Bob's privateKey)\n`
+      `   ⚠️  Alice CANNOT withdraw Bob's note (she doesn't have Bob's privateKey)\n`,
     );
 
     // BOB signs and submits the transaction (not Alice!)
@@ -5414,7 +5415,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(bobDummyOutputCommitment0),
         Array.from(bobDummyOutputCommitment1),
         extDataBobWithdraw,
-        bobWithdrawProof
+        bobWithdrawProof,
       )
       .accounts({
         config,
@@ -5455,7 +5456,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Check balances after
     const afterVault = BigInt(await provider.connection.getBalance(vault));
     const afterBobRecipient = BigInt(
-      await provider.connection.getBalance(bobRecipient.publicKey)
+      await provider.connection.getBalance(bobRecipient.publicKey),
     );
 
     const vaultPaid = beforeVault - afterVault;
@@ -5465,19 +5466,19 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("📊 Verification:");
     console.log(`   Vault paid: ${vaultPaid} lamports`);
     console.log(
-      `   Bob's recipient received: ${bobRecipientReceived} lamports`
+      `   Bob's recipient received: ${bobRecipientReceived} lamports`,
     );
     console.log(`   Expected: ${bobToRecipient} lamports`);
 
     if (vaultPaid !== bobWithdrawAmount) {
       throw new Error(
-        `Vault paid mismatch: expected ${bobWithdrawAmount}, got ${vaultPaid}`
+        `Vault paid mismatch: expected ${bobWithdrawAmount}, got ${vaultPaid}`,
       );
     }
 
     if (bobRecipientReceived !== bobToRecipient) {
       throw new Error(
-        `Recipient received mismatch: expected ${bobToRecipient}, got ${bobRecipientReceived}`
+        `Recipient received mismatch: expected ${bobToRecipient}, got ${bobRecipientReceived}`,
       );
     }
 
@@ -5486,13 +5487,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     console.log("   ✅ Bob withdrew his 1 SOL successfully");
     console.log("   ✅ No on-chain link between Alice and Bob");
     console.log(
-      "   ✅ Relayer signed transfer (Alice's wallet never appeared on-chain)"
+      "   ✅ Relayer signed transfer (Alice's wallet never appeared on-chain)",
     );
     console.log(
-      "   ✅ Only Bob (recipient) could withdraw the transferred note"
+      "   ✅ Only Bob (recipient) could withdraw the transferred note",
     );
     console.log(
-      "   ✅ Alice cannot spend Bob's note (she doesn't have his privateKey)\n"
+      "   ✅ Alice cannot spend Bob's note (she doesn't have his privateKey)\n",
     );
   });
 
@@ -5514,63 +5515,63 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       amount,
       publicKey,
       blinding,
-      SOL_MINT
+      SOL_MINT,
     );
 
     console.log("1️⃣  What's PUBLIC (visible on-chain):");
     console.log(
       `   ✅ Commitment: ${Buffer.from(commitment)
         .toString("hex")
-        .slice(0, 40)}...`
+        .slice(0, 40)}...`,
     );
     console.log(`   ✅ Amount: Someone deposited, but amount is HIDDEN`);
     console.log(
-      `   ℹ️  Attacker CAN see this, but it's useless without secrets\n`
+      `   ℹ️  Attacker CAN see this, but it's useless without secrets\n`,
     );
 
     console.log("2️⃣  What's SECRET (proves ownership):");
     console.log(
       `   🔒 privateKey: ${Buffer.from(privateKey)
         .toString("hex")
-        .slice(0, 22)}... (NEVER share!)`
+        .slice(0, 22)}... (NEVER share!)`,
     );
     console.log(
       `   🔒 blinding: ${Buffer.from(blinding)
         .toString("hex")
-        .slice(0, 22)}... (NEVER share!)`
+        .slice(0, 22)}... (NEVER share!)`,
     );
     console.log(
-      `   ⚠️  If attacker gets these → THEY CAN SPEND YOUR DEPOSIT!\n`
+      `   ⚠️  If attacker gets these → THEY CAN SPEND YOUR DEPOSIT!\n`,
     );
 
     console.log("3️⃣  How ZK Proof Protects You:");
     console.log(
-      `   🔐 To withdraw, you must prove: publicKey = Poseidon(privateKey)`
+      `   🔐 To withdraw, you must prove: publicKey = Poseidon(privateKey)`,
     );
     console.log(`   🔐 Without privateKey, the proof verification FAILS`);
     console.log(`   🔐 Rust code: verify_withdraw_groth16() enforces this\n`);
 
     console.log("4️⃣  Protection Layers:");
     console.log(
-      `   ✅ Layer 1: ZK Circuit - proves you know privateKey without revealing it`
+      `   ✅ Layer 1: ZK Circuit - proves you know privateKey without revealing it`,
     );
     console.log(
-      `   ✅ Layer 2: Groth16 Verification - mathematically impossible to forge`
+      `   ✅ Layer 2: Groth16 Verification - mathematically impossible to forge`,
     );
     console.log(`   ✅ Layer 3: Nullifier Uniqueness - prevents double-spend`);
     console.log(
-      `   ✅ Layer 4: Encrypted Storage - protects privateKey at rest\n`
+      `   ✅ Layer 4: Encrypted Storage - protects privateKey at rest\n`,
     );
 
     console.log("5️⃣  Your Responsibility:");
     console.log(
-      `   💾 Use NoteManager with AES-256 encryption (see note-manager.example.ts)`
+      `   💾 Use NoteManager with AES-256 encryption (see note-manager.example.ts)`,
     );
     console.log(`   🔑 Use strong password (22+ characters, random)`);
     console.log(`   🔐 Store encrypted notes.enc file securely`);
     console.log(`   ⚠️  Backup your notes - if lost, funds are UNRECOVERABLE`);
     console.log(
-      `   ⚠️  Never commit notes to git or share via insecure channels\n`
+      `   ⚠️  Never commit notes to git or share via insecure channels\n`,
     );
 
     console.log("✅ Security model verified\n");

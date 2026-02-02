@@ -82,18 +82,17 @@ function encodeTreeId(treeId: number): Buffer {
   return buf;
 }
 
-// Derive nullifier marker PDA
+// Derive nullifier marker PDA (global, no tree_id to prevent cross-tree double-spend)
 function deriveNullifierMarkerPDA(
   programId: PublicKey,
   mintAddress: PublicKey,
-  treeId: number,
+  _treeId: number, // Kept for API compatibility but unused
   nullifier: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("nullifier_v3"),
       mintAddress.toBuffer(),
-      encodeTreeId(treeId),
       Buffer.from(nullifier),
     ],
     programId,
