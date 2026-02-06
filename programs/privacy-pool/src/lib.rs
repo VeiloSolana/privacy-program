@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::get_associated_token_address;
-use anchor_spl::token::{self, Mint, Token, TokenAccount};
+use anchor_spl::token::{ self, Mint, Token, TokenAccount };
 use light_hasher::Poseidon;
 
 pub mod groth16;
@@ -10,24 +10,22 @@ pub mod vk_constants;
 pub mod zk;
 
 // Re-export swap types for Anchor
-pub use swap::{SwapExecutor, SwapParams, SwapPublicInputs};
+pub use swap::{ SwapExecutor, SwapParams, SwapPublicInputs };
 pub use zk::SwapProof;
 
-use merkle_tree::{MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE};
+use merkle_tree::{ MerkleTree, MerkleTreeAccount, MERKLE_TREE_HEIGHT, ROOT_HISTORY_SIZE };
 
 declare_id!("GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU");
 
 // ---- Constants ----
 
-/// Authorized admin address that can initialize pools
-/// For localnet/test: None (any wallet can initialize for testing)
-/// For devnet/mainnet: Specific authorized wallet only
-#[cfg(any(feature = "localnet", test))]
-pub const AUTHORIZED_ADMIN: Option<Pubkey> = None;
+// NOTE: Admin authorization is now handled via Squads multisig.
+// The program stores the Squads vault PDA as admin, and Squads
+// handles approval off-chain before executing admin instructions.
+// No hardcoded admin addresses needed.
 
 #[cfg(not(any(feature = "localnet", test)))]
-pub const AUTHORIZED_ADMIN: Option<Pubkey> =
-    Some(pubkey!("H6QRuiRsguQgpRSJpP79h75EfDYRS2wN78oj7a4auZtP"));
+pub const _DEPRECATED_AUTHORIZED_ADMIN: Option<Pubkey> = None; // Removed: use Squads vault instead
 
 pub type PoseidonHasher = Poseidon;
 pub const MAX_RELAYERS: usize = 16;
@@ -59,7 +57,7 @@ pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC (devnet)
     pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT (devnet)
     pubkey!("6zxkY8UygHKBf64LJDXnzcYr9wdvyqScmj7oGPBFw58Z"), // ORE (devnet)
-    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"),  // ZEC (devnet)
+    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"), // ZEC (devnet)
     pubkey!("5MvqBFU5zeHaEfRuAFW2RhqidHLb7Ejsa6sUwPQQXcj1"), // stORE (devnet)
 ];
 
@@ -68,9 +66,9 @@ pub const ALLOWED_TOKENS: &[Pubkey] = &[
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
     pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
-    pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp"),  // ORE
+    pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp"), // ORE
     pubkey!("A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS"), // ZEC
-    pubkey!("sTorERYB6xAZ1SSbwpK3zoK2EEwbBrc7TZAzg1uCGiH"),  // stORE
+    pubkey!("sTorERYB6xAZ1SSbwpK3zoK2EEwbBrc7TZAzg1uCGiH"), // stORE
 ];
 
 /// Raydium CPMM program ID (mainnet)
@@ -148,24 +146,25 @@ pub struct PrivacyConfig {
 }
 
 impl PrivacyConfig {
-    pub const LEN: usize = 8 +   // discriminator
-        1 +   // bump
-        1 +   // vault_bump
-        32 +  // admin
-        2 +   // fee_bps
-        8 +   // min_withdrawal_fee
-        2 +   // fee_error_margin_bps
-        8 +   // total_tvl
-        32 +  // mint_address
-        8 +   // min_deposit_amount
-        8 +   // max_deposit_amount
-        8 +   // min_withdraw_amount
-        8 +   // max_withdraw_amount
-        1 +   // num_relayers
-        32 * MAX_RELAYERS +  // relayers
-        2 +   // num_trees (u16)
-        2 +   // next_tree_index (u16)
-        8 +   // min_swap_fee
+    pub const LEN: usize =
+        8 + // discriminator
+        1 + // bump
+        1 + // vault_bump
+        32 + // admin
+        2 + // fee_bps
+        8 + // min_withdrawal_fee
+        2 + // fee_error_margin_bps
+        8 + // total_tvl
+        32 + // mint_address
+        8 + // min_deposit_amount
+        8 + // max_deposit_amount
+        8 + // min_withdraw_amount
+        8 + // max_withdraw_amount
+        1 + // num_relayers
+        32 * MAX_RELAYERS + // relayers
+        2 + // num_trees (u16)
+        2 + // next_tree_index (u16)
+        8 + // min_swap_fee
         2; // swap_fee_bps (661 bytes total)
 
     pub fn is_relayer(&self, key: &Pubkey) -> bool {
@@ -354,14 +353,17 @@ impl ExtData {
 
         // Hash in pairs to match binary Merkle tree pattern
         // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
-        let hash1 = PoseidonHasher::hashv(&[&recipient_bytes, &relayer_bytes])
-            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash1 = PoseidonHasher::hashv(&[&recipient_bytes, &relayer_bytes]).map_err(|_|
+            error!(PrivacyError::MerkleHashFailed)
+        )?;
 
-        let hash2 = PoseidonHasher::hashv(&[&fee_bytes, &refund_bytes])
-            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash2 = PoseidonHasher::hashv(&[&fee_bytes, &refund_bytes]).map_err(|_|
+            error!(PrivacyError::MerkleHashFailed)
+        )?;
 
-        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2])
-            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2]).map_err(|_|
+            error!(PrivacyError::MerkleHashFailed)
+        )?;
 
         Ok(final_hash)
     }
@@ -376,7 +378,7 @@ impl ExtData {
 pub struct Initialize<'info> {
     #[account(
         init,
-        payer = admin,
+        payer = payer,
         seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump,
         space = PrivacyConfig::LEN
@@ -385,7 +387,7 @@ pub struct Initialize<'info> {
 
     #[account(
         init,
-        payer = admin,
+        payer = payer,
         seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump,
         space = Vault::LEN
@@ -395,24 +397,30 @@ pub struct Initialize<'info> {
     /// Initial tree (tree_id = 0)
     #[account(
         init,
-        payer = admin,
-        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &0u16.to_le_bytes()],
+        payer = payer,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &(0u16).to_le_bytes()],
         bump,
-        space = MerkleTreeAccount::LEN,
+        space = MerkleTreeAccount::LEN
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
     #[account(
         init,
-        payer = admin,
+        payer = payer,
         seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump,
         space = NullifierSet::LEN
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    #[account(mut)]
+    /// CHECK: Squads vault PDA that becomes the admin.
+    /// When using Squads multisig, this should be the vault PDA.
+    /// Squads will sign this account after multisig approval.
     pub admin: Signer<'info>,
+
+    /// Transaction fee payer (can be anyone, separate from admin authority)
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -428,7 +436,9 @@ pub struct ConfigAdmin<'info> {
     )]
     pub config: Account<'info, PrivacyConfig>,
 
-    #[account(mut)]
+    /// CHECK: Squads vault PDA (or direct admin).
+    /// has_one = admin ensures this matches config.admin.
+    /// When using Squads, the vault PDA signs after multisig approval.
     pub admin: Signer<'info>,
 }
 
@@ -448,17 +458,16 @@ pub struct UpdatePoolConfig<'info> {
 
 #[derive(Accounts)]
 pub struct InitializeGlobalConfig<'info> {
-    #[account(
-        init,
-        payer = admin,
-        seeds = [b"global_config_v1"],
-        bump,
-        space = GlobalConfig::LEN
-    )]
+    #[account(init, payer = payer, seeds = [b"global_config_v1"], bump, space = GlobalConfig::LEN)]
     pub global_config: Account<'info, GlobalConfig>,
 
-    #[account(mut)]
+    /// CHECK: Squads vault PDA that becomes the global admin.
+    /// When using Squads multisig, this should be the vault PDA.
     pub admin: Signer<'info>,
+
+    /// Transaction fee payer (can be anyone, separate from admin authority)
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -473,6 +482,8 @@ pub struct GlobalConfigAdmin<'info> {
     )]
     pub global_config: Account<'info, GlobalConfig>,
 
+    /// CHECK: Squads vault PDA (or direct admin).
+    /// has_one = admin ensures this matches global_config.admin.
     pub admin: Signer<'info>,
 }
 
@@ -488,15 +499,16 @@ pub struct AddMerkleTree<'info> {
 
     #[account(
         init,
-        payer = payer,
+        payer = relayer,
         seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &tree_id.to_le_bytes()],
         bump,
-        space = MerkleTreeAccount::LEN,
+        space = MerkleTreeAccount::LEN
     )]
     pub note_tree: AccountLoader<'info, MerkleTreeAccount>,
 
+    /// Relayer who can add trees (must be registered in config.relayers)
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub relayer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -523,10 +535,7 @@ pub struct Transact<'info> {
     )]
     pub config: Account<'info, PrivacyConfig>,
 
-    #[account(
-        seeds = [b"global_config_v1"],
-        bump = global_config.bump
-    )]
+    #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
     pub global_config: Account<'info, GlobalConfig>,
 
     #[account(
@@ -628,15 +637,12 @@ fn is_token_mint(mint: &Pubkey) -> bool {
 /// Prevents malicious programs from passing fake token accounts
 fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
     // Verify account is owned by SPL Token Program
-    require_keys_eq!(
-        *account.owner,
-        token::ID,
-        PrivacyError::InvalidTokenAccountOwner
-    );
+    require_keys_eq!(*account.owner, token::ID, PrivacyError::InvalidTokenAccountOwner);
 
     let data = account.try_borrow_data()?;
-    TokenAccount::try_deserialize(&mut &data[..])
-        .map_err(|_| error!(PrivacyError::MissingTokenAccount))
+    TokenAccount::try_deserialize(&mut &data[..]).map_err(|_|
+        error!(PrivacyError::MissingTokenAccount)
+    )
 }
 
 // ---- Swap Transaction Accounts ----
@@ -670,10 +676,7 @@ pub struct TransactSwap<'info> {
     )]
     pub source_config: Box<Account<'info, PrivacyConfig>>,
 
-    #[account(
-        seeds = [b"global_config_v1"],
-        bump = global_config.bump
-    )]
+    #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
     pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
@@ -764,7 +767,13 @@ pub struct TransactSwap<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"swap_executor", source_mint.as_ref(), dest_mint.as_ref(), input_nullifier_0.as_ref(), relayer.key().as_ref()],
+        seeds = [
+            b"swap_executor",
+            source_mint.as_ref(),
+            dest_mint.as_ref(),
+            input_nullifier_0.as_ref(),
+            relayer.key().as_ref(),
+        ],
         bump,
         space = SwapExecutor::LEN
     )]
@@ -775,7 +784,7 @@ pub struct TransactSwap<'info> {
         init,
         payer = relayer,
         associated_token::mint = source_mint_account,
-        associated_token::authority = executor,
+        associated_token::authority = executor
     )]
     pub executor_source_token: Box<Account<'info, TokenAccount>>,
 
@@ -784,7 +793,7 @@ pub struct TransactSwap<'info> {
         init,
         payer = relayer,
         associated_token::mint = dest_mint_account,
-        associated_token::authority = executor,
+        associated_token::authority = executor
     )]
     pub executor_dest_token: Box<Account<'info, TokenAccount>>,
 
@@ -835,15 +844,11 @@ pub mod privacy_pool {
         min_deposit_amount: Option<u64>,
         max_deposit_amount: Option<u64>,
         min_withdraw_amount: Option<u64>,
-        max_withdraw_amount: Option<u64>,
+        max_withdraw_amount: Option<u64>
     ) -> Result<()> {
-        // Check authorization
-        if let Some(admin_key) = AUTHORIZED_ADMIN {
-            require!(
-                ctx.accounts.admin.key().eq(&admin_key),
-                PrivacyError::UnauthorizedAdmin
-            );
-        }
+        // Authorization is handled by requiring admin to be a Signer.
+        // When using Squads multisig, admin = Squads vault PDA which signs
+        // after multisig approval. No hardcoded admin checks needed.
 
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
@@ -913,13 +918,13 @@ pub mod privacy_pool {
     pub fn add_merkle_tree(
         ctx: Context<AddMerkleTree>,
         _mint_address: Pubkey,
-        tree_id: u16,
+        tree_id: u16
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
-        let payer = &ctx.accounts.payer;
+        let relayer = &ctx.accounts.relayer;
 
-        // Only admin can create trees to prevent rent drain attacks
-        require!(payer.key() == cfg.admin, PrivacyError::Unauthorized);
+        // Only registered relayers can add trees
+        require!(cfg.is_relayer(&relayer.key()), PrivacyError::RelayerNotAllowed);
 
         // Validate tree_id is sequential
         require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
@@ -938,10 +943,7 @@ pub mod privacy_pool {
         MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
         // Update pool config
-        cfg.num_trees = cfg
-            .num_trees
-            .checked_add(1)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        cfg.num_trees = cfg.num_trees.checked_add(1).ok_or(PrivacyError::ArithmeticOverflow)?;
 
         Ok(())
     }
@@ -949,7 +951,7 @@ pub mod privacy_pool {
     pub fn add_relayer(
         ctx: Context<ConfigAdmin>,
         _mint_address: Pubkey,
-        new_relayer: Pubkey,
+        new_relayer: Pubkey
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         if cfg.is_relayer(&new_relayer) {
@@ -973,7 +975,7 @@ pub mod privacy_pool {
         min_withdrawal_fee: Option<u64>,
         fee_error_margin_bps: Option<u16>,
         min_swap_fee: Option<u64>,
-        swap_fee_bps: Option<u16>,
+        swap_fee_bps: Option<u16>
     ) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
 
@@ -1026,13 +1028,8 @@ pub mod privacy_pool {
     }
 
     pub fn initialize_global_config(ctx: Context<InitializeGlobalConfig>) -> Result<()> {
-        // Check authorization
-        if let Some(admin_key) = AUTHORIZED_ADMIN {
-            require!(
-                ctx.accounts.admin.key().eq(&admin_key),
-                PrivacyError::UnauthorizedAdmin
-            );
-        }
+        // Authorization is handled by requiring admin to be a Signer.
+        // When using Squads multisig, admin = Squads vault PDA.
 
         let global_cfg = &mut ctx.accounts.global_config;
 
@@ -1070,7 +1067,7 @@ pub mod privacy_pool {
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
         ext_data: ExtData,
-        proof: zk::TransactionProof,
+        proof: zk::TransactionProof
     ) -> Result<()> {
         // Combine individual nullifiers/commitments into arrays for processing
         let input_nullifiers = [input_nullifier_0, input_nullifier_1];
@@ -1103,16 +1100,10 @@ pub mod privacy_pool {
             // For deposits, nullifier markers are created but allow reuse via init_if_needed
             // The circuit accepts any computed nullifiers for dummy inputs (amount=0)
             // Still check for duplicates to prevent any edge cases
-            require!(
-                input_nullifiers[0] != input_nullifiers[1],
-                PrivacyError::DuplicateNullifiers
-            );
+            require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
         } else {
             // For withdrawals/transfers, validate no duplicate nullifiers
-            require!(
-                input_nullifiers[0] != input_nullifiers[1],
-                PrivacyError::DuplicateNullifiers
-            );
+            require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
 
             // Also ensure neither nullifier is zero (must be real notes)
             require!(
@@ -1138,20 +1129,14 @@ pub mod privacy_pool {
 
         // 1. Verify ext_data_hash matches provided ext_data
         let computed_ext_hash = ext_data.hash()?;
-        require!(
-            computed_ext_hash == ext_data_hash,
-            PrivacyError::InvalidExtData
-        );
+        require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
         // For deposits (public_amount > 0), anyone can facilitate deposit without being authorized
         // For withdrawals (public_amount < 0) and transfers (public_amount = 0), require authorized relayer
         if public_amount <= 0 {
             // Check if this specific relayer is authorized
-            require!(
-                cfg.is_relayer(&ctx.accounts.relayer.key()),
-                PrivacyError::RelayerNotAllowed
-            );
+            require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
         }
 
         // 2a. Bind relayer account to ext_data.relayer to prevent fee theft
@@ -1172,11 +1157,7 @@ pub mod privacy_pool {
         // 4. Verify mint address matches config
         msg!("DEBUG: mint_address param = {}", mint_address);
         msg!("DEBUG: cfg.mint_address   = {}", cfg.mint_address);
-        require_keys_eq!(
-            mint_address,
-            cfg.mint_address,
-            PrivacyError::InvalidMintAddress
-        );
+        require_keys_eq!(mint_address, cfg.mint_address, PrivacyError::InvalidMintAddress);
 
         // 4a. Validate SPL token is allowed (if not SOL)
         if is_token_mint(&mint_address) {
@@ -1196,12 +1177,15 @@ pub mod privacy_pool {
             );
 
             // Deserialize and validate vault token account
-            let vault_token =
-                deserialize_token_account(&ctx.accounts.vault_token_account.to_account_info())?;
+            let vault_token = deserialize_token_account(
+                &ctx.accounts.vault_token_account.to_account_info()
+            )?;
 
             // Verify vault_token_account is the canonical ATA
-            let expected_vault_ata =
-                get_associated_token_address(&ctx.accounts.vault.key(), &cfg.mint_address);
+            let expected_vault_ata = get_associated_token_address(
+                &ctx.accounts.vault.key(),
+                &cfg.mint_address
+            );
             require_keys_eq!(
                 ctx.accounts.vault_token_account.key(),
                 expected_vault_ata,
@@ -1209,11 +1193,7 @@ pub mod privacy_pool {
             );
 
             // Verify vault token account mint matches config
-            require_keys_eq!(
-                vault_token.mint,
-                cfg.mint_address,
-                PrivacyError::InvalidMintAddress
-            );
+            require_keys_eq!(vault_token.mint, cfg.mint_address, PrivacyError::InvalidMintAddress);
 
             // Verify vault is the authority
             require_keys_eq!(
@@ -1224,8 +1204,9 @@ pub mod privacy_pool {
 
             // For deposits (public_amount > 0), user token account required
             if public_amount > 0 {
-                let user_token =
-                    deserialize_token_account(&ctx.accounts.user_token_account.to_account_info())?;
+                let user_token = deserialize_token_account(
+                    &ctx.accounts.user_token_account.to_account_info()
+                )?;
                 require_keys_eq!(
                     user_token.mint,
                     cfg.mint_address,
@@ -1239,17 +1220,13 @@ pub mod privacy_pool {
                 // Pattern 2 allows trustless deposits without requiring users to send tokens to relayer first.
                 // The user pre-approves the exact deposit amount, relayer submits the transaction.
                 let is_relayer_owned = user_token.owner == ctx.accounts.relayer.key();
-                let is_delegated_to_relayer = user_token
-                    .delegate
+                let is_delegated_to_relayer = user_token.delegate
                     .map(|d| d == ctx.accounts.relayer.key())
                     .unwrap_or(false);
 
                 if is_relayer_owned {
                     // Pattern 1: Relayer owns the token account - no delegation allowed
-                    require!(
-                        user_token.delegate.is_none(),
-                        PrivacyError::InvalidTokenAuthority
-                    );
+                    require!(user_token.delegate.is_none(), PrivacyError::InvalidTokenAuthority);
                 } else if is_delegated_to_relayer {
                     // Pattern 2: Token account is delegated to relayer
                     // Verify sufficient delegation for the deposit amount
@@ -1267,10 +1244,10 @@ pub mod privacy_pool {
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
             if public_amount < 0 {
                 let recipient_token = deserialize_token_account(
-                    &ctx.accounts.recipient_token_account.to_account_info(),
+                    &ctx.accounts.recipient_token_account.to_account_info()
                 )?;
                 let relayer_token = deserialize_token_account(
-                    &ctx.accounts.relayer_token_account.to_account_info(),
+                    &ctx.accounts.relayer_token_account.to_account_info()
                 )?;
 
                 require_keys_eq!(
@@ -1313,10 +1290,7 @@ pub mod privacy_pool {
         zk::verify_transaction_groth16(proof, &public_inputs)?;
 
         // 7. Check root is known in input tree
-        require!(
-            MerkleTree::is_known_root(&*input_tree, root),
-            PrivacyError::UnknownRoot
-        );
+        require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
 
         drop(input_tree); // Release immutable borrow
 
@@ -1341,7 +1315,7 @@ pub mod privacy_pool {
                 input_nullifiers[0],
                 ctx.bumps.nullifier_marker_0,
                 mint_address,
-                input_tree_id,
+                input_tree_id
             )?;
 
             mark_nullifier_spent(
@@ -1350,7 +1324,7 @@ pub mod privacy_pool {
                 input_nullifiers[1],
                 ctx.bumps.nullifier_marker_1,
                 mint_address,
-                input_tree_id,
+                input_tree_id
             )?;
         }
 
@@ -1403,7 +1377,7 @@ pub mod privacy_pool {
             &ctx.accounts.user_token_account,
             &ctx.accounts.recipient_token_account,
             &ctx.accounts.relayer_token_account,
-            &ctx.accounts.token_program,
+            &ctx.accounts.token_program
         )?;
 
         Ok(())
@@ -1427,7 +1401,7 @@ pub mod privacy_pool {
         swap_params: SwapParams,
         swap_amount: u64,
         swap_data: Vec<u8>,
-        ext_data: ExtData,
+        ext_data: ExtData
     ) -> Result<()> {
         swap::transact_swap(
             ctx,
@@ -1444,7 +1418,7 @@ pub mod privacy_pool {
             swap_params,
             swap_amount,
             swap_data,
-            ext_data,
+            ext_data
         )
     }
 }
@@ -1458,7 +1432,7 @@ pub fn mark_nullifier_spent(
     nullifier: [u8; 32],
     bump: u8,
     mint_address: Pubkey,
-    tree_id: u16,
+    tree_id: u16
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
@@ -1468,8 +1442,7 @@ pub fn mark_nullifier_spent(
     marker.tree_id = tree_id;
     marker.bump = bump;
 
-    nullifier_set.count = nullifier_set
-        .count
+    nullifier_set.count = nullifier_set.count
         .checked_add(1)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
@@ -1503,17 +1476,11 @@ fn handle_public_amount<'info>(
     user_token_account: &UncheckedAccount<'info>,
     recipient_token_account: &UncheckedAccount<'info>,
     relayer_token_account: &UncheckedAccount<'info>,
-    token_program: &UncheckedAccount<'info>,
+    token_program: &UncheckedAccount<'info>
 ) -> Result<()> {
     // Validate ext_data values are non-negative
-    require!(
-        ext_data.fee < i64::MAX as u64,
-        PrivacyError::InvalidFeeAmount
-    );
-    require!(
-        ext_data.refund < i64::MAX as u64,
-        PrivacyError::InvalidPublicAmount
-    );
+    require!(ext_data.fee < (i64::MAX as u64), PrivacyError::InvalidFeeAmount);
+    require!(ext_data.refund < (i64::MAX as u64), PrivacyError::InvalidPublicAmount);
 
     // Circuit convention: sumIns + publicAmount = sumOuts
     // - Positive publicAmount = DEPOSIT (adding to pool: 0 + amount = outputs)
@@ -1527,33 +1494,21 @@ fn handle_public_amount<'info>(
         let deposit_amount = public_amount as u64;
 
         // For deposits, fee and refund should be zero
-        require!(
-            ext_data.fee == 0 && ext_data.refund == 0,
-            PrivacyError::InvalidPublicAmount
-        );
+        require!(ext_data.fee == 0 && ext_data.refund == 0, PrivacyError::InvalidPublicAmount);
 
         // Check PrivacyConfig pool-specific limits
-        require!(
-            deposit_amount >= config.min_deposit_amount,
-            PrivacyError::DepositBelowMinimum
-        );
-        require!(
-            deposit_amount <= config.max_deposit_amount,
-            PrivacyError::DepositLimitExceeded
-        );
+        require!(deposit_amount >= config.min_deposit_amount, PrivacyError::DepositBelowMinimum);
+        require!(deposit_amount <= config.max_deposit_amount, PrivacyError::DepositLimitExceeded);
 
         if is_token {
             // SPL Token deposit: user -> vault ATA
             token::transfer(
-                CpiContext::new(
-                    token_program.to_account_info(),
-                    token::Transfer {
-                        from: user_token_account.to_account_info(),
-                        to: vault_token_account.to_account_info(),
-                        authority: relayer.to_account_info(),
-                    },
-                ),
-                deposit_amount,
+                CpiContext::new(token_program.to_account_info(), token::Transfer {
+                    from: user_token_account.to_account_info(),
+                    to: vault_token_account.to_account_info(),
+                    authority: relayer.to_account_info(),
+                }),
+                deposit_amount
             )?;
         } else {
             // Native SOL deposit
@@ -1563,15 +1518,14 @@ fn handle_public_amount<'info>(
                     anchor_lang::system_program::Transfer {
                         from: relayer.to_account_info(),
                         to: vault.to_account_info(),
-                    },
+                    }
                 ),
-                deposit_amount,
+                deposit_amount
             )?;
         }
 
         // Update TVL
-        config.total_tvl = config
-            .total_tvl
+        config.total_tvl = config.total_tvl
             .checked_add(deposit_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
     } else if public_amount < 0 {
@@ -1592,13 +1546,8 @@ fn handle_public_amount<'info>(
         // Validate that fee + refund doesn't exceed withdrawal amount
         let fee = ext_data.fee;
         let refund = ext_data.refund;
-        let fee_plus_refund = fee
-            .checked_add(refund)
-            .ok_or(PrivacyError::ArithmeticOverflow)?;
-        require!(
-            fee_plus_refund <= withdrawal_amount,
-            PrivacyError::InvalidPublicAmount
-        );
+        let fee_plus_refund = fee.checked_add(refund).ok_or(PrivacyError::ArithmeticOverflow)?;
+        require!(fee_plus_refund <= withdrawal_amount, PrivacyError::InvalidPublicAmount);
 
         // Calculate amount to recipient
         let to_recipient = withdrawal_amount
@@ -1621,19 +1570,19 @@ fn handle_public_amount<'info>(
 
         // Fee validation with error margin for timing attack protection
         // Use u128 for intermediate calculation to prevent overflow on large withdrawals
-        let max_fee_u128 = (withdrawal_amount as u128)
-            .checked_mul(config.fee_bps as u128)
-            .ok_or(PrivacyError::ArithmeticOverflow)?
-            / 10_000;
+        let max_fee_u128 =
+            (withdrawal_amount as u128)
+                .checked_mul(config.fee_bps as u128)
+                .ok_or(PrivacyError::ArithmeticOverflow)? / 10_000;
 
         // Ensure the result fits in u64 (should always be true since withdrawal_amount is u64)
-        require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+        require!(max_fee_u128 <= (u64::MAX as u128), PrivacyError::ExcessiveFee);
         let max_fee = max_fee_u128 as u64;
 
         // Apply fee error margin: allow fees up to max_fee * (1 + margin)
         // This provides flexibility for timing attack resistance while capping maximum fee
         let max_fee_with_margin = max_fee
-            .checked_mul(10_000u64.saturating_add(config.fee_error_margin_bps as u64))
+            .checked_mul((10_000u64).saturating_add(config.fee_error_margin_bps as u64))
             .map(|x| x / 10_000)
             .unwrap_or(max_fee);
 
@@ -1647,8 +1596,9 @@ fn handle_public_amount<'info>(
         if is_token {
             // SPL Token withdrawal: vault ATA -> recipient/relayer ATAs
             // Deserialize vault token account to check balance
-            let vault_token_data =
-                deserialize_token_account(&vault_token_account.to_account_info())?;
+            let vault_token_data = deserialize_token_account(
+                &vault_token_account.to_account_info()
+            )?;
 
             // Check vault has sufficient tokens
             require!(
@@ -1665,19 +1615,13 @@ fn handle_public_amount<'info>(
                         to: recipient_token_account.to_account_info(),
                         authority: vault.to_account_info(),
                     },
-                    &[&[
-                        b"privacy_vault_v3",
-                        config.mint_address.as_ref(),
-                        &[vault.bump],
-                    ]],
+                    &[&[b"privacy_vault_v3", config.mint_address.as_ref(), &[vault.bump]]]
                 ),
-                to_recipient,
+                to_recipient
             )?;
 
             // Transfer fee + refund to relayer
-            let to_relayer = fee
-                .checked_add(refund)
-                .ok_or(PrivacyError::ArithmeticOverflow)?;
+            let to_relayer = fee.checked_add(refund).ok_or(PrivacyError::ArithmeticOverflow)?;
 
             if to_relayer > 0 {
                 token::transfer(
@@ -1688,13 +1632,9 @@ fn handle_public_amount<'info>(
                             to: relayer_token_account.to_account_info(),
                             authority: vault.to_account_info(),
                         },
-                        &[&[
-                            b"privacy_vault_v3",
-                            config.mint_address.as_ref(),
-                            &[vault.bump],
-                        ]],
+                        &[&[b"privacy_vault_v3", config.mint_address.as_ref(), &[vault.bump]]]
                     ),
-                    to_relayer,
+                    to_relayer
                 )?;
             }
         } else {
@@ -1736,8 +1676,7 @@ fn handle_public_amount<'info>(
         }
 
         // Update TVL
-        config.total_tvl = config
-            .total_tvl
+        config.total_tvl = config.total_tvl
             .checked_sub(withdrawal_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
     } else {
@@ -1889,7 +1828,9 @@ pub enum PrivacyError {
     InvalidTokenAccountOwner,
     #[msg("Vault token account must be the canonical Associated Token Account")]
     VaultTokenAccountNotATA,
-    #[msg("Withdrawal amount too small: max fee based on fee_bps would be less than min_withdrawal_fee")]
+    #[msg(
+        "Withdrawal amount too small: max fee based on fee_bps would be less than min_withdrawal_fee"
+    )]
     WithdrawalTooSmallForMinFee,
     #[msg("Nullifier marker account does not correspond to zero nullifier for deposits")]
     InvalidNullifierMarkerForDeposit,
