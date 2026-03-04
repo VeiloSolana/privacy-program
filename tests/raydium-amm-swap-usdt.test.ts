@@ -764,6 +764,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -961,6 +962,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       deadline,
       sourceMint: solTokenMint,
       destMint: usdtTokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     const swapParamsHash = computeSwapParamsHash(
@@ -969,6 +971,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       usdtTokenMint,
       BigInt(minAmountOut.toString()),
       BigInt(deadline.toString()),
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     );
 
     // Generate ZK proof
@@ -1000,6 +1003,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
 
       minAmountOut: BigInt(minAmountOut.toString()),
       deadline: BigInt(deadline.toString()),
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
     console.log("   ✅ ZK proof generated");
 
@@ -1010,6 +1014,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
         solTokenMint.toBuffer(),
         usdtTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -1465,6 +1470,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
         Array.from(dummyNullifier),
         Array.from(newCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1626,6 +1632,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
         Array.from(dummyNullifier),
         Array.from(newCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1824,6 +1831,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
         Array.from(dummyNullifier),
         Array.from(changeCommitment1),
         Array.from(changeCommitment2),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )

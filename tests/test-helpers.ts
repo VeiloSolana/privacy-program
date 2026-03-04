@@ -764,7 +764,9 @@ export const SWAP_VK_PATH = path.join(
 
 /**
  * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline))
- * This must match the on-chain computation in swap.rs
+ * This must match the on-chain computation in swap.rs and the circuit constraint in swap.circom.
+ * The swapDataHash param is accepted for API compatibility but not included in the hash until the
+ * circuit is updated to add swapDataHash as a private input (requires recompilation).
  */
 export function computeSwapParamsHash(
   poseidon: any,
@@ -772,6 +774,7 @@ export function computeSwapParamsHash(
   destMint: PublicKey,
   minAmountOut: bigint,
   deadline: bigint,
+  swapDataHash: Uint8Array = new Uint8Array(32),
 ): Uint8Array {
   const sourceMintField = poseidon.F.e(reduceToField(sourceMint.toBytes()));
   const destMintField = poseidon.F.e(reduceToField(destMint.toBytes()));
@@ -783,6 +786,8 @@ export function computeSwapParamsHash(
 
   const swapTermsHash = poseidon([minAmountOutField, deadlineField]);
 
+  // 2-step hash matching the compiled swap.circom WASM.
+  // TODO: add 3rd step Poseidon([..., swapDataHashField]) once circuit is recompiled with swapDataHash signal.
   const paramsHash = poseidon([mintPairHash, swapTermsHash]);
 
   const hashBytes = poseidon.F.toString(paramsHash, 16).padStart(64, "0");
@@ -838,6 +843,8 @@ export async function generateSwapProof(inputs: {
   // Private inputs - Swap parameters
   minAmountOut: bigint;
   deadline: bigint;
+  /** SHA-256 of swap_data bytes; committed via swapParamsHash (MEDIUM-001). Zero for CPMM/AMM. */
+  swapDataHash?: Uint8Array;
 }) {
   // Format inputs for circuit - matching signal names from swap.circom
   const circuitInputs = {
@@ -881,6 +888,8 @@ export async function generateSwapProof(inputs: {
     // Private inputs - Swap parameters
     minAmountOut: inputs.minAmountOut.toString(),
     deadline: inputs.deadline.toString(),
+    // swapDataHash is NOT passed to the circuit: the current compiled WASM does not have this signal.
+    // It is validated on-chain via SHA-256 in the Jupiter branch of swap.rs.
   };
 
   console.log(

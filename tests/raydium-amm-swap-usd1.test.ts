@@ -745,6 +745,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: payer.publicKey,
           relayer: payer.publicKey,
@@ -1072,6 +1073,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: solTokenMint,
       destMint: usd1TokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     const swapParamsHash = computeSwapParamsHash(
@@ -1080,6 +1082,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       usd1TokenMint,
       BigInt(minAmountOut.toString()),
       BigInt(swapParams.deadline.toString()),
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     );
 
     const proof = await generateSwapProof({
@@ -1108,6 +1111,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       destBlinding,
       minAmountOut: BigInt(minAmountOut.toString()),
       deadline: BigInt(swapParams.deadline.toString()),
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
 
     const [executorPda] = PublicKey.findProgramAddressSync(
@@ -1116,6 +1120,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         solTokenMint.toBuffer(),
         usd1TokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -1595,6 +1600,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier),
         Array.from(outputCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1805,6 +1811,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier),
         Array.from(keepCommitment),
         Array.from(swapCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2023,6 +2030,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier),
         Array.from(newCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2172,6 +2180,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: usd1TokenMint,
       destMint: solTokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     const swapParamsHash = computeSwapParamsHash(
@@ -2180,6 +2189,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       swapParams.destMint,
       BigInt(swapParams.minAmountOut.toString()),
       BigInt(swapParams.deadline.toString()),
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     );
 
     const proof = await generateSwapProof({
@@ -2205,6 +2215,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       destBlinding: solOutputBlinding,
       minAmountOut: BigInt(swapParams.minAmountOut.toString()),
       deadline: BigInt(swapParams.deadline.toString()),
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
     console.log("   ✅ ZK proof generated");
 
@@ -2217,6 +2228,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         usd1TokenMint.toBuffer(),
         solTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -2711,6 +2723,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
         Array.from(dummyNullifier),
         Array.from(changeCommitment1),
         Array.from(changeCommitment2),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )

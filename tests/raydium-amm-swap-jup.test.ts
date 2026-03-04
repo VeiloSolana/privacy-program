@@ -741,6 +741,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: payer.publicKey,
           relayer: payer.publicKey,
@@ -1097,6 +1098,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         solTokenMint.toBuffer(),
         jupTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -1571,6 +1573,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier),
         Array.from(outputCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1787,6 +1790,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier),
         Array.from(keepCommitment),
         Array.from(swapCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2007,6 +2011,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier),
         Array.from(newCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2237,6 +2242,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         jupTokenMint.toBuffer(),
         solTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -2702,6 +2708,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         Array.from(dummyNullifier),
         Array.from(changeCommitment1),
         Array.from(changeCommitment2),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )

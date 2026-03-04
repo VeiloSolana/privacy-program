@@ -609,6 +609,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -790,36 +791,57 @@ describe("Privacy Pool AMM V4 Swap", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    // Generate ZK proof
+    // Build swap params (must precede proof so values match)
+    const minAmountOutBigInt = 40_000_000n; // 40 USDC min (conservative slippage)
+    const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      sourceTokenMint,
+      destTokenMint,
+      minAmountOutBigInt,
+      deadlineBigInt,
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+    );
+
+    // Generate ZK swap proof
     console.log("   Generating ZK proof...");
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -BigInt(SWAP_AMOUNT),
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
       extDataHash,
-      mintAddress: sourceTokenMint,
+      sourceMint: sourceTokenMint,
+      destMint: destTokenMint,
       inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [destCommitmentForProof, changeCommitment],
+      changeCommitment,
+      destCommitment,
+      swapAmount: BigInt(SWAP_AMOUNT),
       inputAmounts: [note.amount, 0n],
       inputPrivateKeys: [note.privateKey, dummyPrivKey],
       inputPublicKeys: [note.publicKey, dummyPubKey],
       inputBlindings: [note.blinding, dummyBlinding],
       inputMerklePaths: [merkleProof, dummyProof],
-      outputAmounts: [0n, changeAmount],
-      outputOwners: [destPubKey, changePubKey],
-      outputBlindings: [destBlinding, changeBlinding],
+      changeAmount,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: swappedAmount,
+      destPubkey: destPubKey,
+      destBlinding,
+      minAmountOut: minAmountOutBigInt,
+      deadline: deadlineBigInt,
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
     console.log("   ✅ ZK proof generated");
 
-    // Build AMM swap data
-    const minAmountOut = new BN(40_000_000); // 40 USDC min (conservative slippage)
+    const minAmountOut = new BN(minAmountOutBigInt.toString());
     const swapData = buildAmmSwapData(new BN(SWAP_AMOUNT), minAmountOut);
 
-    // Swap params
+    // Swap params (must match values used in ZK proof)
     const swapParams = {
       minAmountOut,
-      deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+      deadline: new BN(deadlineBigInt.toString()),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     // Derive executor PDA
@@ -829,6 +851,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         sourceTokenMint.toBuffer(),
         destTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -955,6 +978,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       // 11: Serum Coin Vault, 12: Serum Pc Vault, 13: Serum Vault Signer
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof,
           Array.from(root),
           0,
           sourceTokenMint,
@@ -962,8 +986,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
           Array.from(dummyNullifier),
           0,
           destTokenMint,
-          Array.from(destCommitment),
           Array.from(changeCommitment),
+          Array.from(destCommitment),
           swapParams,
           new BN(SWAP_AMOUNT.toString()),
           swapData,
@@ -1246,6 +1270,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         Array.from(dummyNullifier),
         Array.from(outputCommitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1421,6 +1446,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         Array.from(dummyNullifier),
         Array.from(keepCommitment),
         Array.from(swapCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -1563,23 +1589,44 @@ describe("Privacy Pool AMM V4 Swap", () => {
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
-    // Generate ZK proof
+    // Build swap params (must precede proof so values match)
+    const minSolOutBigInt = 50_000_000n; // 0.05 SOL min (conservative)
+    const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const swapParamsHash = computeSwapParamsHash(
+      poseidon,
+      destTokenMint, // source = USDC
+      sourceTokenMint, // dest = SOL
+      minSolOutBigInt,
+      deadlineBigInt,
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+    );
+
+    // Generate ZK swap proof
     console.log("   Generating ZK proof...");
-    const proof = await generateTransactionProof({
-      root,
-      publicAmount: -swapAmount, // All USDC leaves pool for swap
+    const proof = await generateSwapProof({
+      sourceRoot: root,
+      swapParamsHash,
       extDataHash,
-      mintAddress: destTokenMint,
+      sourceMint: destTokenMint, // USDC
+      destMint: sourceTokenMint, // SOL
       inputNullifiers: [note.nullifier, dummyNullifier],
-      outputCommitments: [solOutputCommitmentForProof, changeCommitment],
+      changeCommitment,
+      destCommitment: solOutputCommitment,
+      swapAmount,
       inputAmounts: [note.amount, 0n],
       inputPrivateKeys: [note.privateKey, dummyPrivKey],
       inputPublicKeys: [note.publicKey, dummyPubKey],
       inputBlindings: [note.blinding, dummyBlinding],
       inputMerklePaths: [merkleProof, dummyProof],
-      outputAmounts: [0n, 0n],
-      outputOwners: [solOutputPubKey, changePubKey],
-      outputBlindings: [solOutputBlinding, changeBlinding],
+      changeAmount: 0n,
+      changePubkey: changePubKey,
+      changeBlinding,
+      destAmount: expectedSol,
+      destPubkey: solOutputPubKey,
+      destBlinding: solOutputBlinding,
+      minAmountOut: minSolOutBigInt,
+      deadline: deadlineBigInt,
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
     console.log("   ✅ ZK proof generated");
 
@@ -1589,15 +1636,16 @@ describe("Privacy Pool AMM V4 Swap", () => {
     // So swapping USDC → SOL is swap_base_out (0x0a) or we swap with reversed accounts
     // Actually for AMM V4, swap_base_in always uses the "in" token as base
     // We'll use swap_base_in with amount_in = USDC amount
-    const minSolOut = new BN(50_000_000); // 0.05 SOL min (conservative)
+    const minSolOut = new BN(minSolOutBigInt.toString());
     const swapData = buildAmmSwapData(new BN(swapAmount.toString()), minSolOut);
 
-    // Swap params (reversed: USDC → SOL)
+    // Swap params (reversed: USDC → SOL) - must match values in ZK proof
     const swapParams = {
       minAmountOut: minSolOut,
-      deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+      deadline: new BN(deadlineBigInt.toString()),
       sourceMint: destTokenMint, // USDC
       destMint: sourceTokenMint, // SOL
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     // Derive executor PDA
@@ -1607,6 +1655,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         destTokenMint.toBuffer(),
         sourceTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -1732,6 +1781,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       // - Output: SOL (base/coin)
       const swapIx = await (program.methods as any)
         .transactSwap(
+          proof,
           Array.from(root),
           0,
           destTokenMint, // Source is USDC
@@ -1739,8 +1789,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
           Array.from(dummyNullifier),
           0,
           sourceTokenMint, // Dest is SOL
-          Array.from(solOutputCommitment),
-          Array.from(changeCommitment),
+          Array.from(changeCommitment), // output_commitment_0 → source pool (USDC change)
+          Array.from(solOutputCommitment), // output_commitment_1 → dest pool (SOL)
           swapParams,
           new BN(swapAmount.toString()),
           swapData,

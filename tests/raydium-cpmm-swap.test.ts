@@ -755,6 +755,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -902,6 +903,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     // This would be hashed using Poseidon in the circuit
@@ -1069,6 +1071,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       destTokenMint,
       minAmountOutBigInt,
       deadlineBigInt,
+      new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     );
 
     // Debug: log off-chain computed hashes
@@ -1130,6 +1133,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // Private inputs - Swap parameters
       minAmountOut: minAmountOutBigInt,
       deadline: deadlineBigInt,
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
     });
     console.log("   ✅ ZK swap proof generated");
 
@@ -1300,15 +1304,17 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       deadline: new BN(deadlineBigInt.toString()),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
-    // Derive executor PDA (seeds: ["swap_executor", source_mint, dest_mint, nullifier_0])
+    // Derive executor PDA (seeds: ["swap_executor", source_mint, dest_mint, nullifier_0, relayer])
     const [executorPda] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("swap_executor"),
         sourceTokenMint.toBuffer(),
         destTokenMint.toBuffer(),
         Buffer.from(note.nullifier),
+        payer.publicKey.toBuffer(),
       ],
       program.programId,
     );
@@ -2138,6 +2144,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         Array.from(dummyNullifier),
         Array.from(outCommitment1),
         Array.from(outCommitment2),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2573,6 +2580,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         Array.from(dummyNullifier),
         Array.from(outCommitment),
         Array.from(dummyOutCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
       )
@@ -2833,6 +2841,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -3272,6 +3281,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           {
             recipient: extData.recipient,
             relayer: extData.relayer,
@@ -3463,6 +3473,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         USDT_MINT,
         minAmountOutBigInt,
         deadlineBigInt,
+        new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       );
 
       // Generate ZK swap proof for the swap
@@ -3498,6 +3509,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         // Private inputs - Swap parameters
         minAmountOut: minAmountOutBigInt,
         deadline: deadlineBigInt,
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       });
 
       // Derive nullifier markers
@@ -3521,6 +3533,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           WSOL_MINT.toBuffer(),
           USDT_MINT.toBuffer(),
           Buffer.from(note!.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -3543,6 +3556,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         deadline: new BN(deadlineBigInt.toString()),
         sourceMint: WSOL_MINT,
         destMint: USDT_MINT,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       // Create ALT for transaction size reduction
@@ -3897,6 +3911,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         WSOL_MINT,
         minAmountOutBigInt,
         deadlineBigInt,
+        new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       );
 
       // 7. Generate ZK Swap Proof
@@ -3936,6 +3951,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         // Private inputs - Swap parameters
         minAmountOut: minAmountOutBigInt,
         deadline: deadlineBigInt,
+      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       });
 
       // 8. CPMM Swap Params
@@ -3965,6 +3981,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           USDT_MINT.toBuffer(),
           WSOL_MINT.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -4058,6 +4075,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         deadline: new BN(deadlineBigInt.toString()),
         sourceMint: USDT_MINT,
         destMint: WSOL_MINT,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       // The transact_swap instruction
