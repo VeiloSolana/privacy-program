@@ -6,12 +6,21 @@ solana_version = "2.2.0"
 resolution = true
 skip-lint = false
 
+# ── Devnet: disposable, iterate freely ─────────────────────────────────────
+# Keypair: keys/program-keypair-devnet.json
+# To deploy binary:  anchor deploy --provider.cluster devnet --program-keypair keys/program-keypair-devnet.json
+# To init pools:     CLUSTER=devnet ts-node scripts/deploy-devnet.ts
 [programs.devnet]
-privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
+privacy_pool = "HL8wNTnaVqNEkEetPa2eFgyiJVh9iBXeuD4k1pbdfVZa"
 
+# ── Localnet: used by `anchor test` (uses target/deploy keypair automatically) ─
 [programs.localnet]
 privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
 
+# ── Mainnet: SACRED — do not rotate this keypair ────────────────────────────
+# Keypair: keys/program-keypair-mainnet.json  (hardware wallet / multisig protected)
+# To deploy binary:  anchor deploy --provider.cluster mainnet --program-keypair keys/program-keypair-mainnet.json
+# To init pools:     ts-node scripts/deploy-mainnet.ts
 [programs.mainnet]
 privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
 
@@ -19,7 +28,7 @@ privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "mainnet"
 wallet = "./keys/deployer-keypair.json"
 
 [scripts]
