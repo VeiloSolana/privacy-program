@@ -22,7 +22,11 @@
     "test:jupiter-old": "ts-node scripts/test-jupiter-integration.ts",
     "test:jupiter": "mocha -r ts-node/register -t 1000000 'tests/jupiter-swap.test.ts'",
     "deploy:mainnet": "ts-node scripts/deploy-mainnet.ts",
-    "deploy:mainnet:dry": "DRY_RUN=true ts-node scripts/deploy-mainnet.ts"
+    "deploy:mainnet:dry": "DRY_RUN=true ts-node scripts/deploy-mainnet.ts",
+    "deploy:devnet:binary": "anchor deploy --provider.cluster devnet --program-keypair keys/program-keypair-devnet.json",
+    "deploy:mainnet:binary": "anchor deploy --provider.cluster mainnet --program-keypair keys/program-keypair-mainnet.json",
+    "keys:show": "node -e \"const fs=require('fs'),{Keypair}=require('@solana/web3.js'); ['admin','deployer','relayer','spl-relayer','program-keypair-devnet','program-keypair-mainnet'].forEach(n=>{try{const kp=Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync('keys/'+n+'.json')))); console.log(n+':\\n  pub: '+kp.publicKey.toBase58());}catch(e){}});\"",
+    "freeze:mainnet": "solana program set-upgrade-authority GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU --final --keypair keys/program-keypair-mainnet.json --url mainnet-beta"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -46,7 +50,7 @@
     "@types/chai": "^5.2.3",
     "@types/circomlibjs": "^0.1.6",
     "@types/mocha": "^10.0.10",
-    "@types/node": "^24.10.1",
+    "@types/node": "^24.11.0",
     "@types/node-fetch": "^2.6.13",
     "@types/snarkjs": "^0.7.9",
     "anchor-client-gen": "^0.28.1",
