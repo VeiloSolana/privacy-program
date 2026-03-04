@@ -47,28 +47,27 @@ pub const MAX_FEE_BPS: u16 = 100;
 /// Note: Users can always exit via standard withdrawal at lower fees (max 1%)
 pub const MAX_SWAP_FEE_BPS: u16 = 1000;
 
-/// Allow all SPL tokens for testing on localnet
-/// TODO: For production, set this to false and use ALLOWED_TOKENS whitelist
-pub const ALLOW_ALL_SPL_TOKENS: bool = true;
+/// SPL token whitelist enforcement — MUST remain false in production.
+/// SOL (native) is always permitted and is not routed through this check.
+pub const ALLOW_ALL_SPL_TOKENS: bool = false;
 
 /// Devnet/Localnet allowed tokens (test networks)
 #[cfg(any(feature = "devnet", feature = "localnet"))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC (devnet)
     pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT (devnet)
-    pubkey!("6zxkY8UygHKBf64LJDXnzcYr9wdvyqScmj7oGPBFw58Z"), // ORE (devnet)
-    pubkey!("Vu3Lcx3chdCHmy9KCCdd19DdJsLejHAZxm1E1bTgE16"), // ZEC (devnet)
-    pubkey!("5MvqBFU5zeHaEfRuAFW2RhqidHLb7Ejsa6sUwPQQXcj1"), // stORE (devnet)
+    pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1 (devnet)
+    pubkey!("JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"), // JUP (devnet)
 ];
 
 /// Mainnet allowed tokens (production)
+/// SOL (native) is always permitted — these are SPL mints only.
 #[cfg(not(any(feature = "devnet", feature = "localnet")))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
     pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
     pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
-    pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp"), // ORE
-    pubkey!("A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS"), // ZEC
-    pubkey!("sTorERYB6xAZ1SSbwpK3zoK2EEwbBrc7TZAzg1uCGiH"), // stORE
+    pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1
+    pubkey!("JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"), // JUP
 ];
 
 /// Raydium CPMM program ID (mainnet)
@@ -723,8 +722,11 @@ pub struct TransactSwap<'info> {
     )]
     pub source_nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
 
-    /// Source vault's token account (ATA for source_mint)
-    #[account(mut)]
+    /// Source vault's token account — must be the canonical ATA to prevent non-canonical account abuse (AUDIT-003)
+    #[account(
+        mut,
+        address = get_associated_token_address(&source_vault.key(), &source_mint)
+    )]
     pub source_vault_token_account: Box<Account<'info, TokenAccount>>,
 
     /// Source token mint
@@ -753,8 +755,11 @@ pub struct TransactSwap<'info> {
     )]
     pub dest_tree: AccountLoader<'info, MerkleTreeAccount>,
 
-    /// Destination vault's token account (ATA for dest_mint)
-    #[account(mut)]
+    /// Destination vault's token account — must be the canonical ATA to prevent non-canonical account abuse (AUDIT-003)
+    #[account(
+        mut,
+        address = get_associated_token_address(&dest_vault.key(), &dest_mint)
+    )]
     pub dest_vault_token_account: Box<Account<'info, TokenAccount>>,
 
     /// Destination token mint
@@ -871,8 +876,8 @@ pub mod privacy_pool {
 
         cfg.admin = ctx.accounts.admin.key();
 
-        // Validate fee_bps does not exceed 100%
-        require!(fee_bps <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
+        // Validate fee_bps: must be >= 1 (zero causes division-by-zero in withdrawal) and <= 100 bps
+        require!(fee_bps >= 1 && fee_bps <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
 
         cfg.fee_bps = fee_bps;
         cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
@@ -992,8 +997,8 @@ pub mod privacy_pool {
             cfg.max_withdraw_amount = val;
         }
         if let Some(val) = fee_bps {
-            // Validate fee_bps does not exceed 100%
-            require!(val <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
+            // Validate fee_bps: must be >= 1 (zero causes division-by-zero in withdrawal) and <= 100 bps
+            require!(val >= 1 && val <= MAX_FEE_BPS, PrivacyError::ExcessiveFeeBps);
             cfg.fee_bps = val;
         }
         if let Some(val) = min_withdrawal_fee {
@@ -1132,12 +1137,9 @@ pub mod privacy_pool {
         require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
-        // For deposits (public_amount > 0), anyone can facilitate deposit without being authorized
-        // For withdrawals (public_amount < 0) and transfers (public_amount = 0), require authorized relayer
-        if public_amount <= 0 {
-            // Check if this specific relayer is authorized
-            require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
-        }
+        // All operations (deposits, withdrawals, transfers) require an authorized relayer.
+        // Permissionless deposits would allow any actor to grief Merkle tree capacity at low cost.
+        require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
         // 2a. Bind relayer account to ext_data.relayer to prevent fee theft
         // This ensures the relayer submitting the transaction is the one entitled to fees
@@ -1556,6 +1558,10 @@ fn handle_public_amount<'info>(
             .ok_or(PrivacyError::ArithmeticOverflow)?;
 
         // Calculate minimum valid withdrawal amount to prevent fee bypass
+        // Guard: fee_bps >= 1 is enforced at initialization and update, but defend-in-depth here.
+        if config.fee_bps == 0 {
+            return err!(PrivacyError::ArithmeticOverflow);
+        }
         let min_valid_withdrawal = (config.min_withdrawal_fee as u128)
             .checked_mul(10_000)
             .and_then(|x| x.checked_div(config.fee_bps as u128))

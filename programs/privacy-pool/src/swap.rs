@@ -381,6 +381,17 @@ pub fn transact_swap<'info>(
 
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
+        // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
+        // CPMM swap_base_input layout: [8-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
+        let dex_min_out = u64::from_le_bytes(
+            swap_data[16..24]
+                .try_into()
+                .map_err(|_| error!(PrivacyError::InvalidPublicAmount))?,
+        );
+        require!(
+            dex_min_out >= swap_params.min_amount_out,
+            PrivacyError::InvalidPublicAmount
+        );
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
         // CPMM account layout in remaining_accounts:
@@ -467,6 +478,18 @@ pub fn transact_swap<'info>(
         require!(
             remaining.len() >= 14,
             PrivacyError::InvalidRemainingAccounts
+        );
+        // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
+        // AMM V4 swap_base_in layout: [1-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
+        require!(swap_data.len() >= 17, PrivacyError::InvalidPublicAmount);
+        let dex_min_out = u64::from_le_bytes(
+            swap_data[9..17]
+                .try_into()
+                .map_err(|_| error!(PrivacyError::InvalidPublicAmount))?,
+        );
+        require!(
+            dex_min_out >= swap_params.min_amount_out,
+            PrivacyError::InvalidPublicAmount
         );
 
         // Validate Serum/OpenBook Program ID - this is the critical check
