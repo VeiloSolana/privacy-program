@@ -36,4 +36,5 @@ ark-serialize = { version = "0.5", default-features = false }
 
 num-bigint = "0.4"
 solana-bn254 = { version = "2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 proc-macro2 = "=1.0.94"

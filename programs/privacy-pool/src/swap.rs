@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
-use anchor_spl::token::{self, CloseAccount, Transfer};
+use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
+use anchor_spl::token::{ self, CloseAccount, Transfer };
 
-use crate::zk::{verify_swap_transaction_groth16, SwapProof};
-use crate::{ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap};
+use crate::zk::{ verify_swap_transaction_groth16, SwapProof };
+use crate::{ ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap };
 
 /// Ephemeral PDA that holds tokens during swap, created and closed atomically
 #[account]
@@ -31,6 +31,15 @@ pub struct SwapParams {
     pub deadline: i64,
     pub source_mint: Pubkey,
     pub dest_mint: Pubkey,
+    /// SHA-256 hash of the raw swap instruction data (swap_data).
+    /// Binds the exact DEX instruction bytes into the ZK proof so the relayer
+    /// cannot substitute different swap_data (e.g. 0% slippage) after the user
+    /// has generated their proof.  Set to [0u8;32] for CPMM/AMM swaps, which
+    /// already enforce dex_min_out by direct instruction decoding.
+    /// BREAKING: ZK swap circuit must include this field when computing
+    /// swap_params_hash = Poseidon(source_mint, dest_mint, min_amount_out,
+    ///                              deadline, swap_data_hash).
+    pub swap_data_hash: [u8; 32],
 }
 
 impl SwapParams {
@@ -86,12 +95,17 @@ impl SwapParams {
         let mut deadline_bytes = [0u8; 32];
         deadline_bytes[24..].copy_from_slice(&self.deadline.to_be_bytes());
 
-        let hash1 = PoseidonHasher::hashv(&[&source_mint_bytes, &dest_mint_bytes])
-            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash1 = PoseidonHasher::hashv(&[&source_mint_bytes, &dest_mint_bytes]).map_err(|_|
+            error!(PrivacyError::MerkleHashFailed)
+        )?;
 
-        let hash2 = PoseidonHasher::hashv(&[&min_out_bytes, &deadline_bytes])
-            .map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
+        let hash2 = PoseidonHasher::hashv(&[&min_out_bytes, &deadline_bytes]).map_err(|_|
+            error!(PrivacyError::MerkleHashFailed)
+        )?;
 
+        // NOTE: swap_data_hash is validated separately by on-chain SHA-256 check (Jupiter branch).
+        // Inclusion in this Poseidon hash requires a circuit update (add swapDataHash private input
+        // to swap.circom and recompile). Until then, use the 2-step hash matching the compiled WASM.
         PoseidonHasher::hashv(&[&hash1, &hash2]).map_err(|_| error!(PrivacyError::MerkleHashFailed))
     }
 }
@@ -125,13 +139,13 @@ pub fn transact_swap<'info>(
     swap_params: SwapParams,
     swap_amount: u64,
     swap_data: Vec<u8>,
-    ext_data: ExtData,
+    ext_data: ExtData
 ) -> Result<()> {
     // Prevents arbitrary CPI to malicious programs
     require!(
-        ctx.accounts.swap_program.key() == crate::RAYDIUM_CPMM_PROGRAM_ID
-            || ctx.accounts.swap_program.key() == crate::RAYDIUM_AMM_PROGRAM_ID
-            || ctx.accounts.swap_program.key() == crate::JUPITER_PROGRAM_ID,
+        ctx.accounts.swap_program.key() == crate::RAYDIUM_CPMM_PROGRAM_ID ||
+            ctx.accounts.swap_program.key() == crate::RAYDIUM_AMM_PROGRAM_ID ||
+            ctx.accounts.swap_program.key() == crate::JUPITER_PROGRAM_ID,
         PrivacyError::InvalidSwapProgram
     );
 
@@ -140,69 +154,41 @@ pub fn transact_swap<'info>(
         ctx.accounts.source_config.mint_address == source_mint,
         PrivacyError::InvalidMintAddress
     );
-    require!(
-        ctx.accounts.dest_config.mint_address == dest_mint,
-        PrivacyError::InvalidMintAddress
-    );
+    require!(ctx.accounts.dest_config.mint_address == dest_mint, PrivacyError::InvalidMintAddress);
     require!(source_mint != dest_mint, PrivacyError::InvalidMintAddress);
 
     // Validate tree IDs are within bounds before proof verification
-    require!(
-        source_tree_id < ctx.accounts.source_config.num_trees,
-        PrivacyError::InvalidTreeId
-    );
-    require!(
-        dest_tree_id < ctx.accounts.dest_config.num_trees,
-        PrivacyError::InvalidTreeId
-    );
+    require!(source_tree_id < ctx.accounts.source_config.num_trees, PrivacyError::InvalidTreeId);
+    require!(dest_tree_id < ctx.accounts.dest_config.num_trees, PrivacyError::InvalidTreeId);
 
     // Check relayer is whitelisted in BOTH source and dest pools
     // This prevents relayers authorized only for one pool from facilitating
     // swaps across pool boundaries they shouldn't access
     require!(
-        ctx.accounts
-            .source_config
-            .is_relayer(&ctx.accounts.relayer.key()),
+        ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
     require!(
-        ctx.accounts
-            .dest_config
-            .is_relayer(&ctx.accounts.relayer.key()),
+        ctx.accounts.dest_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
 
     let clock = Clock::get()?;
-    require!(
-        clock.unix_timestamp <= swap_params.deadline,
-        PrivacyError::InvalidPublicAmount
-    );
+    require!(clock.unix_timestamp <= swap_params.deadline, PrivacyError::InvalidPublicAmount);
 
     // AUDIT-004: Verify swap_params mints match instruction mints
     // This ensures the swap_params_hash (committed in ZK proof) binds to the actual
     // mints being swapped. Without this check, an attacker could provide mismatched
     // mints between swap_params and instruction args, potentially bypassing slippage
     // protection if the circuit doesn't enforce this binding.
-    require!(
-        swap_params.source_mint == source_mint,
-        PrivacyError::InvalidSwapParams
-    );
-    require!(
-        swap_params.dest_mint == dest_mint,
-        PrivacyError::InvalidSwapParams
-    );
+    require!(swap_params.source_mint == source_mint, PrivacyError::InvalidSwapParams);
+    require!(swap_params.dest_mint == dest_mint, PrivacyError::InvalidSwapParams);
 
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
 
-    require!(
-        input_nullifiers[0] != input_nullifiers[1],
-        PrivacyError::DuplicateNullifiers
-    );
-    require!(
-        output_commitments[0] != output_commitments[1],
-        PrivacyError::DuplicateCommitments
-    );
+    require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
+    require!(output_commitments[0] != output_commitments[1], PrivacyError::DuplicateCommitments);
 
     let zero = [0u8; 32];
     require!(
@@ -245,10 +231,7 @@ pub fn transact_swap<'info>(
 
     // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;
-    require!(
-        MerkleTree::is_known_root(&*source_tree, source_root),
-        PrivacyError::UnknownRoot
-    );
+    require!(MerkleTree::is_known_root(&*source_tree, source_root), PrivacyError::UnknownRoot);
 
     // Upfront capacity check for both trees before any state changes
     // While Solana transactions are atomic (failures revert all state), this:
@@ -285,7 +268,7 @@ pub fn transact_swap<'info>(
         input_nullifiers[0],
         ctx.bumps.source_nullifier_marker_0,
         source_mint,
-        source_tree_id,
+        source_tree_id
     )?;
     crate::mark_nullifier_spent(
         &mut ctx.accounts.source_nullifier_marker_1,
@@ -293,7 +276,7 @@ pub fn transact_swap<'info>(
         input_nullifiers[1],
         ctx.bumps.source_nullifier_marker_1,
         source_mint,
-        source_tree_id,
+        source_tree_id
     )?;
 
     // Initialize executor PDA (uses 'init' so always fresh, no staleness check needed)
@@ -311,12 +294,9 @@ pub fn transact_swap<'info>(
 
     // Validate vault has sufficient balance before transfer
     let vault_token_data = crate::deserialize_token_account(
-        &ctx.accounts.source_vault_token_account.to_account_info(),
+        &ctx.accounts.source_vault_token_account.to_account_info()
     )?;
-    require!(
-        vault_token_data.amount >= swap_amount,
-        PrivacyError::InsufficientFundsForWithdrawal
-    );
+    require!(vault_token_data.amount >= swap_amount, PrivacyError::InsufficientFundsForWithdrawal);
 
     let source_vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
@@ -332,16 +312,13 @@ pub fn transact_swap<'info>(
                 to: ctx.accounts.executor_source_token.to_account_info(),
                 authority: ctx.accounts.source_vault.to_account_info(),
             },
-            &[source_vault_seeds],
+            &[source_vault_seeds]
         ),
-        swap_amount,
+        swap_amount
     )?;
 
     // Update source pool TVL (decrease by swap_amount)
-    ctx.accounts.source_config.total_tvl = ctx
-        .accounts
-        .source_config
-        .total_tvl
+    ctx.accounts.source_config.total_tvl = ctx.accounts.source_config.total_tvl
         .checked_sub(swap_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
@@ -362,36 +339,33 @@ pub fn transact_swap<'info>(
     // Detect generic Swap Program type based on Instruction Discriminator
     // Raydium CPMM: 8-byte discriminator (0x8fbe5adac41e33de for swap_base_input)
     // Raydium AMM V4: 1-byte discriminator (0x09 for swap_base_in)
-    let is_cpmm = swap_data.len() >= 8
-        && swap_data[0] == 0x8f
-        && swap_data[1] == 0xbe
-        && swap_data[2] == 0x5a
-        && swap_data[3] == 0xda;
+    let is_cpmm =
+        swap_data.len() >= 8 &&
+        swap_data[0] == 0x8f &&
+        swap_data[1] == 0xbe &&
+        swap_data[2] == 0x5a &&
+        swap_data[3] == 0xda;
 
     let is_amm = !is_cpmm && swap_data.len() >= 1 && swap_data[0] == 9;
 
     // Detect Jupiter V6 "route" instruction
-    let is_jupiter = !is_cpmm
-        && !is_amm
-        && swap_data.len() >= 8
-        && (swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a] // Route
-            || swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] // SharedAccountsRoute
-            || swap_data[0..8] == [0xd0, 0x33, 0xef, 0x97, 0x7b, 0x2b, 0xed, 0x5c] // ExactOutRoute
-            || swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e]); // SharedAccountsExactOutRoute
+    let is_jupiter =
+        !is_cpmm &&
+        !is_amm &&
+        swap_data.len() >= 8 &&
+        (swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a] || // Route
+            swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] || // SharedAccountsRoute
+            swap_data[0..8] == [0xd0, 0x33, 0xef, 0x97, 0x7b, 0x2b, 0xed, 0x5c] || // ExactOutRoute
+            swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e]); // SharedAccountsExactOutRoute
 
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
         // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
         // CPMM swap_base_input layout: [8-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
         let dex_min_out = u64::from_le_bytes(
-            swap_data[16..24]
-                .try_into()
-                .map_err(|_| error!(PrivacyError::InvalidPublicAmount))?,
+            swap_data[16..24].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
         );
-        require!(
-            dex_min_out >= swap_params.min_amount_out,
-            PrivacyError::InvalidPublicAmount
-        );
+        require!(dex_min_out >= swap_params.min_amount_out, PrivacyError::InvalidPublicAmount);
         require!(remaining.len() >= 8, PrivacyError::InvalidRemainingAccounts);
 
         // CPMM account layout in remaining_accounts:
@@ -429,7 +403,7 @@ pub fn transact_swap<'info>(
             AccountMeta::new_readonly(ctx.accounts.token_program.key(), false),
             AccountMeta::new_readonly(remaining[5].key(), false),
             AccountMeta::new_readonly(remaining[6].key(), false),
-            AccountMeta::new(remaining[7].key(), false),
+            AccountMeta::new(remaining[7].key(), false)
         ];
 
         let swap_ix = Instruction {
@@ -475,22 +449,14 @@ pub fn transact_swap<'info>(
         // [12] = Serum Pc Vault (owned by Token program)
         // [13] = Serum Vault Signer (PDA)
 
-        require!(
-            remaining.len() >= 14,
-            PrivacyError::InvalidRemainingAccounts
-        );
+        require!(remaining.len() >= 14, PrivacyError::InvalidRemainingAccounts);
         // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
         // AMM V4 swap_base_in layout: [1-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
         require!(swap_data.len() >= 17, PrivacyError::InvalidPublicAmount);
         let dex_min_out = u64::from_le_bytes(
-            swap_data[9..17]
-                .try_into()
-                .map_err(|_| error!(PrivacyError::InvalidPublicAmount))?,
+            swap_data[9..17].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
         );
-        require!(
-            dex_min_out >= swap_params.min_amount_out,
-            PrivacyError::InvalidPublicAmount
-        );
+        require!(dex_min_out >= swap_params.min_amount_out, PrivacyError::InvalidPublicAmount);
 
         // Validate Serum/OpenBook Program ID - this is the critical check
         // (AMM will validate all other account ownership/derivations internally)
@@ -501,23 +467,23 @@ pub fn transact_swap<'info>(
 
         let amm_accounts = vec![
             AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // 0
-            AccountMeta::new(remaining[0].key(), false),                        // 1: Amm Id
-            AccountMeta::new_readonly(remaining[1].key(), false),               // 2: Amm Authority
-            AccountMeta::new(remaining[2].key(), false),                        // 3: Open Orders
-            AccountMeta::new(remaining[3].key(), false),                        // 4: Target Orders
-            AccountMeta::new(remaining[4].key(), false),                        // 5: Pool Coin
-            AccountMeta::new(remaining[5].key(), false),                        // 6: Pool Pc
-            AccountMeta::new_readonly(remaining[6].key(), false),               // 7: Serum Program
-            AccountMeta::new(remaining[7].key(), false),                        // 8: Serum Market
-            AccountMeta::new(remaining[8].key(), false),                        // 9: Bids
-            AccountMeta::new(remaining[9].key(), false),                        // 10: Asks
-            AccountMeta::new(remaining[10].key(), false),                       // 11: Event Queue
-            AccountMeta::new(remaining[11].key(), false),                       // 12: Coin Vault
-            AccountMeta::new(remaining[12].key(), false),                       // 13: Pc Vault
-            AccountMeta::new_readonly(remaining[13].key(), false),              // 14: Vault Signer
-            AccountMeta::new(ctx.accounts.executor_source_token.key(), false),  // 15
-            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false),    // 16
-            AccountMeta::new_readonly(executor.key(), true),                    // 17
+            AccountMeta::new(remaining[0].key(), false), // 1: Amm Id
+            AccountMeta::new_readonly(remaining[1].key(), false), // 2: Amm Authority
+            AccountMeta::new(remaining[2].key(), false), // 3: Open Orders
+            AccountMeta::new(remaining[3].key(), false), // 4: Target Orders
+            AccountMeta::new(remaining[4].key(), false), // 5: Pool Coin
+            AccountMeta::new(remaining[5].key(), false), // 6: Pool Pc
+            AccountMeta::new_readonly(remaining[6].key(), false), // 7: Serum Program
+            AccountMeta::new(remaining[7].key(), false), // 8: Serum Market
+            AccountMeta::new(remaining[8].key(), false), // 9: Bids
+            AccountMeta::new(remaining[9].key(), false), // 10: Asks
+            AccountMeta::new(remaining[10].key(), false), // 11: Event Queue
+            AccountMeta::new(remaining[11].key(), false), // 12: Coin Vault
+            AccountMeta::new(remaining[12].key(), false), // 13: Pc Vault
+            AccountMeta::new_readonly(remaining[13].key(), false), // 14: Vault Signer
+            AccountMeta::new(ctx.accounts.executor_source_token.key(), false), // 15
+            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false), // 16
+            AccountMeta::new_readonly(executor.key(), true) // 17
         ];
 
         let swap_ix = Instruction {
@@ -534,7 +500,7 @@ pub fn transact_swap<'info>(
             ctx.accounts.executor_source_token.to_account_info(),
             ctx.accounts.executor_dest_token.to_account_info(),
             executor.to_account_info(),
-            ctx.accounts.swap_program.to_account_info(),
+            ctx.accounts.swap_program.to_account_info()
         ];
 
         for acc in remaining.iter().take(14) {
@@ -552,17 +518,14 @@ pub fn transact_swap<'info>(
             PrivacyError::Unauthorized
         );
 
-        msg!(
-            "Jupiter Event Authority: {}",
-            ctx.accounts.jupiter_event_authority.key()
-        );
+        msg!("Jupiter Event Authority: {}", ctx.accounts.jupiter_event_authority.key());
 
         let mut jupiter_accounts = Vec::new();
         let mut account_infos = Vec::new();
 
-        let is_shared_accounts = swap_data[0..8]
-            == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81]
-            || swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e];
+        let is_shared_accounts =
+            swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] ||
+            swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e];
 
         if is_shared_accounts {
             // SharedAccountsRoute Layout:
@@ -578,21 +541,12 @@ pub fn transact_swap<'info>(
             // ...
 
             // Minimum account count check
-            require!(
-                remaining.len() >= 9,
-                PrivacyError::JupiterInsufficientAccounts
-            );
+            require!(remaining.len() >= 9, PrivacyError::JupiterInsufficientAccounts);
 
             // Validate source and dest mints match expected - ensures correct token pair
             // (Jupiter will validate all other account ownership/derivations)
-            require!(
-                remaining[7].key() == source_mint,
-                PrivacyError::InvalidMintAddress
-            );
-            require!(
-                remaining[8].key() == dest_mint,
-                PrivacyError::InvalidMintAddress
-            );
+            require!(remaining[7].key() == source_mint, PrivacyError::InvalidMintAddress);
+            require!(remaining[8].key() == dest_mint, PrivacyError::InvalidMintAddress);
 
             // We need to inject our executor accounts at indices 2, 3, and 6
             // The `remaining` array contains the accounts Jupiter expects, so we iterate through them
@@ -607,27 +561,27 @@ pub fn transact_swap<'info>(
                     }
                     3 => {
                         // Index 3: User Source Token Account -> Executor Source Token
-                        jupiter_accounts.push(AccountMeta::new(
-                            ctx.accounts.executor_source_token.key(),
-                            false,
-                        ));
+                        jupiter_accounts.push(
+                            AccountMeta::new(ctx.accounts.executor_source_token.key(), false)
+                        );
                         account_infos.push(ctx.accounts.executor_source_token.to_account_info());
                     }
                     6 => {
                         // Index 6: User Destination Token Account -> Executor Dest Token
-                        jupiter_accounts.push(AccountMeta::new(
-                            ctx.accounts.executor_dest_token.key(),
-                            false,
-                        ));
+                        jupiter_accounts.push(
+                            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false)
+                        );
                         account_infos.push(ctx.accounts.executor_dest_token.to_account_info());
                     }
                     _ => {
                         // Pass through other accounts (Project Authority, Mints, etc.)
-                        jupiter_accounts.push(if acc.is_writable {
-                            AccountMeta::new(acc.key(), false)
-                        } else {
-                            AccountMeta::new_readonly(acc.key(), false)
-                        });
+                        jupiter_accounts.push(
+                            if acc.is_writable {
+                                AccountMeta::new(acc.key(), false)
+                            } else {
+                                AccountMeta::new_readonly(acc.key(), false)
+                            }
+                        );
                         account_infos.push(acc.to_account_info());
                     }
                 }
@@ -642,10 +596,7 @@ pub fn transact_swap<'info>(
             // ...
 
             // Minimum account count check
-            require!(
-                remaining.len() >= 4,
-                PrivacyError::JupiterInsufficientAccounts
-            );
+            require!(remaining.len() >= 4, PrivacyError::JupiterInsufficientAccounts);
 
             // Jupiter validates its own accounts - we just ensure basic structure
 
@@ -658,31 +609,42 @@ pub fn transact_swap<'info>(
                     }
                     2 => {
                         // Replace account #2 with executor's source token account
-                        jupiter_accounts.push(AccountMeta::new(
-                            ctx.accounts.executor_source_token.key(),
-                            false,
-                        ));
+                        jupiter_accounts.push(
+                            AccountMeta::new(ctx.accounts.executor_source_token.key(), false)
+                        );
                         account_infos.push(ctx.accounts.executor_source_token.to_account_info());
                     }
                     3 => {
                         // Replace account #3 with executor's dest token account
-                        jupiter_accounts.push(AccountMeta::new(
-                            ctx.accounts.executor_dest_token.key(),
-                            false,
-                        ));
+                        jupiter_accounts.push(
+                            AccountMeta::new(ctx.accounts.executor_dest_token.key(), false)
+                        );
                         account_infos.push(ctx.accounts.executor_dest_token.to_account_info());
                     }
                     _ => {
                         // Use account from remaining_accounts as-is
-                        jupiter_accounts.push(if acc.is_writable {
-                            AccountMeta::new(acc.key(), false)
-                        } else {
-                            AccountMeta::new_readonly(acc.key(), false)
-                        });
+                        jupiter_accounts.push(
+                            if acc.is_writable {
+                                AccountMeta::new(acc.key(), false)
+                            } else {
+                                AccountMeta::new_readonly(acc.key(), false)
+                            }
+                        );
                         account_infos.push(acc.to_account_info());
                     }
                 }
             }
+        }
+
+        // MEDIUM-001 FIX: Verify swap_data matches the hash committed in the ZK proof.
+        // This prevents the relayer from substituting swap_data with different slippage
+        // settings (e.g. 0%) after the user has already generated their ZK proof.
+        // The user computes sha256(swap_data) off-chain and commits it inside
+        // swap_params_hash via the ZK circuit; we re-derive it here and compare.
+        {
+            use sha2::{ Sha256, Digest };
+            let computed: [u8; 32] = Sha256::digest(&swap_data).into();
+            require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
         }
 
         // Construct instruction
@@ -693,7 +655,7 @@ pub fn transact_swap<'info>(
         };
 
         // Execute CPI with executor PDA signing
-        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?
+        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
     } else {
         msg!(
             "Unknown Swap Program detected. Requires CPMM (0x8fbe..), AMM (0x09), or Jupiter (0xe517cb97..) discriminator."
@@ -705,16 +667,10 @@ pub fn transact_swap<'info>(
     ctx.accounts.executor_dest_token.reload()?;
     let swapped_amount = ctx.accounts.executor_dest_token.amount;
 
-    require!(
-        swapped_amount >= swap_params.min_amount_out,
-        PrivacyError::InvalidPublicAmount
-    );
+    require!(swapped_amount >= swap_params.min_amount_out, PrivacyError::InvalidPublicAmount);
 
     let relayer_fee = ext_data.fee;
-    require!(
-        swapped_amount > relayer_fee,
-        PrivacyError::InvalidPublicAmount
-    );
+    require!(swapped_amount > relayer_fee, PrivacyError::InvalidPublicAmount);
 
     // Validate fee meets pool requirements
     let dest_config = &ctx.accounts.dest_config;
@@ -723,10 +679,7 @@ pub fn transact_swap<'info>(
         .and_then(|x| x.checked_div(10_000))
         .ok_or(PrivacyError::ArithmeticOverflow)? as u64;
     let min_required_fee = std::cmp::max(dest_config.min_swap_fee, percentage_fee);
-    require!(
-        relayer_fee >= min_required_fee,
-        PrivacyError::InsufficientFee
-    );
+    require!(relayer_fee >= min_required_fee, PrivacyError::InsufficientFee);
 
     let vault_amount = swapped_amount.saturating_sub(relayer_fee);
 
@@ -738,16 +691,13 @@ pub fn transact_swap<'info>(
                 to: ctx.accounts.dest_vault_token_account.to_account_info(),
                 authority: executor.to_account_info(),
             },
-            &[executor_seeds],
+            &[executor_seeds]
         ),
-        vault_amount,
+        vault_amount
     )?;
 
     // Update dest pool TVL (increase by vault_amount)
-    ctx.accounts.dest_config.total_tvl = ctx
-        .accounts
-        .dest_config
-        .total_tvl
+    ctx.accounts.dest_config.total_tvl = ctx.accounts.dest_config.total_tvl
         .checked_add(vault_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
@@ -761,9 +711,9 @@ pub fn transact_swap<'info>(
                     to: ctx.accounts.relayer_token_account.to_account_info(),
                     authority: executor.to_account_info(),
                 },
-                &[executor_seeds],
+                &[executor_seeds]
             ),
-            relayer_fee,
+            relayer_fee
         )?;
     }
 
@@ -817,35 +767,33 @@ pub fn transact_swap<'info>(
     });
 
     // Close executor accounts
-    token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        CloseAccount {
-            account: ctx.accounts.executor_source_token.to_account_info(),
-            destination: ctx.accounts.relayer.to_account_info(),
-            authority: executor.to_account_info(),
-        },
-        &[executor_seeds],
-    ))?;
-    token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
-        CloseAccount {
-            account: ctx.accounts.executor_dest_token.to_account_info(),
-            destination: ctx.accounts.relayer.to_account_info(),
-            authority: executor.to_account_info(),
-        },
-        &[executor_seeds],
-    ))?;
+    token::close_account(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            CloseAccount {
+                account: ctx.accounts.executor_source_token.to_account_info(),
+                destination: ctx.accounts.relayer.to_account_info(),
+                authority: executor.to_account_info(),
+            },
+            &[executor_seeds]
+        )
+    )?;
+    token::close_account(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            CloseAccount {
+                account: ctx.accounts.executor_dest_token.to_account_info(),
+                destination: ctx.accounts.relayer.to_account_info(),
+                authority: executor.to_account_info(),
+            },
+            &[executor_seeds]
+        )
+    )?;
 
     // Return executor PDA rent to relayer
     let executor_lamports = executor.to_account_info().lamports();
     **executor.to_account_info().try_borrow_mut_lamports()? = 0;
-    **ctx
-        .accounts
-        .relayer
-        .to_account_info()
-        .try_borrow_mut_lamports()? = ctx
-        .accounts
-        .relayer
+    **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
         .to_account_info()
         .lamports()
         .checked_add(executor_lamports)

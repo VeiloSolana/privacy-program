@@ -511,6 +511,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           Array.from(dummyNullifier1),
           Array.from(commitment),
           Array.from(dummyOutputCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -760,6 +761,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           Array.from(dummyNullifier1),
           Array.from(changeCommitment),
           Array.from(dummyOutputCommitment1),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -981,6 +983,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         Array.from(dummyNullifier1),
         Array.from(aliceCommitment),
         Array.from(aliceDummyCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
       )
@@ -1155,6 +1158,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         Array.from(transferDummyNullifier),
         Array.from(bobCommitment),
         Array.from(aliceChangeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
       )
@@ -1277,7 +1281,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           .accounts({
             config: tokenConfig,
             noteTree: tokenNoteTreeDestination,
-            payer: wallet.publicKey,
+            relayer: wallet.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .rpc();
@@ -1317,7 +1321,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         .accounts({
           config: tokenConfig,
           noteTree: unauthorizedTreePDA,
-          payer: unauthorizedWallet.publicKey,
+          relayer: unauthorizedWallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([unauthorizedWallet])
@@ -1327,9 +1331,13 @@ describe("Privacy Pool - SPL Token Support", () => {
       if (e.message.includes("Expected unauthorized wallet to fail")) {
         throw e;
       }
-      // Expected error - verify it's the Unauthorized error
+      // Expected error - verify it's the Unauthorized error (6000), RelayerNotAllowed (6008), or client-side rejection
       const isUnauthorized =
-        e.toString().includes("Unauthorized") || e.toString().includes("6000"); // Unauthorized error code
+        e.toString().includes("Unauthorized") ||
+        e.toString().includes("6000") ||
+        e.toString().includes("RelayerNotAllowed") ||
+        e.toString().includes("6008") ||
+        e.toString().includes("unknown signer");
       if (isUnauthorized) {
         console.log(`   ✅ Unauthorized wallet correctly rejected`);
       } else {
@@ -1495,6 +1503,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         Array.from(dummyNullifier1),
         Array.from(commitment),
         Array.from(dummyOutputCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
       )
@@ -1645,6 +1654,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         Array.from(dummyNullifier2),
         Array.from(outputCommitment),
         Array.from(dummyOutput2Commitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
       )
@@ -1991,6 +2001,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           Array.from(dummyNullifier1),
           Array.from(commitment),
           Array.from(dummyOutputCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )

@@ -360,6 +360,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -663,6 +664,10 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const swapData = jupiterService.buildSwapData(
       swapIxResponse.swapInstruction,
     );
+    const swapDataHash = (() => {
+      const { createHash } = require("crypto");
+      return Uint8Array.from(createHash("sha256").update(swapData).digest());
+    })(); // MEDIUM-001: commit swap_data to prevent relayer substitution
 
     // Prepare Notes
     const destAmount = minAmountOut;
@@ -713,6 +718,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: sourcePool.mint,
       destMint: destPool.mint,
+      swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
     const swapParamsHash = computeSwapParamsHash(
       poseidon,
@@ -720,6 +726,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       destPool.mint,
       minAmountOut,
       BigInt(swapParams.deadline.toString()),
+      swapDataHash, // MEDIUM-001
     );
 
     // Fee: 0.5% of output
@@ -1133,6 +1140,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
           Array.from(dummyNull2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )

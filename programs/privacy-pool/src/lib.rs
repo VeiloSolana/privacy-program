@@ -54,6 +54,7 @@ pub const ALLOW_ALL_SPL_TOKENS: bool = false;
 /// Devnet/Localnet allowed tokens (test networks)
 #[cfg(any(feature = "devnet", feature = "localnet"))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
+    pubkey!("So11111111111111111111111111111111111111112"), // WSOL
     pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC (devnet)
     pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT (devnet)
     pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1 (devnet)
@@ -64,6 +65,7 @@ pub const ALLOWED_TOKENS: &[Pubkey] = &[
 /// SOL (native) is always permitted — these are SPL mints only.
 #[cfg(not(any(feature = "devnet", feature = "localnet")))]
 pub const ALLOWED_TOKENS: &[Pubkey] = &[
+    pubkey!("So11111111111111111111111111111111111111112"), // WSOL
     pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
     pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
     pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1
@@ -887,6 +889,17 @@ pub mod privacy_pool {
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
 
+        // Enforce token whitelist on pool creation to prevent fund trapping.
+        // If a non-whitelisted pool could be created, users could swap INTO it
+        // via transact_swap (no whitelist check) but then be unable to withdraw
+        // via transact (which enforces the whitelist), permanently trapping funds.
+        if is_token_mint(&mint_address) {
+            require!(
+                ALLOW_ALL_SPL_TOKENS || ALLOWED_TOKENS.contains(&mint_address),
+                PrivacyError::InvalidMintAddress
+            );
+        }
+
         // Set deposit/withdraw limits with sensible defaults
         cfg.min_deposit_amount = min_deposit_amount.unwrap_or(1_000_000); // Default: 0.001 SOL
         cfg.max_deposit_amount = max_deposit_amount.unwrap_or(1_000_000_000_000); // Default: 1000 SOL
@@ -928,8 +941,9 @@ pub mod privacy_pool {
         let cfg = &mut ctx.accounts.config;
         let relayer = &ctx.accounts.relayer;
 
-        // Only registered relayers can add trees
-        require!(cfg.is_relayer(&relayer.key()), PrivacyError::RelayerNotAllowed);
+        // Admin OR any registered relayer can add trees
+        let caller = relayer.key();
+        require!(cfg.admin == caller || cfg.is_relayer(&caller), PrivacyError::RelayerNotAllowed);
 
         // Validate tree_id is sequential
         require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
@@ -1071,6 +1085,7 @@ pub mod privacy_pool {
         input_nullifier_1: [u8; 32],
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
+        deadline: i64,
         ext_data: ExtData,
         proof: zk::TransactionProof
     ) -> Result<()> {
@@ -1136,10 +1151,19 @@ pub mod privacy_pool {
         let computed_ext_hash = ext_data.hash()?;
         require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
+        // 1a. Enforce deadline - prevents relayer from holding and executing transactions
+        // at an economically favorable time (fee spikes, price drops, timing attacks).
+        // Mirror of the same check in transact_swap.
+        let clock = Clock::get()?;
+        require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
+
         // 2. Verify relayer is authorized (only for withdrawals/transfers, not deposits)
-        // All operations (deposits, withdrawals, transfers) require an authorized relayer.
-        // Permissionless deposits would allow any actor to grief Merkle tree capacity at low cost.
-        require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+        // For deposits (public_amount > 0), anyone can facilitate deposit without being authorized
+        // For withdrawals (public_amount < 0) and transfers (public_amount = 0), require authorized relayer
+        if public_amount <= 0 {
+            // Check if this specific relayer is authorized
+            require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+        }
 
         // 2a. Bind relayer account to ext_data.relayer to prevent fee theft
         // This ensures the relayer submitting the transaction is the one entitled to fees
@@ -1162,9 +1186,13 @@ pub mod privacy_pool {
         require_keys_eq!(mint_address, cfg.mint_address, PrivacyError::InvalidMintAddress);
 
         // 4a. Validate SPL token is allowed (if not SOL)
+        // Note: mint_address has already been verified to equal cfg.mint_address above,
+        // so if this pool was initialized with this mint, it is implicitly allowed.
         if is_token_mint(&mint_address) {
             require!(
-                ALLOW_ALL_SPL_TOKENS || ALLOWED_TOKENS.contains(&mint_address),
+                ALLOW_ALL_SPL_TOKENS ||
+                    ALLOWED_TOKENS.contains(&mint_address) ||
+                    mint_address == cfg.mint_address,
                 PrivacyError::InvalidMintAddress
             );
         }
@@ -1854,4 +1882,6 @@ pub enum PrivacyError {
     JupiterInvalidInstruction,
     #[msg("Swap params mints do not match instruction mints")]
     InvalidSwapParams,
+    #[msg("Transaction deadline has expired")]
+    DeadlineExpired,
 }

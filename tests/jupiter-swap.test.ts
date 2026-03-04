@@ -345,6 +345,10 @@ describe("Privacy Pool Jupiter Swap", () => {
     const swapData = jupiterService.buildSwapData(
       swapIxResponse.swapInstruction,
     );
+    const swapDataHash = (() => {
+      const { createHash } = require("crypto");
+      return Uint8Array.from(createHash("sha256").update(swapData).digest());
+    })(); // MEDIUM-001: commit swap_data to prevent relayer substitution
 
     console.log(`  Swap data length: ${swapData.length} bytes`);
     console.log(`  Discriminator: ${swapData.slice(0, 8).toString("hex")}`);
@@ -647,6 +651,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         Array.from(dummyNullifier2),
         Array.from(commitment),
         Array.from(changeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         {
           recipient: extData.recipient,
           relayer: extData.relayer,
@@ -808,6 +813,10 @@ describe("Privacy Pool Jupiter Swap", () => {
     const swapData = jupiterService.buildSwapData(
       swapIxResponse.swapInstruction,
     );
+    const swapDataHash = (() => {
+      const { createHash } = require("crypto");
+      return Uint8Array.from(createHash("sha256").update(swapData).digest());
+    })(); // MEDIUM-001: commit swap_data to prevent relayer substitution
 
     // Create output note for swap result in DESTINATION pool
     // NOTE: The actual amount will be determined by the swap execution
@@ -854,6 +863,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600), // 1 hour from now
       sourceMint: WSOL_MINT,
       destMint: USDC_MINT,
+      swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
 
     // Prepare ext data
@@ -874,6 +884,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       USDC_MINT,
       minAmountOut,
       BigInt(swapParams.deadline.toString()),
+      swapDataHash, // MEDIUM-001
     );
 
     // Create dummy second input (always 0 amount for single-note swaps)

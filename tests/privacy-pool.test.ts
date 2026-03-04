@@ -1115,6 +1115,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyNullifier1),
           Array.from(commitment),
           Array.from(dummyOutputCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -1489,6 +1490,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyNullifier1),
           Array.from(changeCommitment),
           Array.from(dummyOutputCommitment1),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -1779,6 +1781,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyNullifier1),
         Array.from(deposit1Commitment),
         Array.from(deposit1DummyCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit1,
         deposit1Proof,
       )
@@ -1948,6 +1951,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyNullifier3),
         Array.from(deposit2Commitment),
         Array.from(deposit2DummyCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit2,
         deposit2Proof,
       )
@@ -2142,6 +2146,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(deposit2Nullifier),
         Array.from(changeCommitment),
         Array.from(dummyOutputCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
       )
@@ -2388,6 +2393,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyIn1Nullifier),
           Array.from(commitment),
           Array.from(dummyCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -2658,6 +2664,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             Array.from(data.nullifier2),
             Array.from(data.outputCommitment),
             Array.from(data.dummyCommitment),
+            new BN(9999999999), // deadline (far future for tests)
             data.extData,
             data.proof,
           )
@@ -2915,6 +2922,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(nullifier2),
         Array.from(changeCommitment),
         Array.from(dummyOutCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
       )
@@ -3453,6 +3461,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyIn1Nullifier),
         Array.from(commitment1),
         Array.from(dummyDeposit1Commitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit1,
         deposit1Proof,
       )
@@ -3523,6 +3532,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyIn3Nullifier),
         Array.from(commitment2),
         Array.from(dummyDeposit2Commitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit2,
         deposit2Proof,
       )
@@ -3612,6 +3622,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(nullifier2),
         Array.from(changeCommitment),
         Array.from(dummyOutCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
       )
@@ -3766,7 +3777,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           .accounts({
             config,
             noteTree: noteTreeDestination,
-            payer: wallet.publicKey,
+            relayer: wallet.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .rpc();
@@ -3806,7 +3817,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         .accounts({
           config,
           noteTree: unauthorizedTreePDA,
-          payer: unauthorizedWallet.publicKey,
+          relayer: unauthorizedWallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([unauthorizedWallet])
@@ -3816,9 +3827,13 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       if (e.message.includes("Expected unauthorized wallet to fail")) {
         throw e;
       }
-      // Expected error - verify it's the Unauthorized error
+      // Expected error - verify it's the Unauthorized error (6000), RelayerNotAllowed (6008), or client-side rejection
       const isUnauthorized =
-        e.toString().includes("Unauthorized") || e.toString().includes("6000"); // Unauthorized error code
+        e.toString().includes("Unauthorized") ||
+        e.toString().includes("6000") ||
+        e.toString().includes("RelayerNotAllowed") ||
+        e.toString().includes("6008") ||
+        e.toString().includes("unknown signer");
       if (isUnauthorized) {
         console.log(`   ✅ Unauthorized wallet correctly rejected`);
       } else {
@@ -3987,6 +4002,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyNullifier1),
         Array.from(commitment),
         Array.from(dummyOutputCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
       )
@@ -4166,6 +4182,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyNullifier2),
         Array.from(outputCommitment),
         Array.from(dummyOutput2Commitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
       )
@@ -4367,6 +4384,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyWithdrawNullifier),
           Array.from(dummyOut1Commitment),
           Array.from(dummyOut2Commitment),
+          new BN(9999999999), // deadline (far future for tests)
           extDataWithdraw,
           wrongTreeProof,
         )
@@ -4543,6 +4561,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyDepositIn1Nullifier),
         Array.from(tree0Commitment),
         Array.from(dummyTree0Output),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         tree0DepositProof,
       )
@@ -4642,6 +4661,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           Array.from(dummyWithdrawNullifier),
           Array.from(dummyOut1Commitment),
           Array.from(dummyOut2Commitment),
+          new BN(9999999999), // deadline (far future for tests)
           extDataWithdraw,
           wrongTreeProof2,
         )
@@ -4858,6 +4878,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(dummyNullifier1),
         Array.from(aliceCommitment),
         Array.from(aliceDummyCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
       )
@@ -5081,6 +5102,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(transferDummyNullifier),
         Array.from(bobCommitment),
         Array.from(aliceChangeCommitment),
+        new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
       )
@@ -5491,6 +5513,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         Array.from(bobDummyNullifier),
         Array.from(bobDummyOutputCommitment0),
         Array.from(bobDummyOutputCommitment1),
+        new BN(9999999999), // deadline (far future for tests)
         extDataBobWithdraw,
         bobWithdrawProof,
       )

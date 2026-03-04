@@ -615,6 +615,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -737,7 +738,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      const minAmountOut = new BN(50_000_000); // 50 USDC min
+      const minAmountOut = new BN(20_000_000); // 20 USDC min (conservative, works at ~$40+/SOL)
       const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
 
       const swapParams = {
@@ -745,6 +746,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdc.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -794,6 +796,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           sol.mint.toBuffer(),
           usdc.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -1278,6 +1281,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -1405,6 +1409,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdt.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -1454,6 +1459,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           sol.mint.toBuffer(),
           usdt.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -1926,6 +1932,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -2053,6 +2060,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: jup.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -2102,6 +2110,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           sol.mint.toBuffer(),
           jup.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -2570,6 +2579,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -2697,6 +2707,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usd1.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -2746,6 +2757,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           sol.mint.toBuffer(),
           usd1.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -3056,9 +3068,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
     const EXPECTED_USDC_OUT = 150_000_000n; // ~150 USDC (conservative estimate)
     const USDC_SWAP_FEE = 1_000_000n; // 1 USDC fee for relayer
     // Step 3: Swap USDC to JUP
-    const USDC_SWAP_AMOUNT = 100_000_000; // 100 USDC
-    const EXPECTED_JUP_OUT = 100_000_000n; // ~100 JUP (estimated)
-    const JUP_SWAP_FEE = 50_000_000n; // 50 JUP fee for relayer
+    const USDC_SWAP_AMOUNT = 50_000_000; // 50 USDC (conservative: vault may hold <100 USDC at current rates)
+    const EXPECTED_JUP_OUT = 50_000_000n; // ~50 JUP (conservative estimate)
+    const JUP_SWAP_FEE = 5_000_000n; // 5 JUP fee for relayer
 
     let solDepositNoteId: string | null = null;
     let usdcNoteId: string | null = null;
@@ -3266,6 +3278,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           Array.from(dummyNullifier2),
           Array.from(commitment),
           Array.from(changeCommitment),
+          new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
         )
@@ -3396,6 +3409,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdc.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -3445,6 +3459,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           sol.mint.toBuffer(),
           usdc.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -3803,7 +3818,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      const minAmountOut = new BN(100_000_000); // 100 JUP
+      const minAmountOut = new BN(25_000_000); // 25 JUP min (conservative)
       const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
 
       const swapParams = {
@@ -3811,6 +3826,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: usdc.mint,
         destMint: jup.mint,
+        swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
       const swapParamsHash = computeSwapParamsHash(
@@ -3860,6 +3876,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           usdc.mint.toBuffer(),
           jup.mint.toBuffer(),
           Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
         ],
         program.programId,
       );
