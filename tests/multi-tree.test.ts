@@ -558,22 +558,24 @@ describe("Multi-tree: edge cases & scenarios", () => {
     await (program.methods as any)
       .updatePoolConfig(
         SOL_MINT,
-        new BN(10_000_000),          // min_deposit_amount:       0.01 SOL
-        new BN(1_000_000_000_000),   // max_deposit_amount:    1000 SOL
-        new BN(10_000_000),          // min_withdraw_amount:      0.01 SOL
-        new BN(1_000_000_000_000),   // max_withdraw_amount:   1000 SOL
-        50,                          // fee_bps:                  0.5%
-        new BN(50_000),              // min_withdrawal_fee:   0.00005 SOL
-        500,                         // fee_error_margin_bps:     5%
-        new BN(50_000),              // min_swap_fee:         0.00005 SOL
-        50,                          // swap_fee_bps:             0.5%
+        new BN(10_000_000), // min_deposit_amount:       0.01 SOL
+        new BN(1_000_000_000_000), // max_deposit_amount:    1000 SOL
+        new BN(10_000_000), // min_withdraw_amount:      0.01 SOL
+        new BN(1_000_000_000_000), // max_withdraw_amount:   1000 SOL
+        50, // fee_bps:                  0.5%
+        new BN(50_000), // min_withdrawal_fee:   0.00005 SOL
+        500, // fee_error_margin_bps:     5%
+        new BN(50_000), // min_swap_fee:         0.00005 SOL
+        50, // swap_fee_bps:             0.5%
       )
       .accounts({
         config,
         admin: wallet.publicKey,
       })
       .rpc();
-    console.log("✅ Pool config updated with production values (POOL_CONFIGS.SOL)");
+    console.log(
+      "✅ Pool config updated with production values (POOL_CONFIGS.SOL)",
+    );
 
     // Tree 0 must exist on-chain
     const treeAcc = await (
