@@ -1477,6 +1477,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       dummyNullifier1,
     );
 
+    // Declared here so it's in scope for the fee assertion after the try/catch
+    let withdrawSolanaFee = 0n;
+
     try {
       const tx = await (program.methods as any)
         .transact(
@@ -1528,7 +1531,18 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       transaction.add(addPriorityFee);
       transaction.add(tx);
 
-      await provider.sendAndConfirm(transaction, [relayer]);
+      const withdrawTxSig = await provider.sendAndConfirm(transaction, [
+        relayer,
+      ]);
+
+      // Capture on-chain tx fee so we can assert exact relayer fee receipt below
+      const withdrawTxInfo = await provider.connection.getTransaction(
+        withdrawTxSig,
+        {
+          maxSupportedTransactionVersion: 0,
+        },
+      );
+      withdrawSolanaFee = BigInt(withdrawTxInfo?.meta?.fee ?? 0);
 
       // Insert withdrawal outputs into offchain tree (to stay in sync with on-chain)
       offchainTree.insert(changeCommitment);
@@ -1555,6 +1569,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     const vaultPaid = beforeVaultWithdraw - afterVaultWithdraw;
     const relayerReceived = afterRelayerWithdraw - beforeRelayerWithdraw;
     const recipientReceived = afterRecipientWithdraw - beforeRecipientWithdraw;
+    const solanaFee = withdrawSolanaFee;
 
     console.log("\n💰 Balance Check - After Withdrawal:");
     console.log(`   Vault:     ${vault.toBase58()}`);
@@ -1600,12 +1615,43 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       );
     }
 
-    // Verify relayer received fee (minus tx costs)
-    // Note: Relayer's balance change includes fee income minus tx costs
-    const expectedRelayerMin = fee - 10_000_000n; // Allow up to 0.01 SOL for tx fees
-    if (relayerReceived < expectedRelayerMin) {
-      console.warn(
-        `   ⚠️  Relayer received less than expected (likely due to tx fees): ${relayerReceived} < ${expectedRelayerMin}`,
+    // The Solana tx fee is paid by the provider wallet (fee payer in sendAndConfirm),
+    // NOT by the relayer. The relayer only pays rent for the two nullifier marker PDAs.
+    // So the exact equation is:
+    //   relayerReceived = fee_from_vault - nullifierRent
+    //   => relayerReceived + nullifierRent === fee
+    const nullifierMarker0Balance = BigInt(
+      await provider.connection.getBalance(nullifierMarker0),
+    );
+    const nullifierMarker1Balance = BigInt(
+      await provider.connection.getBalance(nullifierMarker1),
+    );
+    const nullifierRent = nullifierMarker0Balance + nullifierMarker1Balance;
+
+    const relayerNetFee = relayerReceived + nullifierRent;
+    console.log(`\n📊 Relayer fee verification:`);
+    console.log(
+      `   Protocol fee embedded in proof:    ${fee} lamports (${
+        Number(fee) / LAMPORTS_PER_SOL
+      } SOL)`,
+    );
+    console.log(
+      `   Relayer net balance change:        ${relayerReceived} lamports`,
+    );
+    console.log(
+      `   Solana tx fee (paid by provider):  ${solanaFee} lamports (not deducted from relayer)`,
+    );
+    console.log(
+      `   Nullifier marker rent (×2):        ${nullifierRent} lamports`,
+    );
+    console.log(
+      `   relayerReceived + nullifierRent:   ${relayerNetFee} lamports`,
+    );
+    if (relayerNetFee !== fee) {
+      throw new Error(
+        `❌ Relayer fee NOT collected! ` +
+          `relayerReceived(${relayerReceived}) + nullifierRent(${nullifierRent}) = ${relayerNetFee}, ` +
+          `expected protocol fee(${fee}). The contract did NOT transfer the 0.5% fee to the relayer.`,
       );
     }
 
@@ -1615,10 +1661,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       `   ✓ Recipient received exactly ${toRecipient} lamports (${withdrawAmount} - ${fee} fee)`,
     );
     console.log(
-      `   ✓ Relayer received ${relayerReceived} lamports (${fee} fee - tx costs)`,
+      `   ✓ Relayer received ${fee} lamports from vault (net: ${relayerReceived} after ${nullifierRent} nullifier rent)`,
     );
     console.log(
-      `   ✓ Total accounted: ${vaultPaid} = ${recipientReceived} + ${fee} (sent to relayer)`,
+      `   ✓ Total accounted: vault paid ${vaultPaid} = ${recipientReceived} (recipient) + ${fee} (relayer protocol fee)`,
     );
 
     console.log("\n✅ Withdrawal successful");
