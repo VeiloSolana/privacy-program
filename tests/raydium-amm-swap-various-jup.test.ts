@@ -14,6 +14,7 @@ import {
 import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
   getAssociatedTokenAddress,
   createWrappedNativeAccount,
   closeAccount,
@@ -26,12 +27,18 @@ import { JupiterSwapService } from "./utils/jupiter/jupiter-swap-service";
 import {
   JUPITER_PROGRAM_ID,
   JUPITER_EVENT_AUTHORITY,
-  WSOL_MINT,
   USDC_MINT,
   USDT_MINT,
   JUP_MINT,
   USD1_MINT,
 } from "./amm-v4-pool-helper";
+
+const SOL_MINT = PublicKey.default;
+
+/** For native SOL pools, SPL operations use WSOL (NATIVE_MINT) */
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 import {
   InMemoryNoteStorage,
   OffchainMerkleTree,
@@ -51,7 +58,7 @@ import {
  * Privacy Pool Jupiter Swap Tests
  *
  * Tests the transact_swap instruction with Jupiter aggregator which:
- * 1. Consumes notes from source pool (WSOL)
+ * 1. Consumes notes from source pool (SOL)
  * 2. CPIs to Jupiter V6 to execute swap SOL→USDC/USDT/JUP
  * 3. Creates notes in destination pool
  *
@@ -190,6 +197,8 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     string,
     {
       mint: PublicKey;
+      /** SPL mint used for token operations (WSOL for native SOL pools) */
+      tokenMint: PublicKey;
       config: PublicKey;
       vault: PublicKey;
       noteTree: PublicKey;
@@ -219,10 +228,12 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const pool = pools[poolName];
     if (!pool) throw new Error(`Pool ${poolName} not found`);
 
-    // Only supporting WSOL source for now as per tests
-    if (poolName !== "WSOL") {
-      throw new Error("initialDeposit helper currently only supports WSOL");
+    // Only supporting SOL source for now as per tests
+    if (poolName !== "SOL") {
+      throw new Error("initialDeposit helper currently only supports SOL");
     }
+
+    const isNative = pool.mint.equals(PublicKey.default);
 
     // Airdrop SOL to payer to ensure funds
     try {
@@ -233,24 +244,31 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       );
     }
 
-    // Ensure vault token accounts exist
-    await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer,
-      pool.mint,
-      pool.vault,
-      true,
-    );
+    // For SPL tokens: ensure vault token accounts exist
+    // For native SOL: vault holds lamports directly, no ATA needed for deposits
+    let userTokenAccount: PublicKey;
+    if (!isNative) {
+      await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        pool.mint,
+        pool.vault,
+        true,
+      );
 
-    // Create wrapped SOL account (fresh for each deposit to avoid conflicts)
-    const wsolKeypair = Keypair.generate();
-    const wsolAccount = await createWrappedNativeAccount(
-      provider.connection,
-      payer,
-      payer.publicKey,
-      Number(amount) + 1_000_000,
-      wsolKeypair,
-    );
+      // Create wrapped SOL account (fresh for each deposit to avoid conflicts)
+      const wsolKeypair = Keypair.generate();
+      userTokenAccount = await createWrappedNativeAccount(
+        provider.connection,
+        payer,
+        payer.publicKey,
+        Number(amount) + 1_000_000,
+        wsolKeypair,
+      );
+    } else {
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      userTokenAccount = payer.publicKey;
+    }
 
     // Prepare deposit
     const blinding = randomBytes32();
@@ -381,9 +399,9 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         relayer: payer.publicKey,
         recipient: payer.publicKey,
         vaultTokenAccount: pool.vaultTokenAccount,
-        userTokenAccount: wsolAccount,
-        recipientTokenAccount: wsolAccount,
-        relayerTokenAccount: wsolAccount,
+        userTokenAccount: userTokenAccount,
+        recipientTokenAccount: userTokenAccount,
+        relayerTokenAccount: userTokenAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -417,14 +435,16 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const [noteTree] = deriveNoteTreePDA(program.programId, mint, 0);
     const [nullifiers] = deriveNullifiersPDA(program.programId, mint);
 
+    const tMint = tokenMintFor(mint);
     const vaultTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      tMint,
       vault,
       true,
     );
 
     pools[name] = {
       mint,
+      tokenMint: tMint,
       config,
       vault,
       noteTree,
@@ -516,7 +536,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     }
 
     // Setup Pools
-    await setupPool(WSOL_MINT, "WSOL", 9);
+    await setupPool(SOL_MINT, "SOL", 9);
     await setupPool(USDC_MINT, "USDC", 6);
     await setupPool(USDT_MINT, "USDT", 6);
     await setupPool(JUP_MINT, "JUP", 6);
@@ -527,7 +547,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
   // TEST: Deposit SOL
   // --------------------------------------------------------------------------
   it("should deposit SOL to create spendable note", async function () {
-    solDepositNoteId = await initialDeposit("WSOL", INITIAL_DEPOSIT);
+    solDepositNoteId = await initialDeposit("SOL", INITIAL_DEPOSIT);
   });
 
   // --------------------------------------------------------------------------
@@ -553,18 +573,29 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
 
     console.log(`\n🔄 Executing ${sourceName} -> ${destName} swap...`);
 
+    const sourceIsNative = sourcePool.mint.equals(PublicKey.default);
+    const destIsNative = destPool.mint.equals(PublicKey.default);
+
     // Ensure relayer has dest token account
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
       payer,
-      destPool.mint,
+      destPool.tokenMint,
       payer.publicKey,
+    );
+    // Ensure source vault token account (needed for wrapping native SOL → WSOL)
+    await getOrCreateAssociatedTokenAccount(
+      connection,
+      payer,
+      sourcePool.tokenMint,
+      sourcePool.vault,
+      true,
     );
     // Ensure dest vault account
     await getOrCreateAssociatedTokenAccount(
       connection,
       payer,
-      destPool.mint,
+      destPool.tokenMint,
       destPool.vault,
       true,
     );
@@ -572,16 +603,39 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     // =====================================================
     // BALANCE LOGGING: Before swap
     // =====================================================
-    const sourceVaultBalanceBefore = await connection.getTokenAccountBalance(
-      sourcePool.vaultTokenAccount,
-    );
+    let sourceVaultBalanceBefore: any;
+    if (sourceIsNative) {
+      const lamports = await connection.getBalance(sourcePool.vault);
+      sourceVaultBalanceBefore = {
+        value: {
+          amount: String(lamports),
+          uiAmount: lamports / LAMPORTS_PER_SOL,
+          decimals: 9,
+        },
+      };
+    } else {
+      sourceVaultBalanceBefore = await connection.getTokenAccountBalance(
+        sourcePool.vaultTokenAccount,
+      );
+    }
     let destVaultBalanceBefore: any = {
       value: { amount: "0", uiAmount: 0, decimals: 6 },
     };
     try {
-      destVaultBalanceBefore = await connection.getTokenAccountBalance(
-        destPool.vaultTokenAccount,
-      );
+      if (destIsNative) {
+        const lamports = await connection.getBalance(destPool.vault);
+        destVaultBalanceBefore = {
+          value: {
+            amount: String(lamports),
+            uiAmount: lamports / LAMPORTS_PER_SOL,
+            decimals: 9,
+          },
+        };
+      } else {
+        destVaultBalanceBefore = await connection.getTokenAccountBalance(
+          destPool.vaultTokenAccount,
+        );
+      }
     } catch (e) {
       // Dest vault may not exist yet
     }
@@ -615,13 +669,13 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       note.privateKey,
     );
 
-    // Get Quote
+    // Get Quote (use tokenMint for Jupiter - it needs WSOL address, not PublicKey.default)
     const swapAmount = BigInt(swapAmountStr);
     let quote;
     try {
       quote = await jupiterService.getQuote(
-        sourcePool.mint,
-        destPool.mint,
+        sourcePool.tokenMint,
+        destPool.tokenMint,
         Number(swapAmount),
         slippageBps,
       );
@@ -778,12 +832,12 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       dummyNullifier,
     );
     const executorSourceToken = await getAssociatedTokenAddress(
-      sourcePool.mint,
+      sourcePool.tokenMint,
       executorPDA,
       true,
     );
     const executorDestToken = await getAssociatedTokenAddress(
-      destPool.mint,
+      destPool.tokenMint,
       executorPDA,
       true,
     );
@@ -814,12 +868,12 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         sourceNullifierMarker0: nullifierMarker0,
         sourceNullifierMarker1: nullifierMarker1,
         sourceVaultTokenAccount: sourcePool.vaultTokenAccount,
-        sourceMintAccount: sourcePool.mint,
+        sourceMintAccount: sourcePool.tokenMint,
         destConfig: destPool.config,
         destVault: destPool.vault,
         destTree: destPool.noteTree,
         destVaultTokenAccount: destPool.vaultTokenAccount,
-        destMintAccount: destPool.mint,
+        destMintAccount: destPool.tokenMint,
         executor: executorPDA,
         executorSourceToken,
         executorDestToken,
@@ -887,12 +941,36 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     // =====================================================
     // BALANCE LOGGING: After swap
     // =====================================================
-    const sourceVaultBalanceAfter = await connection.getTokenAccountBalance(
-      sourcePool.vaultTokenAccount,
-    );
-    const destVaultBalanceAfter = await connection.getTokenAccountBalance(
-      destPool.vaultTokenAccount,
-    );
+    let sourceVaultBalanceAfter: any;
+    if (sourceIsNative) {
+      const lamports = await connection.getBalance(sourcePool.vault);
+      sourceVaultBalanceAfter = {
+        value: {
+          amount: String(lamports),
+          uiAmount: lamports / LAMPORTS_PER_SOL,
+          decimals: 9,
+        },
+      };
+    } else {
+      sourceVaultBalanceAfter = await connection.getTokenAccountBalance(
+        sourcePool.vaultTokenAccount,
+      );
+    }
+    let destVaultBalanceAfter: any;
+    if (destIsNative) {
+      const lamports = await connection.getBalance(destPool.vault);
+      destVaultBalanceAfter = {
+        value: {
+          amount: String(lamports),
+          uiAmount: lamports / LAMPORTS_PER_SOL,
+          decimals: 9,
+        },
+      };
+    } else {
+      destVaultBalanceAfter = await connection.getTokenAccountBalance(
+        destPool.vaultTokenAccount,
+      );
+    }
     const relayerBalanceAfter = await connection.getTokenAccountBalance(
       relayerTokenAccount.address,
     );
@@ -1000,33 +1078,67 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
   // TEST: SOL -> USDC
   // --------------------------------------------------------------------------
   it("should execute SOL -> USDC swap via Jupiter", async function () {
-    const noteId = await initialDeposit("WSOL", 10_000_000_000n);
-    await executeJupiterSwap("WSOL", "USDC", noteId, "1000000000"); // 1 SOL
+    const noteId = await initialDeposit("SOL", 10_000_000_000n);
+    await executeJupiterSwap("SOL", "USDC", noteId, "1000000000"); // 1 SOL
   });
 
   // --------------------------------------------------------------------------
   // TEST: SOL -> USDT
   // --------------------------------------------------------------------------
   it("should execute SOL -> USDT swap via Jupiter", async function () {
-    const noteId = await initialDeposit("WSOL", 10_000_000_000n);
-    await executeJupiterSwap("WSOL", "USDT", noteId, "500000000"); // 0.5 SOL
+    const noteId = await initialDeposit("SOL", 10_000_000_000n);
+    await executeJupiterSwap("SOL", "USDT", noteId, "500000000"); // 0.5 SOL
   });
 
   // --------------------------------------------------------------------------
   // TEST: SOL -> JUP
   // --------------------------------------------------------------------------
   it("should execute SOL -> JUP swap via Jupiter", async function () {
-    const noteId = await initialDeposit("WSOL", 10_000_000_000n);
-    await executeJupiterSwap("WSOL", "JUP", noteId, "1000000000"); // 1 SOL
+    const noteId = await initialDeposit("SOL", 10_000_000_000n);
+    await executeJupiterSwap("SOL", "JUP", noteId, "1000000000"); // 1 SOL
   });
 
   // --------------------------------------------------------------------------
   // TEST: SOL -> USD1
   // --------------------------------------------------------------------------
   it("should execute SOL -> USD1 swap via Jupiter", async function () {
-    const noteId = await initialDeposit("WSOL", 10_000_000_000n);
+    const noteId = await initialDeposit("SOL", 10_000_000_000n);
     // Note: USD1 likely has no route on Jupiter's mainnet/API. This helper will skip if getQuote fails.
-    await executeJupiterSwap("WSOL", "USD1", noteId, "500000000"); // 0.5 SOL
+    await executeJupiterSwap("SOL", "USD1", noteId, "500000000"); // 0.5 SOL
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST: USDC -> SOL (Token back to native SOL)
+  // --------------------------------------------------------------------------
+  describe("USDC -> SOL (Token to Native SOL)", () => {
+    let usdcNoteForSolSwap: string | undefined;
+
+    it("Step 1: Deposit SOL and swap to get USDC", async function () {
+      console.log("\n🔗 Step 1: Deposit SOL and swap to get USDC");
+      const solNoteId = await initialDeposit("SOL", 10_000_000_000n);
+      usdcNoteForSolSwap = await executeJupiterSwap(
+        "SOL",
+        "USDC",
+        solNoteId,
+        "1000000000", // 1 SOL
+      );
+      console.log(`✅ Got USDC note: ${usdcNoteForSolSwap}`);
+    });
+
+    it("Step 2: Swap USDC -> SOL", async function () {
+      console.log("\n🔗 Step 2: Swap USDC back to SOL");
+      if (!usdcNoteForSolSwap) return this.skip();
+      const usdcNote = noteStorage.get(usdcNoteForSolSwap);
+      if (!usdcNote) throw new Error("USDC note not found");
+      // Swap half the USDC back to SOL
+      const swapAmount = usdcNote.amount / 2n;
+      await executeJupiterSwap(
+        "USDC",
+        "SOL",
+        usdcNoteForSolSwap,
+        swapAmount.toString(),
+      );
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -1035,167 +1147,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
   describe("Chained Swap (SOL -> USDC -> JUP)", () => {
     it("Step 1: Deposit SOL for chained swap", async function () {
       console.log("\n🔗 Step 1: Deposit SOL");
-      const amount = 2_000_000_000n; // 2 SOL
-      const solPool = pools["WSOL"];
-
-      const wsolKeypair = Keypair.generate();
-      const wsolAccount = await createWrappedNativeAccount(
-        connection,
-        payer,
-        payer.publicKey,
-        Number(amount) + 1_000_000,
-        wsolKeypair,
-      );
-
-      const blinding = randomBytes32();
-      const commitment = computeCommitment(
-        poseidon,
-        amount,
-        publicKey,
-        blinding,
-        WSOL_MINT,
-      );
-      const changeOwnerPriv = randomBytes32();
-      const changeOwnerPub = derivePublicKey(poseidon, changeOwnerPriv);
-      const changeBlinding = randomBytes32();
-      const changeCommitment = computeCommitment(
-        poseidon,
-        0n,
-        changeOwnerPub,
-        changeBlinding,
-        WSOL_MINT,
-      );
-
-      // Generate two consistent dummy inputs
-      const dummyPrivKey1 = randomBytes32();
-      const dummyBlinding1 = randomBytes32();
-      const dummyPub1 = derivePublicKey(poseidon, dummyPrivKey1);
-      const dummyComm1 = computeCommitment(
-        poseidon,
-        0n,
-        dummyPub1,
-        dummyBlinding1,
-        WSOL_MINT,
-      );
-      const dummyNull1 = computeNullifier(
-        poseidon,
-        dummyComm1,
-        0,
-        dummyPrivKey1,
-      );
-
-      const dummyPrivKey2 = randomBytes32();
-      const dummyBlinding2 = randomBytes32();
-      const dummyPub2 = derivePublicKey(poseidon, dummyPrivKey2);
-      const dummyComm2 = computeCommitment(
-        poseidon,
-        0n,
-        dummyPub2,
-        dummyBlinding2,
-        WSOL_MINT,
-      );
-      const dummyNull2 = computeNullifier(
-        poseidon,
-        dummyComm2,
-        0,
-        dummyPrivKey2,
-      );
-
-      const extData = {
-        recipient: payer.publicKey,
-        relayer: payer.publicKey,
-        fee: new BN(0),
-        refund: new BN(0),
-      };
-      const extDataHash = computeExtDataHash(poseidon, extData);
-      const proof = await generateTransactionProof({
-        root: solPool.offchainTree.getRoot(),
-        publicAmount: amount,
-        extDataHash,
-        mintAddress: WSOL_MINT,
-        inputNullifiers: [dummyNull1, dummyNull2],
-        outputCommitments: [commitment, changeCommitment],
-        inputAmounts: [0n, 0n],
-        inputPrivateKeys: [dummyPrivKey1, dummyPrivKey2],
-        inputPublicKeys: [dummyPub1, dummyPub2],
-        inputBlindings: [dummyBlinding1, dummyBlinding2],
-        inputMerklePaths: [
-          solPool.offchainTree.getMerkleProof(0),
-          solPool.offchainTree.getMerkleProof(0),
-        ],
-        outputAmounts: [amount, 0n],
-        outputOwners: [publicKey, changeOwnerPub],
-        outputBlindings: [blinding, changeBlinding],
-      });
-
-      await (program.methods as any)
-        .transact(
-          Array.from(solPool.offchainTree.getRoot()),
-          0,
-          0,
-          new BN(amount.toString()),
-          Array.from(extDataHash),
-          WSOL_MINT,
-          Array.from(dummyNull1),
-          Array.from(dummyNull2),
-          Array.from(commitment),
-          Array.from(changeCommitment),
-          new BN(9999999999), // deadline (far future for tests)
-          extData,
-          proof,
-        )
-        .accounts({
-          config: solPool.config,
-          globalConfig,
-          vault: solPool.vault,
-          inputTree: solPool.noteTree,
-          outputTree: solPool.noteTree,
-          nullifiers: solPool.nullifiers,
-          nullifierMarker0: deriveNullifierMarkerPDA(
-            program.programId,
-            WSOL_MINT,
-            0,
-            dummyNull1,
-          ),
-          nullifierMarker1: deriveNullifierMarkerPDA(
-            program.programId,
-            WSOL_MINT,
-            0,
-            dummyNull2,
-          ),
-          relayer: payer.publicKey,
-          recipient: payer.publicKey,
-          vaultTokenAccount: solPool.vaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .preInstructions([
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }),
-        ])
-        .rpc();
-
-      const leafIndex = solPool.offchainTree.insert(commitment);
-      solPool.offchainTree.insert(changeCommitment);
-
-      chainedSolDepositNoteId = noteStorage.save({
-        amount,
-        commitment,
-        nullifier: computeNullifier(
-          poseidon,
-          commitment,
-          leafIndex,
-          privateKey,
-        ),
-        blinding,
-        privateKey,
-        publicKey,
-        leafIndex,
-        merklePath: solPool.offchainTree.getMerkleProof(leafIndex),
-        mintAddress: WSOL_MINT,
-      });
+      chainedSolDepositNoteId = await initialDeposit("SOL", 2_000_000_000n);
       console.log(`✅ Deposited 2 SOL, Note: ${chainedSolDepositNoteId}`);
     });
 
@@ -1203,7 +1155,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       console.log("\n🔗 Step 2: Swap SOL -> USDC");
       // Swap 1 SOL
       chainedUsdcNoteId = await executeJupiterSwap(
-        "WSOL",
+        "SOL",
         "USDC",
         chainedSolDepositNoteId,
         "1000000000",

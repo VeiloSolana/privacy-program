@@ -1,9 +1,10 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
-use anchor_spl::token::{ self, CloseAccount, Transfer };
+use anchor_spl::associated_token::get_associated_token_address;
+use anchor_spl::token::{ self, CloseAccount, Transfer, SyncNative };
 
 use crate::zk::{ verify_swap_transaction_groth16, SwapProof };
-use crate::{ ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap };
+use crate::{ ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap, is_token_mint };
 
 /// Ephemeral PDA that holds tokens during swap, created and closed atomically
 #[account]
@@ -103,9 +104,6 @@ impl SwapParams {
             error!(PrivacyError::MerkleHashFailed)
         )?;
 
-        // NOTE: swap_data_hash is validated separately by on-chain SHA-256 check (Jupiter branch).
-        // Inclusion in this Poseidon hash requires a circuit update (add swapDataHash private input
-        // to swap.circom and recompile). Until then, use the 2-step hash matching the compiled WASM.
         PoseidonHasher::hashv(&[&hash1, &hash2]).map_err(|_| error!(PrivacyError::MerkleHashFailed))
     }
 }
@@ -176,11 +174,8 @@ pub fn transact_swap<'info>(
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= swap_params.deadline, PrivacyError::InvalidPublicAmount);
 
-    // AUDIT-004: Verify swap_params mints match instruction mints
-    // This ensures the swap_params_hash (committed in ZK proof) binds to the actual
-    // mints being swapped. Without this check, an attacker could provide mismatched
-    // mints between swap_params and instruction args, potentially bypassing slippage
-    // protection if the circuit doesn't enforce this binding.
+    // Ensure swap_params mints match instruction mints so the ZK-committed hash
+    // binds to the actual swap direction.
     require!(swap_params.source_mint == source_mint, PrivacyError::InvalidSwapParams);
     require!(swap_params.dest_mint == dest_mint, PrivacyError::InvalidSwapParams);
 
@@ -249,17 +244,8 @@ pub fn transact_swap<'info>(
     require!(dest_remaining >= 1, PrivacyError::MerkleTreeFull);
     drop(dest_tree);
 
-    // Check if nullifiers were already marked to prevent double-spend
-    // The PDA derivation includes tree_id in seeds, so cross-tree reuse is already impossible
-    // (Anchor enforces the account matches the PDA seeds during instruction processing)
-    require!(
-        ctx.accounts.source_nullifier_marker_0.nullifier == [0u8; 32],
-        PrivacyError::NullifierAlreadyUsed
-    );
-    require!(
-        ctx.accounts.source_nullifier_marker_1.nullifier == [0u8; 32],
-        PrivacyError::NullifierAlreadyUsed
-    );
+    require!(!ctx.accounts.source_nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.source_nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
     // Mark nullifiers as spent
     crate::mark_nullifier_spent(
@@ -292,11 +278,7 @@ pub fn transact_swap<'info>(
     // Transfer from source vault to executor
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // Validate vault has sufficient balance before transfer
-    let vault_token_data = crate::deserialize_token_account(
-        &ctx.accounts.source_vault_token_account.to_account_info()
-    )?;
-    require!(vault_token_data.amount >= swap_amount, PrivacyError::InsufficientFundsForWithdrawal);
+    let source_is_native = !is_token_mint(&source_mint);
 
     let source_vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
@@ -304,26 +286,77 @@ pub fn transact_swap<'info>(
         &[ctx.accounts.source_config.vault_bump],
     ];
 
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.source_vault_token_account.to_account_info(),
-                to: ctx.accounts.executor_source_token.to_account_info(),
-                authority: ctx.accounts.source_vault.to_account_info(),
-            },
-            &[source_vault_seeds]
-        ),
-        swap_amount
-    )?;
+    if source_is_native {
+        // Native SOL source: relayer fronts lamports → executor's WSOL account via CPI,
+        // then vault reimburses relayer after all CPIs (to avoid try_borrow_mut_lamports before CPI).
+        let vault_ai = ctx.accounts.source_vault.to_account_info();
+        require!(
+            vault_ai.lamports() >=
+                swap_amount +
+                    anchor_lang::solana_program::rent::Rent
+                        ::get()?
+                        .minimum_balance(vault_ai.data_len()),
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+
+        // Relayer funds executor_source_token with swap_amount lamports via system_program CPI
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.relayer.to_account_info(),
+                    to: ctx.accounts.executor_source_token.to_account_info(),
+                }
+            ),
+            swap_amount
+        )?;
+
+        // Sync native to update the WSOL token account balance
+        token::sync_native(
+            CpiContext::new(ctx.accounts.token_program.to_account_info(), SyncNative {
+                account: ctx.accounts.executor_source_token.to_account_info(),
+            })
+        )?;
+    } else {
+        // Validate source vault token account is the canonical ATA
+        let expected_ata = get_associated_token_address(
+            &ctx.accounts.source_vault.key(),
+            &source_mint
+        );
+        require!(
+            ctx.accounts.source_vault_token_account.key() == expected_ata,
+            PrivacyError::InvalidMintAddress
+        );
+
+        // Validate vault has sufficient balance before transfer
+        let vault_token_data = crate::deserialize_token_account(
+            &ctx.accounts.source_vault_token_account.to_account_info()
+        )?;
+        require!(
+            vault_token_data.amount >= swap_amount,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.source_vault_token_account.to_account_info(),
+                    to: ctx.accounts.executor_source_token.to_account_info(),
+                    authority: ctx.accounts.source_vault.to_account_info(),
+                },
+                &[source_vault_seeds]
+            ),
+            swap_amount
+        )?;
+    }
 
     // Update source pool TVL (decrease by swap_amount)
     ctx.accounts.source_config.total_tvl = ctx.accounts.source_config.total_tvl
         .checked_sub(swap_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // CPI to Swap Program (Raydium CPMM or AMM)
-    // AUDIT-001: Include relayer key in seeds to match PDA derivation and prevent front-running
+    // CPI to Swap Program (Jupiter / Raydium)
     let relayer_key = ctx.accounts.relayer.key();
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
@@ -636,11 +669,8 @@ pub fn transact_swap<'info>(
             }
         }
 
-        // MEDIUM-001 FIX: Verify swap_data matches the hash committed in the ZK proof.
-        // This prevents the relayer from substituting swap_data with different slippage
-        // settings (e.g. 0%) after the user has already generated their ZK proof.
-        // The user computes sha256(swap_data) off-chain and commits it inside
-        // swap_params_hash via the ZK circuit; we re-derive it here and compare.
+        // Verify swap_data matches the hash committed in the ZK proof to prevent
+        // relayer substitution of swap instructions.
         {
             use sha2::{ Sha256, Digest };
             let computed: [u8; 32] = Sha256::digest(&swap_data).into();
@@ -683,39 +713,85 @@ pub fn transact_swap<'info>(
 
     let vault_amount = swapped_amount.saturating_sub(relayer_fee);
 
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.executor_dest_token.to_account_info(),
-                to: ctx.accounts.dest_vault_token_account.to_account_info(),
-                authority: executor.to_account_info(),
-            },
-            &[executor_seeds]
-        ),
-        vault_amount
-    )?;
+    let dest_is_native = !is_token_mint(&dest_mint);
 
-    // Update dest pool TVL (increase by vault_amount)
-    ctx.accounts.dest_config.total_tvl = ctx.accounts.dest_config.total_tvl
-        .checked_add(vault_amount)
-        .ok_or(PrivacyError::ArithmeticOverflow)?;
+    if dest_is_native {
+        // Native SOL dest: transfer WSOL from executor → relayer fee (SPL), then close
+        // executor_dest_token to vault PDA to unwrap remaining WSOL → lamports.
 
-    // Pay relayer fee
-    if relayer_fee > 0 {
+        // Pay relayer fee first (still in WSOL, relayer's token account is WSOL ATA)
+        if relayer_fee > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.executor_dest_token.to_account_info(),
+                        to: ctx.accounts.relayer_token_account.to_account_info(),
+                        authority: executor.to_account_info(),
+                    },
+                    &[executor_seeds]
+                ),
+                relayer_fee
+            )?;
+        }
+
+        // Close executor dest token → vault gets remaining lamports (unwraps WSOL)
+        token::close_account(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                CloseAccount {
+                    account: ctx.accounts.executor_dest_token.to_account_info(),
+                    destination: ctx.accounts.dest_vault.to_account_info(),
+                    authority: executor.to_account_info(),
+                },
+                &[executor_seeds]
+            )
+        )?;
+    } else {
+        // Validate dest vault token account is the canonical ATA
+        let expected_dest_ata = get_associated_token_address(
+            &ctx.accounts.dest_vault.key(),
+            &dest_mint
+        );
+        require!(
+            ctx.accounts.dest_vault_token_account.key() == expected_dest_ata,
+            PrivacyError::InvalidMintAddress
+        );
+
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.executor_dest_token.to_account_info(),
-                    to: ctx.accounts.relayer_token_account.to_account_info(),
+                    to: ctx.accounts.dest_vault_token_account.to_account_info(),
                     authority: executor.to_account_info(),
                 },
                 &[executor_seeds]
             ),
-            relayer_fee
+            vault_amount
         )?;
+
+        // Pay relayer fee
+        if relayer_fee > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.executor_dest_token.to_account_info(),
+                        to: ctx.accounts.relayer_token_account.to_account_info(),
+                        authority: executor.to_account_info(),
+                    },
+                    &[executor_seeds]
+                ),
+                relayer_fee
+            )?;
+        }
     }
+
+    // Update dest pool TVL (increase by vault_amount)
+    ctx.accounts.dest_config.total_tvl = ctx.accounts.dest_config.total_tvl
+        .checked_add(vault_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     // Insert swap output (commitment 0) into destination tree
     // Insert commitments into trees
@@ -778,17 +854,20 @@ pub fn transact_swap<'info>(
             &[executor_seeds]
         )
     )?;
-    token::close_account(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            CloseAccount {
-                account: ctx.accounts.executor_dest_token.to_account_info(),
-                destination: ctx.accounts.relayer.to_account_info(),
-                authority: executor.to_account_info(),
-            },
-            &[executor_seeds]
-        )
-    )?;
+    // Only close executor_dest_token if it wasn't already closed (native SOL dest closes it during unwrap)
+    if !dest_is_native {
+        token::close_account(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                CloseAccount {
+                    account: ctx.accounts.executor_dest_token.to_account_info(),
+                    destination: ctx.accounts.relayer.to_account_info(),
+                    authority: executor.to_account_info(),
+                },
+                &[executor_seeds]
+            )
+        )?;
+    }
 
     // Return executor PDA rent to relayer
     let executor_lamports = executor.to_account_info().lamports();
@@ -798,6 +877,22 @@ pub fn transact_swap<'info>(
         .lamports()
         .checked_add(executor_lamports)
         .ok_or(PrivacyError::MathOverflow)?;
+
+    // For native SOL source: vault reimburses relayer (who fronted swap_amount lamports).
+    // This try_borrow_mut_lamports is placed AFTER all CPIs to avoid the
+    // "sum of account balances before and after instruction do not match" runtime error.
+    if source_is_native {
+        let vault_ai = ctx.accounts.source_vault.to_account_info();
+        **vault_ai.try_borrow_mut_lamports()? = vault_ai
+            .lamports()
+            .checked_sub(swap_amount)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
+            .to_account_info()
+            .lamports()
+            .checked_add(swap_amount)
+            .ok_or(PrivacyError::MathOverflow)?;
+    }
 
     emit!(SwapExecutedEvent {
         source_mint,

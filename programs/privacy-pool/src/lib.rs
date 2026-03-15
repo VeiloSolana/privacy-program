@@ -88,6 +88,16 @@ pub const JUPITER_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZ
 /// Jupiter V6 Event Authority (for validation)
 pub const JUPITER_EVENT_AUTHORITY: Pubkey = pubkey!("D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf");
 
+/// Wrapped SOL (NATIVE_MINT) — the SPL token representation of native SOL.
+/// Pools registered with Pubkey::default() (native SOL) use this for SPL operations in swaps.
+pub const NATIVE_SOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
+
+/// Map a pool's stored mint to its effective SPL mint.
+/// Pools that store Pubkey::default() for native SOL use WSOL for any SPL token operations.
+pub fn effective_mint(mint: &Pubkey) -> Pubkey {
+    if *mint == Pubkey::default() { NATIVE_SOL_MINT } else { *mint }
+}
+
 // ---- Accounts ----
 
 #[account]
@@ -227,23 +237,16 @@ impl NullifierSet {
     pub const LEN: usize = 8 + 1 + 4; // 13 bytes
 }
 
-/// Per-nullifier PDA marker (created when nullifier is spent)
+/// Per-nullifier PDA marker (created when nullifier is spent).
+/// The nullifier itself is encoded in the PDA seeds; metadata is emitted via events.
 #[account]
 pub struct NullifierMarker {
-    /// The nullifier that was spent
-    pub nullifier: [u8; 32],
-    /// Unix timestamp when spent
-    pub timestamp: i64,
-    /// Sequential withdrawal index
-    pub withdrawal_index: u32,
-    /// Tree ID this nullifier belongs to (prevents cross-tree double-spend)
-    pub tree_id: u16,
-    /// PDA bump
+    pub is_spent: bool,
     pub bump: u8,
 }
 
 impl NullifierMarker {
-    pub const LEN: usize = 8 + 32 + 8 + 4 + 2 + 1; // 55 bytes (tree_id is now u16)
+    pub const LEN: usize = 8 + 1 + 1; // 10 bytes
 }
 
 // ---- ZK public inputs (for transaction circuit) ----
@@ -630,7 +633,7 @@ pub struct Transact<'info> {
 }
 
 /// Check if mint is a token (not native SOL)
-fn is_token_mint(mint: &Pubkey) -> bool {
+pub fn is_token_mint(mint: &Pubkey) -> bool {
     mint != &Pubkey::default()
 }
 
@@ -724,14 +727,18 @@ pub struct TransactSwap<'info> {
     )]
     pub source_nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
 
-    /// Source vault's token account — must be the canonical ATA to prevent non-canonical account abuse (AUDIT-003)
-    #[account(
-        mut,
-        address = get_associated_token_address(&source_vault.key(), &source_mint)
-    )]
-    pub source_vault_token_account: Box<Account<'info, TokenAccount>>,
+    /// Source vault's token account
+    /// For native SOL pools (mint_address == Pubkey::default), this may be unused — pass any mut account.
+    /// For SPL pools, must be the canonical ATA of the source vault for the source mint.
+    /// CHECK: Validated in handler — for SPL: address == ATA(vault, mint); for native SOL: unused.
+    #[account(mut)]
+    pub source_vault_token_account: UncheckedAccount<'info>,
 
-    /// Source token mint
+    /// Source token mint — for native SOL pools, pass the WSOL (NATIVE_MINT) account.
+    /// Must match effective_mint(source_mint) so executor ATAs are created with WSOL.
+    #[account(
+        address = effective_mint(&source_mint) @ PrivacyError::InvalidMintAddress
+    )]
     pub source_mint_account: Box<Account<'info, Mint>>,
 
     // ---- Destination Pool (tokens being swapped TO) ----
@@ -757,20 +764,23 @@ pub struct TransactSwap<'info> {
     )]
     pub dest_tree: AccountLoader<'info, MerkleTreeAccount>,
 
-    /// Destination vault's token account — must be the canonical ATA to prevent non-canonical account abuse (AUDIT-003)
-    #[account(
-        mut,
-        address = get_associated_token_address(&dest_vault.key(), &dest_mint)
-    )]
-    pub dest_vault_token_account: Box<Account<'info, TokenAccount>>,
+    /// Destination vault's token account
+    /// For native SOL pools (mint_address == Pubkey::default), may be unused — pass any mut account.
+    /// For SPL pools, must be the canonical ATA of the dest vault for the dest mint.
+    /// CHECK: Validated in handler — for SPL: address == ATA(vault, mint); for native SOL: unused.
+    #[account(mut)]
+    pub dest_vault_token_account: UncheckedAccount<'info>,
 
-    /// Destination token mint
+    /// Destination token mint — for native SOL pools, pass the WSOL (NATIVE_MINT) account.
+    /// Must match effective_mint(dest_mint) so executor ATAs are created with WSOL.
+    #[account(
+        address = effective_mint(&dest_mint) @ PrivacyError::InvalidMintAddress
+    )]
     pub dest_mint_account: Box<Account<'info, Mint>>,
 
     // ---- Ephemeral Swap Executor PDA ----
     /// Executor PDA - holds tokens during swap
     /// Seeds include source_mint, dest_mint, nullifier, AND relayer key to prevent front-running DoS
-    /// (AUDIT-001: Adding relayer key prevents attackers from pre-creating executor PDAs)
     #[account(
         init,
         payer = relayer,
@@ -1111,10 +1121,8 @@ pub mod privacy_pool {
         // 3. The nullifier marker is still created on-chain (init_if_needed), so any
         //    future use of the same nullifier would be detected
         //
-        // Note on AUDIT-008: The audit suggested requiring zero nullifiers for deposits,
-        // but this is incompatible with the circuit design. The circuit always computes
-        // nullifiers as Poseidon(commitment, pathIndex, signature) which are never zero.
-        // Deposits use dummy witnesses which produce non-zero but harmless nullifiers.
+        // The circuit always computes nullifiers as Poseidon(commitment, pathIndex, signature)
+        // which are never zero. Deposits use dummy witnesses that produce non-zero but harmless nullifiers.
         let zero_nullifier = [0u8; 32];
         if public_amount > 0 {
             // For deposits, nullifier markers are created but allow reuse via init_if_needed
@@ -1243,7 +1251,7 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // AUDIT-003 FIX: Allow two deposit patterns for SPL tokens:
+                // Two deposit patterns for SPL tokens:
                 // 1. Relayer-owned: user_token.owner == relayer (user transferred tokens to relayer first)
                 // 2. Delegated: user_token.delegate == relayer with sufficient delegated_amount
                 //
@@ -1327,17 +1335,8 @@ pub mod privacy_pool {
         // 8. Mark both input nullifiers as spent (only for withdrawals/transfers)
         // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
         if public_amount <= 0 {
-            // Check if nullifier was already marked to prevent double-spend
-            // Nullifier markers are GLOBAL (no tree_id in PDA seeds) to prevent cross-tree double-spend
-            // We check marker.nullifier != [0u8; 32] to detect if this marker was already used
-            require!(
-                ctx.accounts.nullifier_marker_0.nullifier == [0u8; 32],
-                PrivacyError::NullifierAlreadyUsed
-            );
-            require!(
-                ctx.accounts.nullifier_marker_1.nullifier == [0u8; 32],
-                PrivacyError::NullifierAlreadyUsed
-            );
+            require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+            require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
             mark_nullifier_spent(
                 &mut ctx.accounts.nullifier_marker_0,
@@ -1455,7 +1454,7 @@ pub mod privacy_pool {
 
 // ---- Helper Functions ----
 
-/// Mark a nullifier as spent (tree-specific to prevent cross-tree reuse)
+/// Mark a nullifier as spent. Metadata is emitted via event.
 pub fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
@@ -1466,17 +1465,13 @@ pub fn mark_nullifier_spent(
 ) -> Result<()> {
     let timestamp = Clock::get()?.unix_timestamp;
 
-    marker.nullifier = nullifier;
-    marker.timestamp = timestamp;
-    marker.withdrawal_index = nullifier_set.count;
-    marker.tree_id = tree_id;
+    marker.is_spent = true;
     marker.bump = bump;
 
     nullifier_set.count = nullifier_set.count
         .checked_add(1)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Emit event when nullifier is spent
     emit!(NullifierSpent {
         nullifier,
         timestamp,
