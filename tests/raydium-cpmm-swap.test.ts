@@ -70,9 +70,14 @@ const RAYDIUM_CPMM_PROGRAM = new PublicKey(
 );
 
 // Mainnet token mints (cloned)
-const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+const SOL_MINT = PublicKey.default;
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const USDT_MINT = new PublicKey("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+
+// For SPL operations (ATAs, token accounts), map native SOL to NATIVE_MINT (WSOL)
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 
 // SOL/USDC CPMM Pool variables
 let CPMM_POOL_STATE: PublicKey;
@@ -379,7 +384,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     await airdropAndConfirm(provider, payer.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // Use mainnet mints (cloned)
-    sourceTokenMint = WSOL_MINT;
+    sourceTokenMint = SOL_MINT;
     destTokenMint = USDC_MINT;
 
     console.log(`✅ Source Token (WSOL): ${sourceTokenMint.toBase58()}`);
@@ -429,7 +434,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       program.programId,
     );
     sourceVaultTokenAccount = await getAssociatedTokenAddress(
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
@@ -611,29 +616,21 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     }
   });
 
-  it("deposits WSOL to source pool for later swap", async () => {
-    console.log("\n🎁 Depositing WSOL to source pool...");
+  it("deposits SOL to source pool for later swap", async () => {
+    console.log("\n🎁 Depositing native SOL to source pool...");
 
     // Create vault's token account (if not exists)
     await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true, // allowOwnerOffCurve
     );
     console.log(`   Vault token account created for source pool`);
 
-    // Create wrapped SOL account and fund it
-    // For WSOL, we wrap native SOL instead of minting
-    const wsolAccount = await createWrappedNativeAccount(
-      provider.connection,
-      payer,
-      payer.publicKey,
-      INITIAL_DEPOSIT * 2, // lamports to wrap
-    );
-    console.log(`   Created wSOL account: ${wsolAccount.toBase58()}`);
-    console.log(`   Wrapped ${(INITIAL_DEPOSIT * 2) / LAMPORTS_PER_SOL} SOL`);
+    // For native SOL deposits, user token account is the payer (system account)
+    const userTokenAccount = payer.publicKey;
 
     // Generate keypair for the note
     const privateKey = randomBytes32();
@@ -776,9 +773,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: payer.publicKey,
         recipient: payer.publicKey,
         vaultTokenAccount: sourceVaultTokenAccount,
-        userTokenAccount: wsolAccount,
-        recipientTokenAccount: wsolAccount,
-        relayerTokenAccount: wsolAccount,
+        userTokenAccount: payer.publicKey,
+        recipientTokenAccount: payer.publicKey,
+        relayerTokenAccount: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -1177,7 +1174,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const sourceVaultWsolAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint, // WSOL
+      tokenMintFor(sourceTokenMint), // native SOL → WSOL for ATA
       sourceVault,
       true,
     );
@@ -1321,7 +1318,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
     // Derive executor's source token account (ATA)
     const executorSourceToken = await getAssociatedTokenAddress(
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       executorPda,
       true, // allowOwnerOffCurve
     );
@@ -1358,7 +1355,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       sourceNoteTree,
       sourceNullifiers,
       sourceVaultWsolAccount.address,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       destConfig,
       destVault,
       destNoteTree,
@@ -1443,7 +1440,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           sourceNullifierMarker0: nullifierMarker0,
           sourceNullifierMarker1: nullifierMarker1,
           sourceVaultTokenAccount: sourceVaultWsolAccount.address,
-          sourceMintAccount: sourceTokenMint,
+          sourceMintAccount: tokenMintFor(sourceTokenMint),
           destConfig,
           destVault,
           destTree: destNoteTree,
@@ -1491,7 +1488,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             isWritable: true,
           },
           {
-            pubkey: WSOL_MINT, // input_token_mint
+            pubkey: tokenMintFor(SOL_MINT), // input_token_mint
             isSigner: false,
             isWritable: false,
           },
@@ -2527,11 +2524,11 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       dummyNullifier,
     );
 
-    // Get recipient token account (WSOL)
+    // Get recipient token account (SOL/WSOL)
     const recipientTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       withdrawRecipient.publicKey,
     );
 
@@ -2539,7 +2536,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       payer.publicKey,
     );
 
@@ -2547,7 +2544,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const vaultTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
@@ -3130,36 +3127,17 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       }
     });
 
-    it("deposits WSOL for USDT swap test (requires fresh validator)", async () => {
-      // Note: This test creates wrapped SOL which can conflict with
-      // previously created accounts in the same test run.
+    it("deposits SOL for USDT swap test (requires fresh validator)", async () => {
+      // Note: This test deposits native SOL into the privacy pool.
       // The deposit/swap logic is fully validated by the USDC tests.
-      console.log("\n🎁 Depositing WSOL for USDT swap test...");
+      console.log("\n🎁 Depositing SOL for USDT swap test...");
 
-      // Create wrapped SOL account (Manual implementation to avoid AToken conflicts)
-      const wsolKeypair = Keypair.generate();
-      const rentExemption =
-        await provider.connection.getMinimumBalanceForRentExemption(165);
+      // Native SOL: use payer.publicKey directly (on-chain uses system_program::transfer)
+      const userTokenAccount = payer.publicKey;
 
-      const createWsolTx = new Transaction().add(
-        SystemProgram.createAccount({
-          fromPubkey: payer.publicKey,
-          newAccountPubkey: wsolKeypair.publicKey,
-          lamports: rentExemption + USDT_SWAP_AMOUNT * 2,
-          space: 165,
-          programId: TOKEN_PROGRAM_ID,
-        }),
-        createInitializeAccountInstruction(
-          wsolKeypair.publicKey,
-          NATIVE_MINT,
-          payer.publicKey,
-        ),
+      console.log(
+        `   Using native SOL from payer: ${userTokenAccount.toBase58()}`,
       );
-
-      await provider.sendAndConfirm(createWsolTx, [wsolKeypair]);
-      const wsolAccount = wsolKeypair.publicKey;
-
-      console.log(`   Created wSOL account: ${wsolAccount.toBase58()}`);
 
       // Generate note keys
       const privateKey = randomBytes32();
@@ -3173,7 +3151,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         amount,
         publicKey,
         blinding,
-        WSOL_MINT,
+        SOL_MINT,
       );
 
       // Create dummy inputs
@@ -3185,7 +3163,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         0n,
         dummyPubKey1,
         dummyBlinding1,
-        WSOL_MINT,
+        SOL_MINT,
       );
       const dummyNullifier1 = computeNullifier(
         poseidon,
@@ -3202,7 +3180,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         0n,
         dummyPubKey2,
         dummyBlinding2,
-        WSOL_MINT,
+        SOL_MINT,
       );
       const dummyNullifier2 = computeNullifier(
         poseidon,
@@ -3220,7 +3198,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         0n,
         changePubKey,
         changeBlinding,
-        WSOL_MINT,
+        SOL_MINT,
       );
 
       // External data
@@ -3241,7 +3219,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         root,
         publicAmount: amount,
         extDataHash,
-        mintAddress: WSOL_MINT,
+        mintAddress: SOL_MINT,
         inputNullifiers: [dummyNullifier1, dummyNullifier2],
         outputCommitments: [commitment, changeCommitment],
         inputAmounts: [0n, 0n],
@@ -3257,13 +3235,13 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // Nullifier markers
       const nullifierMarker0 = deriveNullifierMarkerPDA(
         program.programId,
-        WSOL_MINT,
+        SOL_MINT,
         0,
         dummyNullifier1,
       );
       const nullifierMarker1 = deriveNullifierMarkerPDA(
         program.programId,
-        WSOL_MINT,
+        SOL_MINT,
         0,
         dummyNullifier2,
       );
@@ -3276,7 +3254,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           0,
           new BN(amount.toString()),
           Array.from(extDataHash),
-          WSOL_MINT,
+          SOL_MINT,
           Array.from(dummyNullifier1),
           Array.from(dummyNullifier2),
           Array.from(commitment),
@@ -3302,9 +3280,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sourceVaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
+          userTokenAccount: payer.publicKey,
+          recipientTokenAccount: payer.publicKey,
+          relayerTokenAccount: payer.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -3333,7 +3311,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         publicKey,
         leafIndex,
         merklePath: sourceOffchainTree.getMerkleProof(leafIndex),
-        mintAddress: WSOL_MINT,
+        mintAddress: SOL_MINT,
       });
 
       console.log(`   Note saved: ${wsolNoteForUsdtSwap}`);
@@ -3424,7 +3402,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         0n,
         changePubKey,
         changeBlinding,
-        WSOL_MINT,
+        SOL_MINT,
       );
 
       // Dummy second input nullifier
@@ -3436,7 +3414,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         0n,
         dummyPubKey,
         dummyBlinding,
-        WSOL_MINT,
+        SOL_MINT,
       );
       const dummyNullifier = computeNullifier(
         poseidon,
@@ -3469,7 +3447,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // Compute swap params hash for ZK proof
       const swapParamsHash = computeSwapParamsHash(
         poseidon,
-        WSOL_MINT,
+        SOL_MINT,
         USDT_MINT,
         minAmountOutBigInt,
         deadlineBigInt,
@@ -3482,7 +3460,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         sourceRoot: root,
         swapParamsHash,
         extDataHash,
-        sourceMint: WSOL_MINT,
+        sourceMint: SOL_MINT,
         destMint: USDT_MINT,
         inputNullifiers: [note!.nullifier, dummyNullifier],
         changeCommitment,
@@ -3509,28 +3487,28 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         // Private inputs - Swap parameters
         minAmountOut: minAmountOutBigInt,
         deadline: deadlineBigInt,
-      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+        swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       });
 
       // Derive nullifier markers
       const nullifierMarker0 = deriveNullifierMarkerPDA(
         program.programId,
-        WSOL_MINT,
+        SOL_MINT,
         0,
         note!.nullifier,
       );
       const nullifierMarker1 = deriveNullifierMarkerPDA(
         program.programId,
-        WSOL_MINT,
+        SOL_MINT,
         0,
         dummyNullifier,
       );
 
-      // Derive executor PDA (use WSOL_MINT and USDT_MINT for this swap)
+      // Derive executor PDA (use SOL_MINT and USDT_MINT for this swap)
       const [executorPda] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("swap_executor"),
-          WSOL_MINT.toBuffer(),
+          SOL_MINT.toBuffer(),
           USDT_MINT.toBuffer(),
           Buffer.from(note!.nullifier),
           payer.publicKey.toBuffer(),
@@ -3540,7 +3518,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
       // Executor token accounts
       const executorSourceToken = await getAssociatedTokenAddress(
-        WSOL_MINT,
+        tokenMintFor(SOL_MINT),
         executorPda,
         true,
       );
@@ -3554,7 +3532,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const swapParams = {
         minAmountOut: new BN(minAmountOutBigInt.toString()),
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: WSOL_MINT,
+        sourceMint: SOL_MINT,
         destMint: USDT_MINT,
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -3568,7 +3546,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         sourceNoteTree,
         sourceNullifiers,
         sourceVaultTokenAccount,
-        WSOL_MINT,
+        tokenMintFor(SOL_MINT),
         usdtConfig,
         usdtVault,
         usdtNoteTree,
@@ -3619,7 +3597,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           proof, // ZK swap proof (first parameter)
           Array.from(root),
           0,
-          WSOL_MINT,
+          SOL_MINT,
           Array.from(note!.nullifier),
           Array.from(dummyNullifier),
           0,
@@ -3640,7 +3618,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           sourceNullifierMarker0: nullifierMarker0,
           sourceNullifierMarker1: nullifierMarker1,
           sourceVaultTokenAccount,
-          sourceMintAccount: WSOL_MINT,
+          sourceMintAccount: tokenMintFor(SOL_MINT),
           destConfig: usdtConfig,
           destVault: usdtVault,
           destTree: usdtNoteTree,
@@ -3671,7 +3649,11 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             isSigner: false,
             isWritable: true,
           },
-          { pubkey: WSOL_MINT, isSigner: false, isWritable: false },
+          {
+            pubkey: tokenMintFor(SOL_MINT),
+            isSigner: false,
+            isWritable: false,
+          },
           { pubkey: USDT_MINT, isSigner: false, isWritable: false },
           {
             pubkey: USDT_CPMM_OBSERVATION_STATE,
@@ -3858,7 +3840,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         destAmount,
         destPubKey,
         destBlinding,
-        WSOL_MINT,
+        SOL_MINT,
       );
 
       // 2. Prepare keys for change note (0 in this case as we swap full amount)
@@ -3908,7 +3890,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const swapParamsHash = computeSwapParamsHash(
         poseidon,
         USDT_MINT,
-        WSOL_MINT,
+        SOL_MINT,
         minAmountOutBigInt,
         deadlineBigInt,
         new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
@@ -3925,7 +3907,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         swapParamsHash,
         extDataHash,
         sourceMint: USDT_MINT,
-        destMint: WSOL_MINT,
+        destMint: SOL_MINT,
         inputNullifiers: [note.nullifier, dummyNullifier],
         changeCommitment,
         destCommitment,
@@ -3951,7 +3933,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         // Private inputs - Swap parameters
         minAmountOut: minAmountOutBigInt,
         deadline: deadlineBigInt,
-      swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+        swapDataHash: new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
       });
 
       // 8. CPMM Swap Params
@@ -3979,7 +3961,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         [
           Buffer.from("swap_executor"),
           USDT_MINT.toBuffer(),
-          WSOL_MINT.toBuffer(),
+          SOL_MINT.toBuffer(),
           Buffer.from(note.nullifier),
           payer.publicKey.toBuffer(),
         ],
@@ -3993,7 +3975,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         true,
       );
       const executorDestToken = await getAssociatedTokenAddress(
-        WSOL_MINT,
+        tokenMintFor(SOL_MINT),
         executorPda,
         true,
       );
@@ -4017,7 +3999,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         sourceConfig,
         sourceVault,
         sourceNoteTree,
-        WSOL_MINT,
+        tokenMintFor(SOL_MINT),
         USDT_CPMM_POOL_STATE,
         USDT_CPMM_AMM_CONFIG,
         CPMM_AUTHORITY,
@@ -4065,7 +4047,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const relayerWsolAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        WSOL_MINT,
+        tokenMintFor(SOL_MINT),
         payer.publicKey,
       );
 
@@ -4074,7 +4056,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         minAmountOut: new BN(minAmountOutBigInt.toString()),
         deadline: new BN(deadlineBigInt.toString()),
         sourceMint: USDT_MINT,
-        destMint: WSOL_MINT,
+        destMint: SOL_MINT,
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -4088,7 +4070,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           Array.from(note.nullifier), // input_nullifier_0
           Array.from(dummyNullifier), // input_nullifier_1
           0, // dest_tree_id
-          WSOL_MINT, // dest_mint
+          SOL_MINT, // dest_mint
           Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
           Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParamsArg, // swap_params
@@ -4111,7 +4093,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           destVault: sourceVault,
           destTree: sourceNoteTree,
           destVaultTokenAccount: sourceVaultTokenAccount,
-          destMintAccount: WSOL_MINT,
+          destMintAccount: tokenMintFor(SOL_MINT),
 
           executor: executorPda,
           executorSourceToken,
@@ -4143,7 +4125,11 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           },
           // Mints
           { pubkey: USDT_MINT, isSigner: false, isWritable: false },
-          { pubkey: WSOL_MINT, isSigner: false, isWritable: false },
+          {
+            pubkey: tokenMintFor(SOL_MINT),
+            isSigner: false,
+            isWritable: false,
+          },
           {
             pubkey: USDT_CPMM_OBSERVATION_STATE,
             isSigner: false,

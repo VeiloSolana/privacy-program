@@ -32,7 +32,7 @@ cluster = "localnet"
 wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:amm-various"
+test = "npm run test:sol"
 
 [test]
 startup_wait = 60000

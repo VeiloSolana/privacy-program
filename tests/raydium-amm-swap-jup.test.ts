@@ -17,6 +17,7 @@ import {
   getOrCreateAssociatedTokenAccount,
   getAssociatedTokenAddress,
   createWrappedNativeAccount,
+  NATIVE_MINT,
 } from "@solana/spl-token";
 import { expect } from "chai";
 import { buildPoseidon } from "circomlibjs";
@@ -60,6 +61,13 @@ import {
   TokenAmount,
   Percent,
 } from "@raydium-io/raydium-sdk";
+
+// Native SOL uses PublicKey.default as pool mint identifier;
+// for SPL operations (ATAs, token accounts), map to NATIVE_MINT (WSOL)
+const SOL_MINT = PublicKey.default;
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 
 // Balance tracking interfaces and helpers
 interface BalanceSnapshot {
@@ -283,7 +291,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
   // Poseidon hasher
   let poseidon: any;
 
-  // Source pool (WSOL)
+  // Source pool (native SOL)
   let solTokenMint: PublicKey;
   let solConfig: PublicKey;
   let solVault: PublicKey;
@@ -345,7 +353,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     await airdropAndConfirm(provider, payer.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // Use mainnet mints (cloned)
-    solTokenMint = WSOL_MINT;
+    solTokenMint = SOL_MINT;
     jupTokenMint = JUP_MINT;
 
     // Get pool configuration - either static or dynamic
@@ -353,7 +361,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       console.log("📡 Using DYNAMIC pool key fetching from Raydium SDK...");
       poolKeys = await getPoolKeysFromMints(
         provider.connection,
-        solTokenMint,
+        tokenMintFor(solTokenMint),
         jupTokenMint,
       );
       poolConfig = poolKeysToConfig(poolKeys);
@@ -397,7 +405,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       program.programId,
     );
     solVaultTokenAccount = await getAssociatedTokenAddress(
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
@@ -590,27 +598,23 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     }
   });
 
-  it("deposits WSOL to source pool for AMM swap", async () => {
-    console.log("\n🎁 Depositing WSOL to source pool...");
+  it("deposits SOL to source pool for AMM swap", async () => {
+    console.log("\n🎁 Depositing native SOL to source pool...");
 
     // Create required accounts first
     await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
-    const wsolAccount = await createWrappedNativeAccount(
-      provider.connection,
-      payer,
-      payer.publicKey,
-      INITIAL_DEPOSIT * 2,
-    );
+    // For native SOL deposits, user token account is the payer (system account)
+    const userTokenAccount = payer.publicKey;
     const solVaultAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
@@ -619,7 +623,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const balanceBefore = await getBalanceSnapshot(
       provider.connection,
       payer.publicKey,
-      wsolAccount,
+      undefined,
       undefined,
       solVaultAccount.address,
       undefined,
@@ -762,9 +766,9 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         relayer: payer.publicKey,
         recipient: payer.publicKey,
         vaultTokenAccount: solVaultTokenAccount,
-        userTokenAccount: wsolAccount,
-        recipientTokenAccount: wsolAccount,
-        relayerTokenAccount: wsolAccount,
+        userTokenAccount: payer.publicKey,
+        recipientTokenAccount: payer.publicKey,
+        relayerTokenAccount: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -793,7 +797,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const balanceAfter = await getBalanceSnapshot(
       provider.connection,
       payer.publicKey,
-      wsolAccount,
+      undefined,
       undefined,
       solVaultAccount.address,
       undefined,
@@ -801,7 +805,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     );
 
     // Log balance changes
-    logBalanceChanges(balanceBefore, balanceAfter, "WSOL Deposit");
+    logBalanceChanges(balanceBefore, balanceAfter, "SOL Deposit");
 
     // Verify expected balance changes
     const expectedDeposit = Number(amount) / LAMPORTS_PER_SOL;
@@ -885,7 +889,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const solVaultAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
@@ -1103,7 +1107,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       program.programId,
     );
     const executorSourceToken = await getAssociatedTokenAddress(
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       executorPda,
       true,
     );
@@ -1147,7 +1151,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
         solNoteTree,
         solNullifiers,
         solVaultAccount.address,
-        solTokenMint,
+        tokenMintFor(solTokenMint),
         jupConfig,
         jupVault,
         jupNoteTree,
@@ -1218,7 +1222,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
           dummyNullifier,
         ),
         sourceVaultTokenAccount: solVaultAccount.address,
-        sourceMintAccount: solTokenMint,
+        sourceMintAccount: tokenMintFor(solTokenMint),
         destConfig: jupConfig,
         destVault: jupVault,
         destTree: jupNoteTree,
@@ -1439,7 +1443,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const solVaultAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
@@ -1556,7 +1560,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       payer.publicKey,
     );
 
@@ -2089,14 +2093,14 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const destVaultSolAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       solVault,
       true,
     );
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       payer.publicKey,
     );
 
@@ -2252,7 +2256,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       true,
     );
     const executorDestToken = await getAssociatedTokenAddress(
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       executorPda,
       true,
     );
@@ -2275,7 +2279,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
     const relayerTokenAccountForTx = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       payer.publicKey,
     );
 
@@ -2297,7 +2301,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       solVault,
       solNoteTree,
       destVaultSolAccount.address,
-      solTokenMint,
+      tokenMintFor(solTokenMint),
       RAYDIUM_AMM_V4_PROGRAM,
       SERUM_PROGRAM,
       TOKEN_PROGRAM_ID,
@@ -2379,7 +2383,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
           destVault: solVault, // SOL vault
           destTree: solNoteTree,
           destVaultTokenAccount: destVaultSolAccount.address,
-          destMintAccount: solTokenMint,
+          destMintAccount: tokenMintFor(solTokenMint),
           executor: executorPda,
           executorSourceToken,
           executorDestToken,

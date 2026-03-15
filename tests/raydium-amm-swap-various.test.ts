@@ -15,6 +15,7 @@ import {
 import {
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  NATIVE_MINT,
   getAssociatedTokenAddress,
   getOrCreateAssociatedTokenAccount,
   createWrappedNativeAccount,
@@ -56,6 +57,13 @@ import {
   AmmV4PoolConfig,
 } from "./amm-v4-pool-helper";
 import { LiquidityPoolKeysV4 } from "@raydium-io/raydium-sdk";
+
+const SOL_MINT = PublicKey.default;
+
+/** For native SOL pools, SPL operations use WSOL (NATIVE_MINT) */
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 
 /**
  * Privacy Pool Cross-Pool Swap Tests - Various Pairs
@@ -112,6 +120,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
   interface PoolInfo {
     name: string;
     mint: PublicKey;
+    /** SPL mint used for token operations (WSOL for native SOL pools) */
+    tokenMint: PublicKey;
     decimals: number;
     config: PublicKey;
     vault: PublicKey;
@@ -123,7 +133,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
   // Pools to initialize
   const POOL_DEFS = [
-    { name: "SOL", mint: WSOL_MINT, decimals: 9 },
+    { name: "SOL", mint: SOL_MINT, decimals: 9 },
     { name: "USDC", mint: USDC_MINT, decimals: 6 },
     { name: "USDT", mint: USDT_MINT, decimals: 6 },
     { name: "USD1", mint: USD1_MINT, decimals: 6 },
@@ -236,8 +246,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         [Buffer.from("privacy_nullifiers_v3"), def.mint.toBuffer()],
         program.programId,
       );
+      const tMint = tokenMintFor(def.mint);
       const vaultTokenAccount = await getAssociatedTokenAddress(
-        def.mint,
+        tMint,
         vault,
         true,
       );
@@ -245,6 +256,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       pools[def.name] = {
         name: def.name,
         mint: def.mint,
+        tokenMint: tMint,
         decimals: def.decimals,
         config,
         vault,
@@ -478,31 +490,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Depositing SOL for USDC swap...");
 
-      // Create vault's token account via idempotent instruction
-      const vaultAta = await getAssociatedTokenAddress(
-        sol.mint,
-        sol.vault,
-        true,
-      );
-      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-        payer.publicKey,
-        vaultAta,
-        sol.vault,
-        sol.mint,
-      );
-      try {
-        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
-      } catch (e: any) {
-        console.log("   ⚠️ ATA creation note:", e.message);
-      }
-
-      // Create wSOL account for the user
-      const wsolAccount = await createWrappedNativeAccount(
-        provider.connection,
-        payer,
-        payer.publicKey,
-        Number(DEPOSIT_AMOUNT) + 1_000_000,
-      );
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      const userTokenAccount = payer.publicKey;
 
       // Generate note credentials
       const privateKey = randomBytes32();
@@ -631,9 +620,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sol.vaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
+          userTokenAccount: userTokenAccount,
+          recipientTokenAccount: userTokenAccount,
+          relayerTokenAccount: userTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -801,7 +790,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
-        sol.mint,
+        sol.tokenMint,
         executorPda,
         true,
       );
@@ -827,7 +816,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const solVaultAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        sol.mint,
+        sol.tokenMint,
         sol.vault,
         true,
       );
@@ -854,7 +843,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         sol.noteTree,
         sol.nullifiers,
         solVaultAccount.address,
-        sol.mint,
+        sol.tokenMint,
         usdc.config,
         usdc.vault,
         usdc.noteTree,
@@ -930,7 +919,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             sourceNullifierMarker0: nullifierMarker0,
             sourceNullifierMarker1: nullifierMarker1,
             sourceVaultTokenAccount: solVaultAccount.address,
-            sourceMintAccount: sol.mint,
+            sourceMintAccount: sol.tokenMint,
             destConfig: usdc.config,
             destVault: usdc.vault,
             destTree: usdc.noteTree,
@@ -1137,41 +1126,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Depositing SOL for USDT swap...");
 
-      // Vault token account should already exist from previous tests
-      console.log("   Creating vault token account...");
-      const vaultAta = await getAssociatedTokenAddress(
-        sol.mint,
-        sol.vault,
-        true,
-      );
-      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-        payer.publicKey,
-        vaultAta,
-        sol.vault,
-        sol.mint,
-      );
-      try {
-        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
-        console.log("   ✅ Vault token account ready");
-      } catch (e: any) {
-        console.log(
-          `   ⚠️ Vault account error (may already exist): ${e.message?.slice(
-            0,
-            50,
-          )}`,
-        );
-      }
-
-      console.log("   Creating wrapped SOL account...");
-      const wsolKeypair = Keypair.generate();
-      const wsolAccount = await createWrappedNativeAccount(
-        provider.connection,
-        payer,
-        payer.publicKey,
-        Number(DEPOSIT_AMOUNT) + 1_000_000,
-        wsolKeypair, // Pass keypair to avoid ATA path
-      );
-      console.log(`   ✅ wSOL account created: ${wsolAccount.toBase58()}`);
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      const userTokenAccount = payer.publicKey;
 
       const privateKey = randomBytes32();
       const publicKey = derivePublicKey(poseidon, privateKey);
@@ -1297,9 +1253,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sol.vaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
+          userTokenAccount: userTokenAccount,
+          recipientTokenAccount: userTokenAccount,
+          relayerTokenAccount: userTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -1464,7 +1420,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
-        sol.mint,
+        sol.tokenMint,
         executorPda,
         true,
       );
@@ -1490,7 +1446,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const solVaultAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        sol.mint,
+        sol.tokenMint,
         sol.vault,
         true,
       );
@@ -1516,7 +1472,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         sol.noteTree,
         sol.nullifiers,
         solVaultAccount.address,
-        sol.mint,
+        sol.tokenMint,
         usdt.config,
         usdt.vault,
         usdt.noteTree,
@@ -1592,7 +1548,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             sourceNullifierMarker0: nullifierMarker0,
             sourceNullifierMarker1: nullifierMarker1,
             sourceVaultTokenAccount: solVaultAccount.address,
-            sourceMintAccount: sol.mint,
+            sourceMintAccount: sol.tokenMint,
             destConfig: usdt.config,
             destVault: usdt.vault,
             destTree: usdt.noteTree,
@@ -1798,31 +1754,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Depositing SOL for JUP swap...");
 
-      // Vault token account should already exist from previous tests
-      const vaultAta = await getAssociatedTokenAddress(
-        sol.mint,
-        sol.vault,
-        true,
-      );
-      try {
-        const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-          payer.publicKey,
-          vaultAta,
-          sol.vault,
-          sol.mint,
-        );
-        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
-      } catch (e) {
-        // Account may already exist, which is fine
-      }
-      const wsolKeypair = Keypair.generate();
-      const wsolAccount = await createWrappedNativeAccount(
-        provider.connection,
-        payer,
-        payer.publicKey,
-        Number(DEPOSIT_AMOUNT) + 1_000_000,
-        wsolKeypair, // Pass keypair to avoid ATA path
-      );
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      const userTokenAccount = payer.publicKey;
 
       const privateKey = randomBytes32();
       const publicKey = derivePublicKey(poseidon, privateKey);
@@ -1948,9 +1881,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sol.vaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
+          userTokenAccount: userTokenAccount,
+          recipientTokenAccount: userTokenAccount,
+          relayerTokenAccount: userTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -2115,7 +2048,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
-        sol.mint,
+        sol.tokenMint,
         executorPda,
         true,
       );
@@ -2141,7 +2074,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const solVaultAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        sol.mint,
+        sol.tokenMint,
         sol.vault,
         true,
       );
@@ -2167,7 +2100,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         sol.noteTree,
         sol.nullifiers,
         solVaultAccount.address,
-        sol.mint,
+        sol.tokenMint,
         jup.config,
         jup.vault,
         jup.noteTree,
@@ -2243,7 +2176,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             sourceNullifierMarker0: nullifierMarker0,
             sourceNullifierMarker1: nullifierMarker1,
             sourceVaultTokenAccount: solVaultAccount.address,
-            sourceMintAccount: sol.mint,
+            sourceMintAccount: sol.tokenMint,
             destConfig: jup.config,
             destVault: jup.vault,
             destTree: jup.noteTree,
@@ -2445,31 +2378,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Depositing SOL for USD1 swap...");
 
-      // Vault token account should already exist from previous tests
-      const vaultAta = await getAssociatedTokenAddress(
-        sol.mint,
-        sol.vault,
-        true,
-      );
-      try {
-        const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-          payer.publicKey,
-          vaultAta,
-          sol.vault,
-          sol.mint,
-        );
-        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
-      } catch (e) {
-        // Account may already exist, which is fine
-      }
-      const wsolKeypair = Keypair.generate();
-      const wsolAccount = await createWrappedNativeAccount(
-        provider.connection,
-        payer,
-        payer.publicKey,
-        Number(DEPOSIT_AMOUNT) + 1_000_000,
-        wsolKeypair, // Pass keypair to avoid ATA path
-      );
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      const userTokenAccount = payer.publicKey;
 
       const privateKey = randomBytes32();
       const publicKey = derivePublicKey(poseidon, privateKey);
@@ -2595,9 +2505,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sol.vaultTokenAccount,
-          userTokenAccount: wsolAccount,
-          recipientTokenAccount: wsolAccount,
-          relayerTokenAccount: wsolAccount,
+          userTokenAccount: userTokenAccount,
+          recipientTokenAccount: userTokenAccount,
+          relayerTokenAccount: userTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -2762,7 +2672,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
-        sol.mint,
+        sol.tokenMint,
         executorPda,
         true,
       );
@@ -2788,7 +2698,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const solVaultAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        sol.mint,
+        sol.tokenMint,
         sol.vault,
         true,
       );
@@ -2814,7 +2724,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         sol.noteTree,
         sol.nullifiers,
         solVaultAccount.address,
-        sol.mint,
+        sol.tokenMint,
         usd1.config,
         usd1.vault,
         usd1.noteTree,
@@ -2890,7 +2800,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             sourceNullifierMarker0: nullifierMarker0,
             sourceNullifierMarker1: nullifierMarker1,
             sourceVaultTokenAccount: solVaultAccount.address,
-            sourceMintAccount: sol.mint,
+            sourceMintAccount: sol.tokenMint,
             destConfig: usd1.config,
             destVault: usd1.vault,
             destTree: usd1.noteTree,
@@ -3128,47 +3038,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const sol = pools.SOL;
       console.log("\n🎁 Step 1: Depositing SOL for chained swap...");
 
-      // Wrap SOL
-      await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        payer,
-        sol.mint,
-        payer.publicKey,
-      );
-
-      const wrapIx = SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: await getAssociatedTokenAddress(sol.mint, payer.publicKey),
-        lamports: BigInt(SOL_DEPOSIT_AMOUNT),
-      });
-      const syncIx = createSyncNativeInstruction(
-        await getAssociatedTokenAddress(sol.mint, payer.publicKey),
-      );
-      const tx = new Transaction().add(wrapIx, syncIx);
-      await provider.sendAndConfirm(tx);
-
-      // Create vault's token account
-      const vaultAta = await getAssociatedTokenAddress(
-        sol.mint,
-        sol.vault,
-        true,
-      );
-      const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
-        payer.publicKey,
-        vaultAta,
-        sol.vault,
-        sol.mint,
-      );
-      try {
-        await provider.sendAndConfirm(new Transaction().add(createAtaIx));
-      } catch (e) {}
-
-      const userSolAccount = await getOrCreateAssociatedTokenAccount(
-        provider.connection,
-        payer,
-        sol.mint,
-        payer.publicKey,
-      );
+      // Native SOL: on-chain uses system_program::transfer, token accounts are unused
+      const userTokenAccount = payer.publicKey;
 
       const privateKey = randomBytes32();
       const publicKey = derivePublicKey(poseidon, privateKey);
@@ -3294,9 +3165,9 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           relayer: payer.publicKey,
           recipient: payer.publicKey,
           vaultTokenAccount: sol.vaultTokenAccount,
-          userTokenAccount: userSolAccount.address,
-          recipientTokenAccount: userSolAccount.address,
-          relayerTokenAccount: userSolAccount.address,
+          userTokenAccount: userTokenAccount,
+          recipientTokenAccount: userTokenAccount,
+          relayerTokenAccount: userTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -3464,7 +3335,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         program.programId,
       );
       const executorSourceToken = await getAssociatedTokenAddress(
-        sol.mint,
+        sol.tokenMint,
         executorPda,
         true,
       );
@@ -3490,7 +3361,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const solVaultAccount = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         payer,
-        sol.mint,
+        sol.tokenMint,
         sol.vault,
         true,
       );
@@ -3517,7 +3388,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         sol.noteTree,
         sol.nullifiers,
         solVaultAccount.address,
-        sol.mint,
+        sol.tokenMint,
         usdc.config,
         usdc.vault,
         usdc.noteTree,
@@ -3591,7 +3462,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             sourceNullifierMarker0: nullifierMarker0,
             sourceNullifierMarker1: nullifierMarker1,
             sourceVaultTokenAccount: solVaultAccount.address,
-            sourceMintAccount: sol.mint,
+            sourceMintAccount: sol.tokenMint,
             destConfig: usdc.config,
             destVault: usdc.vault,
             destTree: usdc.noteTree,
