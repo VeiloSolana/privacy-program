@@ -18,6 +18,7 @@ import {
   createWrappedNativeAccount,
   closeAccount,
   getOrCreateAssociatedTokenAccount,
+  NATIVE_MINT,
 } from "@solana/spl-token";
 import { expect } from "chai";
 import { buildPoseidon } from "circomlibjs";
@@ -54,8 +55,13 @@ import {
  */
 
 // Mainnet token mints (cloned)
-const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+const SOL_MINT = PublicKey.default;
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+// For SPL operations (ATAs, token accounts), map native SOL to NATIVE_MINT (WSOL)
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 
 // Helper: Encode tree_id as 2-byte little-endian (u16)
 function encodeTreeId(treeId: number): Buffer {
@@ -235,10 +241,10 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Derive PDAs
     [globalConfig] = deriveGlobalConfigPDA(program.programId);
 
-    [sourceConfig] = deriveConfigPDA(program.programId, WSOL_MINT);
-    [sourceVault] = deriveVaultPDA(program.programId, WSOL_MINT);
-    [sourceNoteTree] = deriveNoteTreePDA(program.programId, WSOL_MINT, 0);
-    [sourceNullifiers] = deriveNullifiersPDA(program.programId, WSOL_MINT);
+    [sourceConfig] = deriveConfigPDA(program.programId, SOL_MINT);
+    [sourceVault] = deriveVaultPDA(program.programId, SOL_MINT);
+    [sourceNoteTree] = deriveNoteTreePDA(program.programId, SOL_MINT, 0);
+    [sourceNullifiers] = deriveNullifiersPDA(program.programId, SOL_MINT);
 
     [destConfig] = deriveConfigPDA(program.programId, USDC_MINT);
     [destVault] = deriveVaultPDA(program.programId, USDC_MINT);
@@ -247,7 +253,7 @@ describe("Privacy Pool Jupiter Swap", () => {
 
     // Get vault token accounts
     sourceVaultTokenAccount = await getAssociatedTokenAddress(
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       sourceVault,
       true,
     );
@@ -268,7 +274,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log("\n🔍 Testing Jupiter quote fetching...");
 
     const quote = await jupiterService.getQuote(
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       USDC_MINT,
       Number(INITIAL_DEPOSIT),
       50, // 0.5% slippage
@@ -284,7 +290,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`  Slippage: ${quote.slippageBps} bps`);
     console.log(`  Price Impact: ${quote.priceImpactPct}%`);
 
-    expect(quote.inputMint).to.equal(WSOL_MINT.toString());
+    expect(quote.inputMint).to.equal(tokenMintFor(SOL_MINT).toString());
     expect(quote.outputMint).to.equal(USDC_MINT.toString());
     expect(quote.inAmount).to.equal(INITIAL_DEPOSIT.toString());
     expect(parseInt(quote.outAmount)).to.be.greaterThan(0);
@@ -295,7 +301,7 @@ describe("Privacy Pool Jupiter Swap", () => {
 
     // Get quote
     const quote = await jupiterService.getQuote(
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       USDC_MINT,
       Number(INITIAL_DEPOSIT),
       50,
@@ -304,7 +310,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Get swap instruction - use payer as relayer (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       USDC_MINT,
       new Uint8Array(32),
       payer.publicKey,
@@ -403,7 +409,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     await (program.methods as any)
       .initialize(
         feeBps,
-        WSOL_MINT,
+        SOL_MINT,
         minDepositAmount,
         maxDepositAmount,
         minWithdrawAmount,
@@ -467,7 +473,7 @@ describe("Privacy Pool Jupiter Swap", () => {
 
     try {
       await (program.methods as any)
-        .addRelayer(WSOL_MINT, payer.publicKey)
+        .addRelayer(SOL_MINT, payer.publicKey)
         .accounts({
           config: sourceConfig,
           admin: payer.publicKey,
@@ -521,20 +527,13 @@ describe("Privacy Pool Jupiter Swap", () => {
     await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       sourceVault,
       true, // allowOwnerOffCurve for PDA
     );
 
-    // Create wrapped SOL account
-    const wsolKeypair = Keypair.generate();
-    const wsolAccount = await createWrappedNativeAccount(
-      provider.connection,
-      payer,
-      payer.publicKey,
-      Number(INITIAL_DEPOSIT) + 1_000_000, // Extra for fees
-      wsolKeypair, // Pass keypair to avoid ATA path
-    );
+    // For native SOL deposits, user token account is the payer (system account)
+    const userTokenAccount = payer.publicKey;
 
     // Prepare deposit
     const amount = INITIAL_DEPOSIT;
@@ -544,7 +543,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       amount,
       publicKey,
       blinding,
-      WSOL_MINT,
+      SOL_MINT,
     );
 
     // Create change note (0 amount for deposit)
@@ -555,7 +554,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       0n,
       changePubKey,
       changeBlinding,
-      WSOL_MINT,
+      SOL_MINT,
     );
 
     // Create dummy nullifiers for deposit
@@ -567,7 +566,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       0n,
       dummyPubKey1,
       dummyBlinding1,
-      WSOL_MINT,
+      SOL_MINT,
     );
     const dummyNullifier1 = computeNullifier(
       poseidon,
@@ -584,7 +583,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       0n,
       dummyPubKey2,
       dummyBlinding2,
-      WSOL_MINT,
+      SOL_MINT,
     );
     const dummyNullifier2 = computeNullifier(
       poseidon,
@@ -611,7 +610,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       root,
       publicAmount: amount,
       extDataHash,
-      mintAddress: WSOL_MINT,
+      mintAddress: SOL_MINT,
       inputNullifiers: [dummyNullifier1, dummyNullifier2],
       outputCommitments: [commitment, changeCommitment],
       inputAmounts: [0n, 0n],
@@ -627,13 +626,13 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Derive nullifier marker PDAs
     const nullifierMarker0 = deriveNullifierMarkerPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       0,
       dummyNullifier1,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       0,
       dummyNullifier2,
     );
@@ -646,7 +645,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         0, // output_tree_id
         new BN(amount.toString()),
         Array.from(extDataHash),
-        WSOL_MINT,
+        SOL_MINT,
         Array.from(dummyNullifier1),
         Array.from(dummyNullifier2),
         Array.from(commitment),
@@ -672,9 +671,9 @@ describe("Privacy Pool Jupiter Swap", () => {
         relayer: payer.publicKey,
         recipient: payer.publicKey,
         vaultTokenAccount: sourceVaultTokenAccount,
-        userTokenAccount: wsolAccount,
-        recipientTokenAccount: wsolAccount,
-        relayerTokenAccount: wsolAccount,
+        userTokenAccount: payer.publicKey,
+        recipientTokenAccount: payer.publicKey,
+        relayerTokenAccount: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -699,21 +698,12 @@ describe("Privacy Pool Jupiter Swap", () => {
       publicKey,
       leafIndex,
       merklePath: sourceOffchainTree.getMerkleProof(leafIndex),
-      mintAddress: WSOL_MINT,
+      mintAddress: SOL_MINT,
     });
 
     console.log(`   Note saved: ${depositedNoteId}`);
     console.log(`   Amount: ${INITIAL_DEPOSIT} lamports`);
     console.log(`   Leaf index: ${leafIndex}`);
-
-    // Close wrapped SOL account
-    await closeAccount(
-      provider.connection,
-      payer,
-      wsolAccount,
-      payer.publicKey,
-      payer,
-    );
   });
 
   it("should execute SOL→USDC swap via Jupiter", async function () {
@@ -779,7 +769,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Get Jupiter quote
     const swapAmount = note.amount;
     const quote = await jupiterService.getQuote(
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       USDC_MINT,
       Number(swapAmount),
       100, // 1% slippage for safer execution
@@ -794,7 +784,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Derive executor PDA - includes relayer key (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       USDC_MINT,
       nullifier,
       payer.publicKey,
@@ -843,7 +833,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       changeAmount,
       changePubKey,
       changeBlinding,
-      WSOL_MINT, // SOURCE mint
+      SOL_MINT, // SOURCE mint
     );
 
     console.log(
@@ -861,7 +851,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     const swapParams = {
       minAmountOut: new BN(minAmountOut.toString()),
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600), // 1 hour from now
-      sourceMint: WSOL_MINT,
+      sourceMint: SOL_MINT,
       destMint: USDC_MINT,
       swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
@@ -880,7 +870,7 @@ describe("Privacy Pool Jupiter Swap", () => {
     const extDataHash = computeExtDataHash(poseidon, extData);
     const swapParamsHash = computeSwapParamsHash(
       poseidon,
-      WSOL_MINT,
+      SOL_MINT,
       USDC_MINT,
       minAmountOut,
       BigInt(swapParams.deadline.toString()),
@@ -896,7 +886,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       0n,
       dummyPubKey,
       dummyBlinding,
-      WSOL_MINT, // SOURCE mint
+      SOL_MINT, // SOURCE mint
     );
     const dummyNullifier = computeNullifier(
       poseidon,
@@ -914,7 +904,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       sourceRoot: root,
       swapParamsHash,
       extDataHash,
-      sourceMint: WSOL_MINT,
+      sourceMint: SOL_MINT,
       destMint: USDC_MINT,
       inputNullifiers: [nullifier, dummyNullifier],
       changeCommitment,
@@ -944,20 +934,20 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Derive nullifier markers
     const nullifierMarker0 = deriveNullifierMarkerPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       0,
       nullifier,
     );
     const nullifierMarker1 = deriveNullifierMarkerPDA(
       program.programId,
-      WSOL_MINT,
+      SOL_MINT,
       0,
       dummyNullifier,
     );
 
     // Get executor token accounts
     const executorSourceToken = await getAssociatedTokenAddress(
-      WSOL_MINT,
+      tokenMintFor(SOL_MINT),
       executorPDA,
       true,
     );
@@ -979,7 +969,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         proof,
         Array.from(root),
         0, // source_tree_id
-        WSOL_MINT,
+        SOL_MINT,
         Array.from(nullifier),
         Array.from(dummyNullifier),
         0, // dest_tree_id
@@ -1005,7 +995,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         sourceNullifierMarker0: nullifierMarker0,
         sourceNullifierMarker1: nullifierMarker1,
         sourceVaultTokenAccount,
-        sourceMintAccount: WSOL_MINT,
+        sourceMintAccount: tokenMintFor(SOL_MINT),
         destConfig,
         destVault,
         destTree: destNoteTree,

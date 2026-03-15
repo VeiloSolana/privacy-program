@@ -17,7 +17,6 @@ import {
   getOrCreateAssociatedTokenAccount,
   getAssociatedTokenAddress,
   NATIVE_MINT,
-  createWrappedNativeAccount,
 } from "@solana/spl-token";
 import { expect } from "chai";
 import { buildPoseidon } from "circomlibjs";
@@ -41,7 +40,7 @@ import {
  * Privacy Pool Cross-Pool Swap Tests using Raydium AMM V4
  *
  * Tests the transact_swap instruction which:
- * 1. Consumes notes from source pool (WSOL)
+ * 1. Consumes notes from source pool (SOL)
  * 2. CPIs to Raydium AMM V4 to execute swap SOL→USDC
  * 3. Creates notes in destination pool (USDC)
  *
@@ -59,8 +58,13 @@ const SERUM_PROGRAM = new PublicKey(
 );
 
 // Mainnet token mints (cloned)
-const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+const SOL_MINT = PublicKey.default; // Native SOL identity (all zeros)
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+// Helper: map SOL_MINT (PublicKey.default) → NATIVE_MINT for SPL operations
+function tokenMintFor(mint: PublicKey): PublicKey {
+  return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
+}
 
 // ============================================
 // Raydium AMM V4 SOL/USDC Pool Accounts (from Anchor.toml clones)
@@ -188,7 +192,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
   // Poseidon hasher
   let poseidon: any;
 
-  // Source pool (WSOL)
+  // Source pool (SOL)
   let sourceTokenMint: PublicKey;
   let sourceConfig: PublicKey;
   let sourceVault: PublicKey;
@@ -215,7 +219,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
   const noteStorage = new InMemoryNoteStorage();
 
   // Test constants
-  const SOURCE_DECIMALS = 9; // WSOL
+  const SOURCE_DECIMALS = 9; // SOL
   const DEST_DECIMALS = 6; // USDC
   const INITIAL_DEPOSIT = 2_000_000_000; // 2 SOL
   const SWAP_AMOUNT = 500_000_000; // 0.5 SOL
@@ -250,10 +254,10 @@ describe("Privacy Pool AMM V4 Swap", () => {
     await airdropAndConfirm(provider, payer.publicKey, 10 * LAMPORTS_PER_SOL);
 
     // Use mainnet mints (cloned)
-    sourceTokenMint = WSOL_MINT;
+    sourceTokenMint = SOL_MINT;
     destTokenMint = USDC_MINT;
 
-    console.log(`✅ Source Token (WSOL): ${sourceTokenMint.toBase58()}`);
+    console.log(`✅ Source Token (SOL): ${sourceTokenMint.toBase58()}`);
     console.log(`✅ Dest Token (USDC): ${destTokenMint.toBase58()}`);
     console.log(`✅ AMM V4 Pool: ${AMM_POOL_STATE.toBase58()}`);
 
@@ -273,7 +277,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
     }
     console.log(`✅ Serum Vault Signer: ${serumVaultSigner.toBase58()}`);
 
-    // Derive PDAs for source pool (WSOL)
+    // Derive PDAs for source pool (SOL)
     [sourceConfig] = PublicKey.findProgramAddressSync(
       [Buffer.from("privacy_config_v3"), sourceTokenMint.toBuffer()],
       program.programId,
@@ -295,7 +299,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       program.programId,
     );
     sourceVaultTokenAccount = await getAssociatedTokenAddress(
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
@@ -333,11 +337,11 @@ describe("Privacy Pool AMM V4 Swap", () => {
       program.programId,
     );
 
-    console.log("Source Config PDA (WSOL):", sourceConfig.toBase58());
+    console.log("Source Config PDA (SOL):", sourceConfig.toBase58());
     console.log("Dest Config PDA (USDC):", destConfig.toBase58());
   });
 
-  it("initializes source privacy pool (WSOL)", async () => {
+  it("initializes source privacy pool (SOL)", async () => {
     try {
       await (program.methods as any)
         .initialize(
@@ -358,10 +362,10 @@ describe("Privacy Pool AMM V4 Swap", () => {
         })
         .rpc();
 
-      console.log("✅ Source pool (WSOL) initialized");
+      console.log("✅ Source pool (SOL) initialized");
     } catch (e: any) {
       if (e.message?.includes("already in use")) {
-        console.log("Source pool (WSOL) already initialized");
+        console.log("Source pool (SOL) already initialized");
       } else {
         throw e;
       }
@@ -436,7 +440,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         .addRelayer(sourceTokenMint, payer.publicKey)
         .accounts({ config: sourceConfig, admin: payer.publicKey })
         .rpc();
-      console.log("✅ Relayer registered for source pool (WSOL)");
+      console.log("✅ Relayer registered for source pool (SOL)");
     } catch (e: any) {
       if (
         e.message?.includes("already added") ||
@@ -468,26 +472,22 @@ describe("Privacy Pool AMM V4 Swap", () => {
     }
   });
 
-  it("deposits WSOL to source pool for AMM swap", async () => {
-    console.log("\n🎁 Depositing WSOL to source pool...");
+  it("deposits SOL to source pool for AMM swap", async () => {
+    console.log("\n🎁 Depositing SOL to source pool...");
 
     // Create vault's token account
     await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
 
-    // Create wrapped SOL account
-    const wsolAccount = await createWrappedNativeAccount(
-      provider.connection,
-      payer,
-      payer.publicKey,
-      INITIAL_DEPOSIT * 2,
+    // Native SOL: use payer.publicKey directly (on-chain uses system_program::transfer)
+    console.log(
+      `   Using native SOL from payer: ${payer.publicKey.toBase58()}`,
     );
-    console.log(`   Created wSOL account: ${wsolAccount.toBase58()}`);
 
     // Generate keypair for the note
     const privateKey = randomBytes32();
@@ -630,9 +630,9 @@ describe("Privacy Pool AMM V4 Swap", () => {
         relayer: payer.publicKey,
         recipient: payer.publicKey,
         vaultTokenAccount: sourceVaultTokenAccount,
-        userTokenAccount: wsolAccount,
-        recipientTokenAccount: wsolAccount,
-        relayerTokenAccount: wsolAccount,
+        userTokenAccount: payer.publicKey,
+        recipientTokenAccount: payer.publicKey,
+        relayerTokenAccount: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -717,8 +717,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
     console.log(`   Leaf index: ${note!.leafIndex}`);
   });
 
-  it("executes cross-pool swap (WSOL → USDC via AMM V4)", async () => {
-    console.log("\n🔄 Executing cross-pool swap WSOL → USDC via AMM V4...");
+  it("executes cross-pool swap (SOL → USDC via AMM V4)", async () => {
+    console.log("\n🔄 Executing cross-pool swap SOL → USDC via AMM V4...");
 
     const note = noteStorage.get(depositedNoteId!);
     if (!note) throw new Error("Note not found");
@@ -856,7 +856,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       program.programId,
     );
     const executorSourceToken = await getAssociatedTokenAddress(
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       executorPda,
       true,
     );
@@ -884,7 +884,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
     const sourceVaultWsolAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
@@ -915,7 +915,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       sourceNoteTree,
       sourceNullifiers,
       sourceVaultWsolAccount.address,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       destConfig,
       destVault,
       destNoteTree,
@@ -1002,7 +1002,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           sourceNullifierMarker0: nullifierMarker0,
           sourceNullifierMarker1: nullifierMarker1,
           sourceVaultTokenAccount: sourceVaultWsolAccount.address,
-          sourceMintAccount: sourceTokenMint,
+          sourceMintAccount: tokenMintFor(sourceTokenMint),
           destConfig,
           destVault,
           destTree: destNoteTree,
@@ -1246,14 +1246,14 @@ describe("Privacy Pool AMM V4 Swap", () => {
     const vaultTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       payer.publicKey,
     );
 
@@ -1665,7 +1665,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       true,
     );
     const executorDestToken = await getAssociatedTokenAddress(
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       executorPda,
       true,
     );
@@ -1695,14 +1695,14 @@ describe("Privacy Pool AMM V4 Swap", () => {
     const destVaultSolAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       sourceVault,
       true,
     );
     const relayerTokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       payer,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       payer.publicKey,
     );
 
@@ -1724,7 +1724,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       sourceVault,
       sourceNoteTree,
       destVaultSolAccount.address,
-      sourceTokenMint,
+      tokenMintFor(sourceTokenMint),
       RAYDIUM_AMM_V4_PROGRAM,
       SERUM_PROGRAM,
       TOKEN_PROGRAM_ID,
@@ -1810,7 +1810,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           destVault: sourceVault, // SOL vault
           destTree: sourceNoteTree,
           destVaultTokenAccount: destVaultSolAccount.address,
-          destMintAccount: sourceTokenMint,
+          destMintAccount: tokenMintFor(sourceTokenMint),
           executor: executorPda,
           executorSourceToken,
           executorDestToken,
