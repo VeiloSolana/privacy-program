@@ -56,7 +56,7 @@ export class JupiterSwapService {
       amount: amount.toString(),
       slippageBps: slippageBps.toString(),
       onlyDirectRoutes: "true", // Simple routes only (no ALTs)
-      dexes: "Raydium,Raydium CPMM", // Only use Raydium AMM V4 and CPMM (already cloned in localnet)
+      dexes: "Raydium,Raydium CPMM,Raydium Clmm", // Include Raydium AMM V4, CPMM, and CLMM pools
     });
 
     const response = await fetch(`${this.apiUrl}/quote?${params}`);
