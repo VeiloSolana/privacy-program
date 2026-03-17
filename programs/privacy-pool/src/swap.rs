@@ -32,14 +32,16 @@ pub struct SwapParams {
     pub deadline: i64,
     pub source_mint: Pubkey,
     pub dest_mint: Pubkey,
+    /// Amount of destination tokens the user commits to receiving.
+    /// Included in swapParamsHash — cryptographically binds the ZK circuit's
+    /// destAmount to the on-chain vault deposit, preventing an attacker from
+    /// encoding an inflated destination note while receiving a tiny swap output.
+    pub dest_amount: u64,
     /// SHA-256 hash of the raw swap instruction data (swap_data).
     /// Binds the exact DEX instruction bytes into the ZK proof so the relayer
     /// cannot substitute different swap_data (e.g. 0% slippage) after the user
     /// has generated their proof.  Set to [0u8;32] for CPMM/AMM swaps, which
     /// already enforce dex_min_out by direct instruction decoding.
-    /// BREAKING: ZK swap circuit must include this field when computing
-    /// swap_params_hash = Poseidon(source_mint, dest_mint, min_amount_out,
-    ///                              deadline, swap_data_hash).
     pub swap_data_hash: [u8; 32],
 }
 
@@ -100,9 +102,12 @@ impl SwapParams {
             error!(PrivacyError::MerkleHashFailed)
         )?;
 
-        let hash2 = PoseidonHasher::hashv(&[&min_out_bytes, &deadline_bytes]).map_err(|_|
-            error!(PrivacyError::MerkleHashFailed)
-        )?;
+        let mut dest_amount_bytes = [0u8; 32];
+        dest_amount_bytes[24..].copy_from_slice(&self.dest_amount.to_be_bytes());
+
+        let hash2 = PoseidonHasher::hashv(
+            &[&min_out_bytes, &deadline_bytes, &dest_amount_bytes]
+        ).map_err(|_| error!(PrivacyError::MerkleHashFailed))?;
 
         PoseidonHasher::hashv(&[&hash1, &hash2]).map_err(|_| error!(PrivacyError::MerkleHashFailed))
     }

@@ -801,6 +801,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       minAmountOutBigInt,
       deadlineBigInt,
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      swappedAmount,
     );
 
     // Generate ZK swap proof
@@ -841,6 +842,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       deadline: new BN(deadlineBigInt.toString()),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -1599,6 +1601,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       minSolOutBigInt,
       deadlineBigInt,
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      expectedSol,
     );
 
     // Generate ZK swap proof
@@ -1645,6 +1648,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       deadline: new BN(deadlineBigInt.toString()),
       sourceMint: destTokenMint, // USDC
       destMint: sourceTokenMint, // SOL
+      destAmount: new BN(expectedSol.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 

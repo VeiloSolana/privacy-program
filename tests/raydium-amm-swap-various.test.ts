@@ -735,6 +735,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdc.mint,
+        destAmount: new BN(EXPECTED_USDC_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -744,6 +745,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         usdc.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_USDC_OUT,
       );
 
       console.log("   Generating ZK proof...");
@@ -1365,6 +1368,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdt.mint,
+        destAmount: new BN(EXPECTED_USDT_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -1374,6 +1378,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         usdt.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_USDT_OUT,
       );
 
       console.log("   Generating ZK proof...");
@@ -1993,6 +1999,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: jup.mint,
+        destAmount: new BN(EXPECTED_JUP_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -2002,6 +2009,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         jup.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_JUP_OUT,
       );
 
       console.log("   Generating ZK proof...");
@@ -2617,6 +2626,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usd1.mint,
+        destAmount: new BN(EXPECTED_USD1_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -2626,6 +2636,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         usd1.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_USD1_OUT,
       );
 
       console.log("   Generating ZK proof...");
@@ -3280,6 +3292,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: sol.mint,
         destMint: usdc.mint,
+        destAmount: new BN(EXPECTED_USDC_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -3289,6 +3302,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         usdc.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_USDC_OUT,
       );
 
       console.log("   Generating ZK proof...");
@@ -3697,6 +3712,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         deadline,
         sourceMint: usdc.mint,
         destMint: jup.mint,
+        destAmount: new BN(EXPECTED_JUP_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -3706,6 +3722,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         jup.mint,
         BigInt(minAmountOut.toString()),
         BigInt(deadline.toString()),
+        new Uint8Array(32),
+        EXPECTED_JUP_OUT,
       );
 
       console.log("   Generating ZK proof...");
