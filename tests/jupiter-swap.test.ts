@@ -853,6 +853,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600), // 1 hour from now
       sourceMint: SOL_MINT,
       destMint: USDC_MINT,
+      destAmount: new BN(minAmountOut.toString()),
       swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
 
@@ -875,6 +876,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       minAmountOut,
       BigInt(swapParams.deadline.toString()),
       swapDataHash, // MEDIUM-001
+      destAmount,
     );
 
     // Create dummy second input (always 0 amount for single-note swaps)

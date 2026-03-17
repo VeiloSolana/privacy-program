@@ -1058,6 +1058,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: solTokenMint,
       destMint: jupTokenMint,
+      destAmount: new BN(swappedAmount.toString()),
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     const swapParamsHash = computeSwapParamsHash(
@@ -1066,6 +1068,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       jupTokenMint,
       BigInt(minAmountOut.toString()),
       BigInt(swapParams.deadline.toString()),
+      new Uint8Array(32),
+      swappedAmount,
     );
 
     const proof = await generateSwapProof({
@@ -2201,6 +2205,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: jupTokenMint, // JUP
       destMint: solTokenMint, // SOL
+      destAmount: new BN(expectedSol.toString()),
+      swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
     const swapParamsHash = computeSwapParamsHash(
@@ -2209,6 +2215,8 @@ describe("Privacy Pool AMM V4 Swap - SOL/JUP", () => {
       solTokenMint,
       BigInt(minSolOut.toString()),
       BigInt(swapParams.deadline.toString()),
+      new Uint8Array(32),
+      expectedSol,
     );
 
     // Generate ZK proof

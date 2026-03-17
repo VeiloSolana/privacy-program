@@ -763,10 +763,8 @@ export const SWAP_VK_PATH = path.join(
 );
 
 /**
- * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline))
+ * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline, destAmount))
  * This must match the on-chain computation in swap.rs and the circuit constraint in swap.circom.
- * The swapDataHash param is accepted for API compatibility but not included in the hash until the
- * circuit is updated to add swapDataHash as a private input (requires recompilation).
  */
 export function computeSwapParamsHash(
   poseidon: any,
@@ -775,6 +773,7 @@ export function computeSwapParamsHash(
   minAmountOut: bigint,
   deadline: bigint,
   swapDataHash: Uint8Array = new Uint8Array(32),
+  destAmount?: bigint,
 ): Uint8Array {
   const sourceMintField = poseidon.F.e(reduceToField(sourceMint.toBytes()));
   const destMintField = poseidon.F.e(reduceToField(destMint.toBytes()));
@@ -783,11 +782,16 @@ export function computeSwapParamsHash(
 
   const minAmountOutField = poseidon.F.e(minAmountOut.toString());
   const deadlineField = poseidon.F.e(deadline.toString());
+  // destAmount is included in the hash to cryptographically bind the ZK circuit's
+  // destAmount to the on-chain vault deposit, matching swap.circom constraint 5.
+  const destAmountField = poseidon.F.e((destAmount ?? minAmountOut).toString());
 
-  const swapTermsHash = poseidon([minAmountOutField, deadlineField]);
+  const swapTermsHash = poseidon([
+    minAmountOutField,
+    deadlineField,
+    destAmountField,
+  ]);
 
-  // 2-step hash matching the compiled swap.circom WASM.
-  // TODO: add 3rd step Poseidon([..., swapDataHashField]) once circuit is recompiled with swapDataHash signal.
   const paramsHash = poseidon([mintPairHash, swapTermsHash]);
 
   const hashBytes = poseidon.F.toString(paramsHash, 16).padStart(64, "0");

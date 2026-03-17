@@ -1077,6 +1077,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: solTokenMint,
       destMint: usd1TokenMint,
+      destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -1087,6 +1088,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       BigInt(minAmountOut.toString()),
       BigInt(swapParams.deadline.toString()),
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      swappedAmount,
     );
 
     const proof = await generateSwapProof({
@@ -2184,6 +2186,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: usd1TokenMint,
       destMint: solTokenMint,
+      destAmount: new BN(expectedSol.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -2194,6 +2197,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USD1", () => {
       BigInt(swapParams.minAmountOut.toString()),
       BigInt(swapParams.deadline.toString()),
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      expectedSol,
     );
 
     const proof = await generateSwapProof({

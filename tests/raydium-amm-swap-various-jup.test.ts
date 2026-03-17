@@ -772,6 +772,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: sourcePool.mint,
       destMint: destPool.mint,
+      destAmount: new BN(destAmount.toString()),
       swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
     const swapParamsHash = computeSwapParamsHash(
@@ -781,6 +782,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       minAmountOut,
       BigInt(swapParams.deadline.toString()),
       swapDataHash, // MEDIUM-001
+      destAmount,
     );
 
     // Fee: 0.5% of output

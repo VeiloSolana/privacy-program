@@ -900,6 +900,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      destAmount: new BN(1_000_000),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -1061,7 +1062,6 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const minAmountOutBigInt = (simulatedOutput * 95n) / 100n; // 5% slippage
     const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
 
-    // Compute swap params hash for ZK proof
     const swapParamsHash = computeSwapParamsHash(
       poseidon,
       sourceTokenMint,
@@ -1069,6 +1069,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       minAmountOutBigInt,
       deadlineBigInt,
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      swappedAmount,
     );
 
     // Debug: log off-chain computed hashes
@@ -1301,6 +1302,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       deadline: new BN(deadlineBigInt.toString()),
       sourceMint: sourceTokenMint,
       destMint: destTokenMint,
+      destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -3452,6 +3454,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         minAmountOutBigInt,
         deadlineBigInt,
         new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+        destAmount,
       );
 
       // Generate ZK swap proof for the swap
@@ -3534,6 +3537,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         deadline: new BN(deadlineBigInt.toString()),
         sourceMint: SOL_MINT,
         destMint: USDT_MINT,
+        destAmount: new BN(destAmount.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 
@@ -3894,6 +3898,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         minAmountOutBigInt,
         deadlineBigInt,
         new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+        destAmount,
       );
 
       // 7. Generate ZK Swap Proof
@@ -4057,6 +4062,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         deadline: new BN(deadlineBigInt.toString()),
         sourceMint: USDT_MINT,
         destMint: SOL_MINT,
+        destAmount: new BN(destAmount.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
 

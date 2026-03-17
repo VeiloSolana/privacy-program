@@ -954,6 +954,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       deadline,
       sourceMint: solTokenMint,
       destMint: usdtTokenMint,
+      destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
 
@@ -964,6 +965,7 @@ describe("Privacy Pool AMM V4 Swap - SOL/USDT", () => {
       BigInt(minAmountOut.toString()),
       BigInt(deadline.toString()),
       new Uint8Array(32), // MEDIUM-001: zero for CPMM/AMM
+      swappedAmount,
     );
 
     // Generate ZK proof
