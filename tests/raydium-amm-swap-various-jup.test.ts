@@ -10,6 +10,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
   Transaction,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -844,6 +845,34 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       true,
     );
 
+    // ── Option B: fund_native_source (vault → executor_source_token, no relayer float) ─────
+    // For native SOL source pools, we prepend a fund_native_source instruction that does a
+    // pure raw-lamport vault debit in a separate instruction body (no CPIs in body).
+    // Both instructions are submitted in the same atomic versioned transaction so that
+    // a failure in transact_swap reverts the vault debit.
+    let fundNativeSourceIx: TransactionInstruction | null = null;
+    if (sourceIsNative) {
+      fundNativeSourceIx = await (program.methods as any)
+        .fundNativeSource(
+          sourcePool.mint,
+          destPool.mint,
+          Array.from(nullifier),
+          new BN(swapAmount.toString()),
+        )
+        .accounts({
+          executor: executorPDA,
+          executorSourceToken,
+          sourceVault: sourcePool.vault,
+          sourceConfig: sourcePool.config,
+          sourceMintAccount: sourcePool.tokenMint,
+          relayer: payer.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+    }
+
     const swapIx = await (program.methods as any)
       .transactSwap(
         proof,
@@ -898,15 +927,29 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         payer: payer.publicKey,
         recentSlot,
       });
+
+    const allIxs: TransactionInstruction[] = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+    ];
+    if (fundNativeSourceIx) allIxs.push(fundNativeSourceIx);
+    allIxs.push(swapIx);
+
+    // Include fundNativeSourceIx keys in ALT if present
     const altKeys: PublicKey[] = [];
     const seen = new Set<string>();
-    for (const meta of swapIx.keys) {
-      if (!seen.has(meta.pubkey.toBase58())) {
-        seen.add(meta.pubkey.toBase58());
-        altKeys.push(meta.pubkey);
+    for (const ix of allIxs.slice(1)) {
+      // skip compute budget ix
+      for (const meta of ix.keys) {
+        if (!seen.has(meta.pubkey.toBase58())) {
+          seen.add(meta.pubkey.toBase58());
+          altKeys.push(meta.pubkey);
+        }
+      }
+      if (!seen.has(ix.programId.toBase58())) {
+        seen.add(ix.programId.toBase58());
+        altKeys.push(ix.programId);
       }
     }
-    if (!seen.has(swapIx.programId.toBase58())) altKeys.push(swapIx.programId);
 
     await provider.sendAndConfirm(new Transaction().add(createAltIx));
 
@@ -928,10 +971,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const messageV0 = new TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
-      instructions: [
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-        swapIx,
-      ],
+      instructions: allIxs,
     }).compileToV0Message([lookupTable]);
 
     const versionedTx = new VersionedTransaction(messageV0);
@@ -1138,6 +1178,40 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         "USDC",
         "SOL",
         usdcNoteForSolSwap,
+        swapAmount.toString(),
+      );
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST: USDT -> SOL (Token to Native SOL — standalone, no chaining)
+  // --------------------------------------------------------------------------
+  describe("USDT -> SOL (Token to Native SOL)", () => {
+    let usdtNoteForSolSwap: string | undefined;
+
+    it("Step 1: Deposit SOL and swap to get USDT", async function () {
+      console.log("\n🔗 Step 1: Deposit SOL and swap to USDT");
+      const solNoteId = await initialDeposit("SOL", 10_000_000_000n);
+      usdtNoteForSolSwap = await executeJupiterSwap(
+        "SOL",
+        "USDT",
+        solNoteId,
+        "500000000", // 0.5 SOL → USDT
+      );
+      console.log(`✅ Got USDT note: ${usdtNoteForSolSwap}`);
+    });
+
+    it("Step 2: Swap USDT -> SOL", async function () {
+      console.log("\n🔗 Step 2: Swap USDT back to SOL");
+      if (!usdtNoteForSolSwap) return this.skip();
+      const usdtNote = noteStorage.get(usdtNoteForSolSwap);
+      if (!usdtNote) throw new Error("USDT note not found");
+      // Swap half the USDT back to SOL
+      const swapAmount = usdtNote.amount / 2n;
+      await executeJupiterSwap(
+        "USDT",
+        "SOL",
+        usdtNoteForSolSwap,
         swapAmount.toString(),
       );
     });

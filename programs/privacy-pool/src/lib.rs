@@ -781,8 +781,9 @@ pub struct TransactSwap<'info> {
     // ---- Ephemeral Swap Executor PDA ----
     /// Executor PDA - holds tokens during swap
     /// Seeds include source_mint, dest_mint, nullifier, AND relayer key to prevent front-running DoS
+    /// Uses init_if_needed: for native SOL swaps the executor is pre-created by fund_native_source.
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         seeds = [
             b"swap_executor",
@@ -797,8 +798,9 @@ pub struct TransactSwap<'info> {
     pub executor: Box<Account<'info, SwapExecutor>>,
 
     /// Executor's source token account (receives from source vault)
+    /// Uses init_if_needed: pre-created by fund_native_source for native SOL swaps.
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         associated_token::mint = source_mint_account,
         associated_token::authority = executor
@@ -807,7 +809,7 @@ pub struct TransactSwap<'info> {
 
     /// Executor's destination token account (receives swapped tokens)
     #[account(
-        init,
+        init_if_needed,
         payer = relayer,
         associated_token::mint = dest_mint_account,
         associated_token::authority = executor
@@ -843,6 +845,76 @@ pub struct TransactSwap<'info> {
     pub jupiter_event_authority: UncheckedAccount<'info>,
 
     // ---- Programs ----
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+}
+
+/// Option B: fund_native_source instruction context.
+///
+/// This is the first of two instructions sent in ONE atomic transaction for native SOL swaps.
+/// It creates the executor PDA + executor_source_token ATA and does a **pure raw-lamport**
+/// vault → executor_source_token transfer in the instruction body (no CPIs inside body).
+///
+/// Solana ordering rule: CPIs must precede raw lamport edits within an instruction body.
+/// Anchor's account init constraints (create_account + initialize_account) run as **pre-flight**
+/// *before* the function body, so they count as "CPIs first". The body then only does raw edits.
+///
+/// The following `transact_swap` instruction uses `init_if_needed` for executor/ATAs:
+/// if `executor.is_prefunded == 1`, it skips the relayer-float path entirely.
+#[derive(Accounts)]
+#[instruction(source_mint: Pubkey, dest_mint: Pubkey, input_nullifier_0: [u8; 32], swap_amount: u64)]
+pub struct FundNativeSource<'info> {
+    /// Executor PDA — created here, validated in the following transact_swap instruction.
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [
+            b"swap_executor",
+            source_mint.as_ref(),
+            dest_mint.as_ref(),
+            input_nullifier_0.as_ref(),
+            relayer.key().as_ref(),
+        ],
+        bump,
+        space = SwapExecutor::LEN
+    )]
+    pub executor: Box<Account<'info, SwapExecutor>>,
+
+    /// Executor's WSOL ATA — created here, funded with swap_amount from source vault.
+    /// This is executor_source_token for the following transact_swap instruction.
+    #[account(
+        init,
+        payer = relayer,
+        associated_token::mint = source_mint_account,
+        associated_token::authority = executor
+    )]
+    pub executor_source_token: Box<Account<'info, TokenAccount>>,
+
+    /// Source vault PDA (native SOL pool — program-owned, stores raw lamports).
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", source_mint.as_ref()],
+        bump = source_config.vault_bump
+    )]
+    pub source_vault: Box<Account<'info, Vault>>,
+
+    /// Source pool config — checked for vault_bump and relayer authorisation.
+    #[account(
+        seeds = [b"privacy_config_v3", source_mint.as_ref()],
+        bump = source_config.bump
+    )]
+    pub source_config: Box<Account<'info, PrivacyConfig>>,
+
+    /// WSOL mint (So111…1112) — required for executor_source_token ATA constraint.
+    /// Must equal effective_mint(source_mint), i.e., source_mint must be native SOL.
+    #[account(address = effective_mint(&source_mint) @ PrivacyError::InvalidMintAddress)]
+    pub source_mint_account: Box<Account<'info, Mint>>,
+
+    /// Relayer — pays rent for created accounts, must be whitelisted in source pool.
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
@@ -1410,6 +1482,22 @@ pub mod privacy_pool {
         )?;
 
         Ok(())
+    }
+
+    /// Option B: Create executor PDA + WSOL ATA and transfer swap_amount from vault.
+    /// Must be invoked as the FIRST instruction in an atomic transaction whose SECOND
+    /// instruction is `transact_swap`.  Both instructions are sent together so that
+    /// failure in `transact_swap` reverts the vault debit atomically.
+    ///
+    /// Only for native SOL source pools.  SPL-source swaps use `transact_swap` directly.
+    pub fn fund_native_source(
+        ctx: Context<FundNativeSource>,
+        source_mint: Pubkey,
+        dest_mint: Pubkey,
+        input_nullifier_0: [u8; 32],
+        swap_amount: u64,
+    ) -> Result<()> {
+        swap::fund_native_source(ctx, source_mint, dest_mint, input_nullifier_0, swap_amount)
     }
 
     /// Atomic cross-pool private swap

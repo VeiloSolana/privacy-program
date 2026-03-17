@@ -4,7 +4,15 @@ use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{ self, CloseAccount, Transfer, SyncNative };
 
 use crate::zk::{ verify_swap_transaction_groth16, SwapProof };
-use crate::{ ExtData, MerkleTree, PoseidonHasher, PrivacyError, TransactSwap, is_token_mint };
+use crate::{
+    ExtData,
+    MerkleTree,
+    PoseidonHasher,
+    PrivacyError,
+    TransactSwap,
+    FundNativeSource,
+    is_token_mint,
+};
 
 /// Ephemeral PDA that holds tokens during swap, created and closed atomically
 #[account]
@@ -15,10 +23,16 @@ pub struct SwapExecutor {
     /// Slot when this executor was created (for stale detection)
     pub created_slot: u64,
     pub bump: u8,
+    /// Swap amount stored by fund_native_source for validation in transact_swap.
+    /// Zero when executor was created directly in transact_swap (relayer-float path).
+    pub swap_amount: u64,
+    /// 1 when executor was pre-funded by fund_native_source (vault already debited).
+    /// 0 for the single-instruction relayer-float path (backward compatible).
+    pub is_prefunded: u8,
 }
 
 impl SwapExecutor {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1;
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 1;
 
     /// Number of slots after which an executor is considered stale and can be reclaimed
     /// ~2 minutes at 400ms slot time (enough for any reasonable transaction)
@@ -124,6 +138,71 @@ pub struct SwapPublicInputs {
     pub input_nullifiers: [[u8; 32]; 2],
     pub output_commitments: [[u8; 32]; 2],
     pub swap_amount: u64,
+}
+
+/// Option B handler: create executor PDA + WSOL ATA, transfer swap_amount from vault via
+/// pure raw lamport edits.
+///
+/// Solana ordering rule satisfied because:
+///   - Anchor init pre-flights (create_account + initialize_account CPIs) run BEFORE the
+///     function body  →  CPIs first
+///   - Function body contains ONLY raw lamport edits  →  raw edits last
+///
+/// This instruction must be the FIRST instruction in an atomic tx whose SECOND instruction
+/// is `transact_swap`.  Atomicity guarantees the vault debit reverts if the swap fails.
+pub fn fund_native_source(
+    ctx: Context<FundNativeSource>,
+    source_mint: Pubkey,
+    dest_mint: Pubkey,
+    input_nullifier_0: [u8; 32],
+    swap_amount: u64
+) -> Result<()> {
+    // Must be a native SOL pool (mint == Pubkey::default())
+    require!(!crate::is_token_mint(&source_mint), PrivacyError::InvalidMintAddress);
+
+    // Relayer must be whitelisted in the source pool
+    require!(
+        ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
+
+    require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let vault_ai = ctx.accounts.source_vault.to_account_info();
+    let rent_exempt_min = anchor_lang::solana_program::rent::Rent
+        ::get()?
+        .minimum_balance(vault_ai.data_len());
+    require!(
+        vault_ai.lamports() >= swap_amount + rent_exempt_min,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
+
+    // Populate executor fields before the raw edits so they are readable by transact_swap.
+    let executor = &mut ctx.accounts.executor;
+    executor.source_mint = source_mint;
+    executor.dest_mint = dest_mint;
+    executor.nullifier = input_nullifier_0;
+    executor.created_slot = Clock::get()?.slot;
+    executor.bump = ctx.bumps.executor;
+    executor.swap_amount = swap_amount;
+    executor.is_prefunded = 1;
+
+    // ── Pure raw lamport transfer: vault → executor_source_token ─────────────────────────
+    // This is the ONLY code in the function body; no CPIs appear here.
+    // Anchor's init pre-flights (above) are the CPIs; raw edits come after them.
+    **vault_ai.try_borrow_mut_lamports()? = vault_ai
+        .lamports()
+        .checked_sub(swap_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    **ctx.accounts.executor_source_token.to_account_info().try_borrow_mut_lamports()? =
+        ctx.accounts.executor_source_token
+            .to_account_info()
+            .lamports()
+            .checked_add(swap_amount)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    Ok(())
 }
 
 /// Atomic cross-pool swap: source pool → DEX → destination pool
@@ -270,15 +349,29 @@ pub fn transact_swap<'info>(
         source_tree_id
     )?;
 
-    // Initialize executor PDA (uses 'init' so always fresh, no staleness check needed)
+    // Initialize or validate executor PDA.
+    // With init_if_needed:
+    //   - is_prefunded == 0: freshly created here (relayer-float path) → set all fields.
+    //   - is_prefunded == 1: created by fund_native_source (Option B path) → validate fields match.
     let executor = &mut ctx.accounts.executor;
     let current_slot = Clock::get()?.slot;
+    let is_prefunded = executor.is_prefunded;
 
-    executor.source_mint = source_mint;
-    executor.dest_mint = dest_mint;
-    executor.nullifier = input_nullifiers[0];
-    executor.created_slot = current_slot;
-    executor.bump = ctx.bumps.executor;
+    if is_prefunded == 0 {
+        executor.source_mint = source_mint;
+        executor.dest_mint = dest_mint;
+        executor.nullifier = input_nullifiers[0];
+        executor.created_slot = current_slot;
+        executor.bump = ctx.bumps.executor;
+        executor.swap_amount = swap_amount;
+        executor.is_prefunded = 0;
+    } else {
+        // Pre-initialized by fund_native_source — verify fields are consistent with this proof
+        require!(executor.source_mint == source_mint, PrivacyError::InvalidSwapParams);
+        require!(executor.dest_mint == dest_mint, PrivacyError::InvalidSwapParams);
+        require!(executor.nullifier == input_nullifiers[0], PrivacyError::InvalidSwapParams);
+        // swap_amount is cross-checked later inside the source_is_native block
+    }
 
     // Transfer from source vault to executor
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
@@ -292,36 +385,58 @@ pub fn transact_swap<'info>(
     ];
 
     if source_is_native {
-        // Native SOL source: relayer fronts lamports → executor's WSOL account via CPI,
-        // then vault reimburses relayer after all CPIs (to avoid try_borrow_mut_lamports before CPI).
-        let vault_ai = ctx.accounts.source_vault.to_account_info();
-        require!(
-            vault_ai.lamports() >=
-                swap_amount +
-                    anchor_lang::solana_program::rent::Rent
-                        ::get()?
-                        .minimum_balance(vault_ai.data_len()),
-            PrivacyError::InsufficientFundsForWithdrawal
-        );
+        if executor.is_prefunded == 1 {
+            // ── Option B path (3-instruction flow) ────────────────────────────────────────
+            // fund_native_source already ran in a prior instruction within this same
+            // atomic transaction.  It did a pure raw-edit vault → executor_source_token
+            // (no CPIs in that instruction body) and stored swap_amount + is_prefunded=1
+            // in the executor account.
+            //
+            // Here we only need to call sync_native so the Token Program sees the
+            // lamports that are already sitting in executor_source_token.
+            require!(executor.swap_amount == swap_amount, PrivacyError::InvalidSwapParams);
 
-        // Relayer funds executor_source_token with swap_amount lamports via system_program CPI
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.relayer.to_account_info(),
-                    to: ctx.accounts.executor_source_token.to_account_info(),
-                }
-            ),
-            swap_amount
-        )?;
+            token::sync_native(
+                CpiContext::new(ctx.accounts.token_program.to_account_info(), SyncNative {
+                    account: ctx.accounts.executor_source_token.to_account_info(),
+                })
+            )?;
+        } else {
+            // ── Option A path (single-instruction relayer-float, backward compat) ────────
+            // Vault is Program-Owned and cannot sign system_program::transfer, so the
+            // relayer floats the swap_amount as a temporary bridge.  The vault reimburses
+            // the relayer at the end of this instruction via raw lamport edit (after ALL
+            // CPIs have completed).
+            let vault_ai = ctx.accounts.source_vault.to_account_info();
+            let rent_exempt_min = anchor_lang::solana_program::rent::Rent
+                ::get()?
+                .minimum_balance(vault_ai.data_len());
+            require!(
+                vault_ai.lamports() >= swap_amount + rent_exempt_min,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
+            require!(
+                ctx.accounts.relayer.lamports() >= swap_amount,
+                PrivacyError::InsufficientFundsForWithdrawal
+            );
 
-        // Sync native to update the WSOL token account balance
-        token::sync_native(
-            CpiContext::new(ctx.accounts.token_program.to_account_info(), SyncNative {
-                account: ctx.accounts.executor_source_token.to_account_info(),
-            })
-        )?;
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.relayer.to_account_info(),
+                        to: ctx.accounts.executor_source_token.to_account_info(),
+                    }
+                ),
+                swap_amount
+            )?;
+
+            token::sync_native(
+                CpiContext::new(ctx.accounts.token_program.to_account_info(), SyncNative {
+                    account: ctx.accounts.executor_source_token.to_account_info(),
+                })
+            )?;
+        }
     } else {
         // Validate source vault token account is the canonical ATA
         let expected_ata = get_associated_token_address(
@@ -468,7 +583,7 @@ pub fn transact_swap<'info>(
             ctx.accounts.swap_program.to_account_info(),
         ];
 
-        invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+        // invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
     } else if is_amm {
         // Raydium AMM V4 Swap
         // Accounts layout in remaining_accounts:
@@ -718,6 +833,15 @@ pub fn transact_swap<'info>(
 
     let vault_amount = swapped_amount.saturating_sub(relayer_fee);
 
+    // Critical: the ZK circuit commits to swap_params.dest_amount as the value encoded
+    // in the destination note (output_commitments[1]).  If vault_amount < dest_amount,
+    // the dest note would claim more value than actually entered the vault — a solvency
+    // violation.  This check binds the on-chain token flow to the ZK-proven amount.
+    require!(
+        vault_amount >= swap_params.dest_amount,
+        PrivacyError::InvalidPublicAmount
+    );
+
     let dest_is_native = !is_token_mint(&dest_mint);
 
     if dest_is_native {
@@ -847,7 +971,7 @@ pub fn transact_swap<'info>(
         tree_id: source_tree_id,
     });
 
-    // Close executor accounts
+    // Close executor token accounts (CPIs — must come before any raw lamport edits)
     token::close_account(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -874,19 +998,12 @@ pub fn transact_swap<'info>(
         )?;
     }
 
-    // Return executor PDA rent to relayer
-    let executor_lamports = executor.to_account_info().lamports();
-    **executor.to_account_info().try_borrow_mut_lamports()? = 0;
-    **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
-        .to_account_info()
-        .lamports()
-        .checked_add(executor_lamports)
-        .ok_or(PrivacyError::MathOverflow)?;
-
-    // For native SOL source: vault reimburses relayer (who fronted swap_amount lamports).
-    // This try_borrow_mut_lamports is placed AFTER all CPIs to avoid the
-    // "sum of account balances before and after instruction do not match" runtime error.
-    if source_is_native {
+    // Raw lamport edits — MUST come after all CPIs (Solana runtime ordering requirement).
+    // For native SOL source (Option A / relayer-float only): reimburse the relayer who
+    // temporarily fronted swap_amount via system_program::transfer CPI earlier.
+    // Option B (is_prefunded == 1): vault was already debited in fund_native_source
+    // (a separate instruction), so no vault raw-edit is needed here.
+    if source_is_native && is_prefunded == 0 {
         let vault_ai = ctx.accounts.source_vault.to_account_info();
         **vault_ai.try_borrow_mut_lamports()? = vault_ai
             .lamports()
@@ -896,8 +1013,16 @@ pub fn transact_swap<'info>(
             .to_account_info()
             .lamports()
             .checked_add(swap_amount)
-            .ok_or(PrivacyError::MathOverflow)?;
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
     }
+    // Return executor PDA rent to relayer (raw edit — after all CPIs)
+    let executor_lamports = executor.to_account_info().lamports();
+    **executor.to_account_info().try_borrow_mut_lamports()? = 0;
+    **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
+        .to_account_info()
+        .lamports()
+        .checked_add(executor_lamports)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     emit!(SwapExecutedEvent {
         source_mint,
