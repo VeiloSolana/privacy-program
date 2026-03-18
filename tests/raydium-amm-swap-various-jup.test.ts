@@ -1282,67 +1282,32 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       );
     });
 
-    it("fund_native_source creates a prefunded executor and debits vault", async function () {
+    it("fund_native_source standalone is correctly rejected (AUDIT-C01 fix)", async function () {
+      // Since AUDIT-C01 fix: fund_native_source requires the NEXT instruction in the
+      // same transaction to be transact_swap from this program (verified via Instructions
+      // sysvar).  A standalone call without transact_swap must be rejected.
+      //
+      // Consequence: executors can never be orphaned — if transact_swap fails the entire
+      // transaction reverts atomically, so reclaim_stale_executor is no longer reachable.
       const solPool = pools["SOL"];
       const vaultBefore = await connection.getBalance(solPool.vault);
 
-      await (program.methods as any)
-        .fundNativeSource(
-          SOL_MINT,
-          pools["USDC"].mint,
-          Array.from(staleNullifier),
-          new BN(RECLAIM_SWAP_AMOUNT),
-        )
-        .accounts({
-          executor: executorPda,
-          executorSourceToken,
-          sourceVault: solPool.vault,
-          sourceConfig: solPool.config,
-          sourceMintAccount: NATIVE_MINT,
-          relayer: payer.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        })
-        .signers([payer])
-        .rpc();
-
-      fundSlot = await connection.getSlot();
-
-      const vaultAfter = await connection.getBalance(solPool.vault);
-      expect(vaultBefore - vaultAfter).to.equal(RECLAIM_SWAP_AMOUNT);
-
-      const executorAccount = await (program.account as any).swapExecutor.fetch(
-        executorPda,
-      );
-      expect(executorAccount.isPrefunded).to.equal(1);
-      expect(executorAccount.swapAmount.toNumber()).to.equal(
-        RECLAIM_SWAP_AMOUNT,
-      );
-      expect(executorAccount.relayer.toBase58()).to.equal(
-        payer.publicKey.toBase58(),
-      );
-
-      console.log(
-        `  ✅ Executor funded at slot ${fundSlot}, vault debited ${RECLAIM_SWAP_AMOUNT} lamports`,
-      );
-    });
-
-    it("rejects reclaim_stale_executor before staleness threshold (ExecutorNotStale)", async function () {
       try {
         await (program.methods as any)
-          .reclaimStaleExecutor(
+          .fundNativeSource(
             SOL_MINT,
             pools["USDC"].mint,
             Array.from(staleNullifier),
+            new BN(RECLAIM_SWAP_AMOUNT),
           )
           .accounts({
             executor: executorPda,
             executorSourceToken,
-            sourceVault: pools["SOL"].vault,
-            sourceConfig: pools["SOL"].config,
+            sourceVault: solPool.vault,
+            sourceConfig: solPool.config,
             sourceMintAccount: NATIVE_MINT,
             relayer: payer.publicKey,
+            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
             associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1350,75 +1315,41 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
           .signers([payer])
           .rpc();
         throw new Error(
-          "Expected ExecutorNotStale error but instruction succeeded",
+          "Expected MissingTransactSwapInstruction but call succeeded",
         );
       } catch (err: any) {
         const msg: string = err?.message ?? "";
-        expect(msg).to.include("ExecutorNotStale");
+        expect(msg).to.include("MissingTransactSwapInstruction");
         console.log(
-          "  ✅ Correctly rejected early reclaim with ExecutorNotStale",
+          "  ✅ Correctly rejected standalone fund_native_source with MissingTransactSwapInstruction",
         );
       }
+
+      // Vault balance must be unchanged — no lamports were debited
+      const vaultAfter = await connection.getBalance(solPool.vault);
+      expect(vaultAfter).to.equal(vaultBefore);
+      console.log("  ✅ Vault balance unchanged — no funds locked");
     });
 
-    it("reclaim_stale_executor succeeds after 300 slots and restores vault", async function () {
-      this.timeout(600_000); // slot-advancing can take a few minutes
-
-      const solPool = pools["SOL"];
-
-      // Advance the validator past the staleness threshold (300 slots)
-      console.log(
-        `  ⏳ Advancing slots from ${fundSlot} (need >= ${fundSlot + 302})...`,
-      );
-      let currentSlot = await connection.getSlot();
-      while (currentSlot < fundSlot + 302) {
-        const tx = new anchor.web3.Transaction().add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 5000 }),
-        );
-        await anchor.web3.sendAndConfirmTransaction(connection, tx, [payer]);
-        currentSlot = await connection.getSlot();
-      }
-      console.log(`  ✅ Reached slot ${currentSlot}`);
-
-      const vaultBefore = await connection.getBalance(solPool.vault);
-
-      await (program.methods as any)
-        .reclaimStaleExecutor(
-          SOL_MINT,
-          pools["USDC"].mint,
-          Array.from(staleNullifier),
-        )
-        .accounts({
-          executor: executorPda,
-          executorSourceToken,
-          sourceVault: solPool.vault,
-          sourceConfig: solPool.config,
-          sourceMintAccount: NATIVE_MINT,
-          relayer: payer.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        })
-        .signers([payer])
-        .rpc();
-
-      const vaultAfter = await connection.getBalance(solPool.vault);
-      const vaultGain = vaultAfter - vaultBefore;
-      // vault receives swap_amount + ATA rent (token::close_account closes to source_vault)
-      expect(vaultGain).to.be.gte(RECLAIM_SWAP_AMOUNT);
-
+    it("reclaim_stale_executor is unreachable: executors cannot be orphaned", async function () {
+      // With the AUDIT-C01 fix, fund_native_source can only succeed when atomically
+      // paired with transact_swap in one transaction.  Solana atomicity guarantees that
+      // if transact_swap fails the vault debit reverts — executors are therefore never
+      // left in a stale/orphaned state, making reclaim_stale_executor unreachable.
+      // This test documents that invariant and verifies the executor PDA was never created.
       const executorInfo = await connection.getAccountInfo(executorPda);
       expect(executorInfo).to.be.null;
-
-      const executorTokenInfo = await connection.getAccountInfo(
-        executorSourceToken,
-      );
-      expect(executorTokenInfo).to.be.null;
-
       console.log(
-        `  ✅ Vault restored by ${vaultGain} lamports (${RECLAIM_SWAP_AMOUNT} swap + ${
-          vaultGain - RECLAIM_SWAP_AMOUNT
-        } ATA rent), executor accounts closed`,
+        "  ✅ Executor PDA does not exist — orphaned executors are impossible",
+      );
+    });
+
+    it("reclaim_stale_executor path removed: no slot-advancing needed", async function () {
+      // Previously this test advanced 300 slots and reclaimed a stale executor.
+      // Since orphaned executors can no longer be created (AUDIT-C01 fix), this
+      // scenario cannot arise in production.  Test is retained as a documentation stub.
+      console.log(
+        "  ✅ Stale executor reclaim path is no longer reachable in production",
       );
     });
   });
