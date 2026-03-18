@@ -920,6 +920,77 @@ pub struct FundNativeSource<'info> {
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
 
+/// Reclaim a stale prefunded executor PDA that was never completed by `transact_swap`.
+///
+/// If `fund_native_source` succeeded but the subsequent `transact_swap` never landed
+/// (e.g., the relayer dropped the transaction), the vault is effectively drained with no
+/// corresponding note insertion.  After `STALE_THRESHOLD_SLOTS` slots the relayer (or
+/// anyone who funded it) may call this to:
+///   1. Return the stuck SOL from executor_source_token → source vault.
+///   2. Close both the executor_source_token ATA and the executor PDA, reclaiming rent.
+///
+/// Security properties:
+///   - Only callable when `executor.is_prefunded == 1` (prefunded path only).
+///   - Only callable after `STALE_THRESHOLD_SLOTS` slots have elapsed since creation.
+///   - executor seeds include `relayer.key()`, so only the original relayer can reclaim.
+///   - Nullifiers were NOT marked spent by fund_native_source, so the user's notes
+///     remain valid and the user can retry the swap with a fresh relayer.
+#[derive(Accounts)]
+#[instruction(source_mint: Pubkey, dest_mint: Pubkey, input_nullifier_0: [u8; 32])]
+pub struct ReclaimStaleExecutor<'info> {
+    /// Executor PDA created by fund_native_source — must be stale.
+    /// The `constraint` explicitly verifies the signer is the original relayer who
+    /// created this executor; the PDA seeds enforce the same thing cryptographically.
+    #[account(
+        mut,
+        seeds = [
+            b"swap_executor",
+            source_mint.as_ref(),
+            dest_mint.as_ref(),
+            input_nullifier_0.as_ref(),
+            relayer.key().as_ref(),
+        ],
+        bump = executor.bump,
+        constraint = executor.relayer == relayer.key() @ PrivacyError::Unauthorized,
+    )]
+    pub executor: Box<Account<'info, SwapExecutor>>,
+
+    /// Executor's WSOL ATA holding the stuck swap_amount.
+    #[account(
+        mut,
+        associated_token::mint = source_mint_account,
+        associated_token::authority = executor,
+    )]
+    pub executor_source_token: Box<Account<'info, TokenAccount>>,
+
+    /// Source vault PDA — receives the returned SOL.
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", source_mint.as_ref()],
+        bump = source_config.vault_bump,
+    )]
+    pub source_vault: Box<Account<'info, Vault>>,
+
+    /// Source pool config — used for vault_bump and relayer check.
+    #[account(
+        seeds = [b"privacy_config_v3", source_mint.as_ref()],
+        bump = source_config.bump,
+    )]
+    pub source_config: Box<Account<'info, PrivacyConfig>>,
+
+    /// WSOL mint — required for ATA constraint on executor_source_token.
+    #[account(address = effective_mint(&source_mint) @ PrivacyError::InvalidMintAddress)]
+    pub source_mint_account: Box<Account<'info, Mint>>,
+
+    /// Original relayer — must match the seeds used in fund_native_source.
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+}
+
 // ---- Program ----
 
 #[program]
@@ -1498,6 +1569,18 @@ pub mod privacy_pool {
         swap_amount: u64,
     ) -> Result<()> {
         swap::fund_native_source(ctx, source_mint, dest_mint, input_nullifier_0, swap_amount)
+    }
+
+    /// Reclaim a stale prefunded executor that was never completed by `transact_swap`.
+    /// Returns the stuck SOL to the source vault and closes the executor accounts.
+    /// Only callable after `SwapExecutor::STALE_THRESHOLD_SLOTS` slots have elapsed.
+    pub fn reclaim_stale_executor(
+        ctx: Context<ReclaimStaleExecutor>,
+        source_mint: Pubkey,
+        dest_mint: Pubkey,
+        input_nullifier_0: [u8; 32],
+    ) -> Result<()> {
+        swap::reclaim_stale_executor(ctx, source_mint, dest_mint, input_nullifier_0)
     }
 
     /// Atomic cross-pool private swap

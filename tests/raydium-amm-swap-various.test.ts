@@ -458,8 +458,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
   describe("SOL -> USDC Swap", () => {
     const DEPOSIT_AMOUNT = 2_000_000_000n; // 2 SOL
     const SWAP_AMOUNT = 500_000_000; // 0.5 SOL
-    const EXPECTED_USDC_OUT = 75_000_000n; // ~75 USDC (estimated at ~$150/SOL)
-    const SWAP_FEE = 375_000n; // 0.5% of 75 USDC = 0.375 USDC
+    const EXPECTED_USDC_OUT = 20_000_000n; // = minAmountOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+    const SWAP_FEE = 375_000n; // 0.5% of ~75 USDC worst-case, covers outputs up to 75M
 
     let depositNoteId: string | null = null;
     let usdcNoteId: string | null = null;
@@ -1088,6 +1088,381 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         `✅ SOL change note verified: ${Number(note!.amount) / 1e9} SOL`,
       );
     });
+
+    it("executes reverse swap (USDC → SOL via AMM V4)", async function () {
+      if (!poolConfig || !usdcNoteId) return this.skip();
+
+      const usdc = pools.USDC;
+      const sol = pools.SOL;
+      console.log("\n🔄 Executing reverse swap USDC → SOL...");
+
+      const note = noteStorage.get(usdcNoteId);
+      if (!note) throw new Error("USDC note not found");
+
+      const merkleProof = usdc.offchainTree.getMerkleProof(note.leafIndex);
+      const root = usdc.offchainTree.getRoot();
+
+      const dummyPrivKey = randomBytes32();
+      const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+      const dummyBlinding = randomBytes32();
+      const dummyCommitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyPubKey,
+        dummyBlinding,
+        usdc.mint,
+      );
+      const dummyNullifier = computeNullifier(
+        poseidon,
+        dummyCommitment,
+        0,
+        dummyPrivKey,
+      );
+      const dummyProof = usdc.offchainTree.getMerkleProof(0);
+
+      const swapAmount = note.amount;
+      const expectedSol = 50_000_000n; // = minSolOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+
+      const solOutputPrivKey = randomBytes32();
+      const solOutputPubKey = derivePublicKey(poseidon, solOutputPrivKey);
+      const solOutputBlinding = randomBytes32();
+      const solOutputCommitment = computeCommitment(
+        poseidon,
+        expectedSol,
+        solOutputPubKey,
+        solOutputBlinding,
+        sol.mint,
+      );
+
+      const changePrivKey = randomBytes32();
+      const changePubKey = derivePublicKey(poseidon, changePrivKey);
+      const changeBlinding = randomBytes32();
+      const changeCommitment = computeCommitment(
+        poseidon,
+        0n,
+        changePubKey,
+        changeBlinding,
+        usdc.mint,
+      );
+
+      const extData = {
+        recipient: payer.publicKey,
+        relayer: payer.publicKey,
+        fee: new BN(1_000_000), // 0.001 SOL min fee
+        refund: new BN(0),
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const minSolOutBigInt = 50_000_000n;
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        usdc.mint,
+        sol.mint,
+        minSolOutBigInt,
+        deadlineBigInt,
+        new Uint8Array(32),
+        expectedSol,
+      );
+
+      console.log("   Generating ZK proof...");
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
+        extDataHash,
+        sourceMint: usdc.mint,
+        destMint: sol.mint,
+        inputNullifiers: [note.nullifier, dummyNullifier],
+        changeCommitment,
+        destCommitment: solOutputCommitment,
+        swapAmount,
+        inputAmounts: [note.amount, 0n],
+        inputPrivateKeys: [note.privateKey, dummyPrivKey],
+        inputPublicKeys: [note.publicKey, dummyPubKey],
+        inputBlindings: [note.blinding, dummyBlinding],
+        inputMerklePaths: [merkleProof, dummyProof],
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+        destAmount: expectedSol,
+        destPubkey: solOutputPubKey,
+        destBlinding: solOutputBlinding,
+        minAmountOut: minSolOutBigInt,
+        deadline: deadlineBigInt,
+        swapDataHash: new Uint8Array(32),
+      });
+      console.log("   ✅ ZK proof generated");
+
+      const minSolOut = new BN(minSolOutBigInt.toString());
+      const swapData = buildAmmSwapData(
+        new BN(swapAmount.toString()),
+        minSolOut,
+      );
+      const swapParams = {
+        minAmountOut: minSolOut,
+        deadline: new BN(deadlineBigInt.toString()),
+        sourceMint: usdc.mint,
+        destMint: sol.mint,
+        destAmount: new BN(expectedSol.toString()),
+        swapDataHash: Buffer.alloc(32),
+      };
+
+      const [executorPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("swap_executor"),
+          usdc.mint.toBuffer(),
+          sol.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
+        ],
+        program.programId,
+      );
+      const executorSourceToken = await getAssociatedTokenAddress(
+        usdc.mint,
+        executorPda,
+        true,
+      );
+      const executorDestToken = await getAssociatedTokenAddress(
+        sol.tokenMint,
+        executorPda,
+        true,
+      );
+
+      const nullifierMarker0 = deriveNullifierMarkerPDA(
+        program.programId,
+        usdc.mint,
+        0,
+        note.nullifier,
+      );
+      const nullifierMarker1 = deriveNullifierMarkerPDA(
+        program.programId,
+        usdc.mint,
+        0,
+        dummyNullifier,
+      );
+
+      const usdcVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        usdc.mint,
+        usdc.vault,
+        true,
+      );
+      const solVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        sol.vault,
+        true,
+      );
+      const relayerSolAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        payer.publicKey,
+      );
+
+      const recentSlot = await provider.connection.getSlot("finalized");
+      const [createLutIx, lookupTableAddress] =
+        AddressLookupTableProgram.createLookupTable({
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          recentSlot,
+        });
+      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: lookupTableAddress,
+        addresses: [
+          usdc.config,
+          globalConfig,
+          usdc.vault,
+          usdc.noteTree,
+          usdc.nullifiers,
+          usdcVaultAccount.address,
+          usdc.mint,
+          sol.config,
+          sol.vault,
+          sol.noteTree,
+          solVaultAccount.address,
+          sol.tokenMint,
+          RAYDIUM_AMM_V4_PROGRAM,
+          SERUM_PROGRAM,
+          TOKEN_PROGRAM_ID,
+          SystemProgram.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          poolConfig.poolId,
+          AMM_AUTHORITY,
+          poolConfig.ammOpenOrders,
+          poolConfig.ammTargetOrders,
+          poolConfig.ammBaseVault,
+          poolConfig.ammQuoteVault,
+          poolConfig.serumMarket,
+          poolConfig.serumBids,
+          poolConfig.serumAsks,
+          poolConfig.serumEventQueue,
+          poolConfig.serumBaseVault,
+          poolConfig.serumQuoteVault,
+          serumVaultSigner,
+        ],
+      });
+      await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const lookupTableAccount = (
+        await provider.connection.getAddressLookupTable(lookupTableAddress)
+      ).value;
+      if (!lookupTableAccount) throw new Error("Failed to fetch lookup table");
+
+      try {
+        const swapIx = await (program.methods as any)
+          .transactSwap(
+            proof,
+            Array.from(root),
+            0,
+            usdc.mint,
+            Array.from(note.nullifier),
+            Array.from(dummyNullifier),
+            0,
+            sol.mint,
+            Array.from(changeCommitment),
+            Array.from(solOutputCommitment),
+            swapParams,
+            new BN(swapAmount.toString()),
+            swapData,
+            extData,
+          )
+          .accounts({
+            sourceConfig: usdc.config,
+            globalConfig,
+            sourceVault: usdc.vault,
+            sourceTree: usdc.noteTree,
+            sourceNullifiers: usdc.nullifiers,
+            sourceNullifierMarker0: nullifierMarker0,
+            sourceNullifierMarker1: nullifierMarker1,
+            sourceVaultTokenAccount: usdcVaultAccount.address,
+            sourceMintAccount: usdc.mint,
+            destConfig: sol.config,
+            destVault: sol.vault,
+            destTree: sol.noteTree,
+            destVaultTokenAccount: solVaultAccount.address,
+            destMintAccount: sol.tokenMint,
+            executor: executorPda,
+            executorSourceToken,
+            executorDestToken,
+            relayer: payer.publicKey,
+            relayerTokenAccount: relayerSolAccount.address,
+            swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+            jupiterEventAuthority: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts([
+            { pubkey: poolConfig.poolId, isSigner: false, isWritable: true },
+            { pubkey: AMM_AUTHORITY, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.ammOpenOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammTargetOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: SERUM_PROGRAM, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.serumMarket,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: poolConfig.serumBids, isSigner: false, isWritable: true },
+            { pubkey: poolConfig.serumAsks, isSigner: false, isWritable: true },
+            {
+              pubkey: poolConfig.serumEventQueue,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: serumVaultSigner, isSigner: false, isWritable: false },
+          ])
+          .instruction();
+
+        const { blockhash, lastValidBlockHeight } =
+          await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: payer.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            swapIx,
+          ],
+        }).compileToV0Message([lookupTableAccount]);
+        const versionedTx = new VersionedTransaction(messageV0);
+        versionedTx.sign([payer]);
+
+        const txSig = await provider.connection.sendTransaction(versionedTx, {
+          skipPreflight: false,
+        });
+        await provider.connection.confirmTransaction({
+          signature: txSig,
+          blockhash,
+          lastValidBlockHeight,
+        });
+        console.log(`✅ Reverse swap (USDC → SOL) executed: ${txSig}`);
+
+        // Keep USDC off-chain tree in sync: on-chain inserts changeCommitment into source tree
+        usdc.offchainTree.insert(changeCommitment);
+
+        const solLeafIndex = sol.offchainTree.insert(solOutputCommitment);
+        noteStorage.save({
+          amount: expectedSol,
+          commitment: solOutputCommitment,
+          nullifier: computeNullifier(
+            poseidon,
+            solOutputCommitment,
+            solLeafIndex,
+            solOutputPrivKey,
+          ),
+          blinding: solOutputBlinding,
+          privateKey: solOutputPrivKey,
+          publicKey: solOutputPubKey,
+          leafIndex: solLeafIndex,
+          merklePath: sol.offchainTree.getMerkleProof(solLeafIndex),
+          mintAddress: sol.mint,
+        });
+        console.log(`   ✅ USDC vault decreased, SOL vault increased`);
+      } catch (e: any) {
+        if (e instanceof SendTransactionError) {
+          const logs = await e.getLogs(provider.connection);
+          console.error("\n❌ Reverse USDC → SOL swap failed:");
+          logs?.slice(-10).forEach((l: string) => console.error(`   ${l}`));
+        }
+        throw e;
+      }
+    });
   });
 
   // ============================================================================
@@ -1097,8 +1472,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
   describe("SOL -> USDT Swap", () => {
     const DEPOSIT_AMOUNT = 2_000_000_000n; // 2 SOL
     const SWAP_AMOUNT = 500_000_000; // 0.5 SOL
-    const EXPECTED_USDT_OUT = 75_000_000n; // ~75 USDT
-    const SWAP_FEE = 375_000n; // 0.5% of 75 USDT
+    const EXPECTED_USDT_OUT = 40_000_000n; // = minAmountOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+    const SWAP_FEE = 375_000n; // 0.5% of ~75 USDT worst-case, covers outputs up to 75M
 
     let depositNoteId: string | null = null;
     let usdtNoteId: string | null = null;
@@ -1716,6 +2091,381 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       console.log(
         `✅ SOL change note verified: ${Number(note!.amount) / 1e9} SOL`,
       );
+    });
+
+    it("executes reverse swap (USDT → SOL via AMM V4)", async function () {
+      if (!poolConfig || !usdtNoteId) return this.skip();
+
+      const usdt = pools.USDT;
+      const sol = pools.SOL;
+      console.log("\n🔄 Executing reverse swap USDT → SOL...");
+
+      const note = noteStorage.get(usdtNoteId);
+      if (!note) throw new Error("USDT note not found");
+
+      const merkleProof = usdt.offchainTree.getMerkleProof(note.leafIndex);
+      const root = usdt.offchainTree.getRoot();
+
+      const dummyPrivKey = randomBytes32();
+      const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+      const dummyBlinding = randomBytes32();
+      const dummyCommitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyPubKey,
+        dummyBlinding,
+        usdt.mint,
+      );
+      const dummyNullifier = computeNullifier(
+        poseidon,
+        dummyCommitment,
+        0,
+        dummyPrivKey,
+      );
+      const dummyProof = usdt.offchainTree.getMerkleProof(0);
+
+      const swapAmount = note.amount;
+      const expectedSol = 50_000_000n; // = minSolOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+
+      const solOutputPrivKey = randomBytes32();
+      const solOutputPubKey = derivePublicKey(poseidon, solOutputPrivKey);
+      const solOutputBlinding = randomBytes32();
+      const solOutputCommitment = computeCommitment(
+        poseidon,
+        expectedSol,
+        solOutputPubKey,
+        solOutputBlinding,
+        sol.mint,
+      );
+
+      const changePrivKey = randomBytes32();
+      const changePubKey = derivePublicKey(poseidon, changePrivKey);
+      const changeBlinding = randomBytes32();
+      const changeCommitment = computeCommitment(
+        poseidon,
+        0n,
+        changePubKey,
+        changeBlinding,
+        usdt.mint,
+      );
+
+      const extData = {
+        recipient: payer.publicKey,
+        relayer: payer.publicKey,
+        fee: new BN(1_000_000), // 0.001 SOL min fee
+        refund: new BN(0),
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const minSolOutBigInt = 50_000_000n;
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        usdt.mint,
+        sol.mint,
+        minSolOutBigInt,
+        deadlineBigInt,
+        new Uint8Array(32),
+        expectedSol,
+      );
+
+      console.log("   Generating ZK proof...");
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
+        extDataHash,
+        sourceMint: usdt.mint,
+        destMint: sol.mint,
+        inputNullifiers: [note.nullifier, dummyNullifier],
+        changeCommitment,
+        destCommitment: solOutputCommitment,
+        swapAmount,
+        inputAmounts: [note.amount, 0n],
+        inputPrivateKeys: [note.privateKey, dummyPrivKey],
+        inputPublicKeys: [note.publicKey, dummyPubKey],
+        inputBlindings: [note.blinding, dummyBlinding],
+        inputMerklePaths: [merkleProof, dummyProof],
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+        destAmount: expectedSol,
+        destPubkey: solOutputPubKey,
+        destBlinding: solOutputBlinding,
+        minAmountOut: minSolOutBigInt,
+        deadline: deadlineBigInt,
+        swapDataHash: new Uint8Array(32),
+      });
+      console.log("   ✅ ZK proof generated");
+
+      const minSolOut = new BN(minSolOutBigInt.toString());
+      const swapData = buildAmmSwapData(
+        new BN(swapAmount.toString()),
+        minSolOut,
+      );
+      const swapParams = {
+        minAmountOut: minSolOut,
+        deadline: new BN(deadlineBigInt.toString()),
+        sourceMint: usdt.mint,
+        destMint: sol.mint,
+        destAmount: new BN(expectedSol.toString()),
+        swapDataHash: Buffer.alloc(32),
+      };
+
+      const [executorPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("swap_executor"),
+          usdt.mint.toBuffer(),
+          sol.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
+        ],
+        program.programId,
+      );
+      const executorSourceToken = await getAssociatedTokenAddress(
+        usdt.mint,
+        executorPda,
+        true,
+      );
+      const executorDestToken = await getAssociatedTokenAddress(
+        sol.tokenMint,
+        executorPda,
+        true,
+      );
+
+      const nullifierMarker0 = deriveNullifierMarkerPDA(
+        program.programId,
+        usdt.mint,
+        0,
+        note.nullifier,
+      );
+      const nullifierMarker1 = deriveNullifierMarkerPDA(
+        program.programId,
+        usdt.mint,
+        0,
+        dummyNullifier,
+      );
+
+      const usdtVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        usdt.mint,
+        usdt.vault,
+        true,
+      );
+      const solVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        sol.vault,
+        true,
+      );
+      const relayerSolAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        payer.publicKey,
+      );
+
+      const recentSlot = await provider.connection.getSlot("finalized");
+      const [createLutIx, lookupTableAddress] =
+        AddressLookupTableProgram.createLookupTable({
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          recentSlot,
+        });
+      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: lookupTableAddress,
+        addresses: [
+          usdt.config,
+          globalConfig,
+          usdt.vault,
+          usdt.noteTree,
+          usdt.nullifiers,
+          usdtVaultAccount.address,
+          usdt.mint,
+          sol.config,
+          sol.vault,
+          sol.noteTree,
+          solVaultAccount.address,
+          sol.tokenMint,
+          RAYDIUM_AMM_V4_PROGRAM,
+          SERUM_PROGRAM,
+          TOKEN_PROGRAM_ID,
+          SystemProgram.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          poolConfig.poolId,
+          AMM_AUTHORITY,
+          poolConfig.ammOpenOrders,
+          poolConfig.ammTargetOrders,
+          poolConfig.ammBaseVault,
+          poolConfig.ammQuoteVault,
+          poolConfig.serumMarket,
+          poolConfig.serumBids,
+          poolConfig.serumAsks,
+          poolConfig.serumEventQueue,
+          poolConfig.serumBaseVault,
+          poolConfig.serumQuoteVault,
+          serumVaultSigner,
+        ],
+      });
+      await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const lookupTableAccount = (
+        await provider.connection.getAddressLookupTable(lookupTableAddress)
+      ).value;
+      if (!lookupTableAccount) throw new Error("Failed to fetch lookup table");
+
+      try {
+        const swapIx = await (program.methods as any)
+          .transactSwap(
+            proof,
+            Array.from(root),
+            0,
+            usdt.mint,
+            Array.from(note.nullifier),
+            Array.from(dummyNullifier),
+            0,
+            sol.mint,
+            Array.from(changeCommitment),
+            Array.from(solOutputCommitment),
+            swapParams,
+            new BN(swapAmount.toString()),
+            swapData,
+            extData,
+          )
+          .accounts({
+            sourceConfig: usdt.config,
+            globalConfig,
+            sourceVault: usdt.vault,
+            sourceTree: usdt.noteTree,
+            sourceNullifiers: usdt.nullifiers,
+            sourceNullifierMarker0: nullifierMarker0,
+            sourceNullifierMarker1: nullifierMarker1,
+            sourceVaultTokenAccount: usdtVaultAccount.address,
+            sourceMintAccount: usdt.mint,
+            destConfig: sol.config,
+            destVault: sol.vault,
+            destTree: sol.noteTree,
+            destVaultTokenAccount: solVaultAccount.address,
+            destMintAccount: sol.tokenMint,
+            executor: executorPda,
+            executorSourceToken,
+            executorDestToken,
+            relayer: payer.publicKey,
+            relayerTokenAccount: relayerSolAccount.address,
+            swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+            jupiterEventAuthority: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts([
+            { pubkey: poolConfig.poolId, isSigner: false, isWritable: true },
+            { pubkey: AMM_AUTHORITY, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.ammOpenOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammTargetOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: SERUM_PROGRAM, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.serumMarket,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: poolConfig.serumBids, isSigner: false, isWritable: true },
+            { pubkey: poolConfig.serumAsks, isSigner: false, isWritable: true },
+            {
+              pubkey: poolConfig.serumEventQueue,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: serumVaultSigner, isSigner: false, isWritable: false },
+          ])
+          .instruction();
+
+        const { blockhash, lastValidBlockHeight } =
+          await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: payer.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            swapIx,
+          ],
+        }).compileToV0Message([lookupTableAccount]);
+        const versionedTx = new VersionedTransaction(messageV0);
+        versionedTx.sign([payer]);
+
+        const txSig = await provider.connection.sendTransaction(versionedTx, {
+          skipPreflight: false,
+        });
+        await provider.connection.confirmTransaction({
+          signature: txSig,
+          blockhash,
+          lastValidBlockHeight,
+        });
+        console.log(`✅ Reverse swap (USDT → SOL) executed: ${txSig}`);
+
+        // Keep USDT off-chain tree in sync: on-chain inserts changeCommitment into source tree
+        usdt.offchainTree.insert(changeCommitment);
+
+        const solLeafIndex = sol.offchainTree.insert(solOutputCommitment);
+        noteStorage.save({
+          amount: expectedSol,
+          commitment: solOutputCommitment,
+          nullifier: computeNullifier(
+            poseidon,
+            solOutputCommitment,
+            solLeafIndex,
+            solOutputPrivKey,
+          ),
+          blinding: solOutputBlinding,
+          privateKey: solOutputPrivKey,
+          publicKey: solOutputPubKey,
+          leafIndex: solLeafIndex,
+          merklePath: sol.offchainTree.getMerkleProof(solLeafIndex),
+          mintAddress: sol.mint,
+        });
+        console.log(`   ✅ USDT vault decreased, SOL vault increased`);
+      } catch (e: any) {
+        if (e instanceof SendTransactionError) {
+          const logs = await e.getLogs(provider.connection);
+          console.error("\n❌ Reverse USDT → SOL swap failed:");
+          logs?.slice(-10).forEach((l: string) => console.error(`   ${l}`));
+        }
+        throw e;
+      }
     });
   });
 
@@ -2346,6 +3096,378 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         `✅ SOL change note verified: ${Number(note!.amount) / 1e9} SOL`,
       );
     });
+
+    it("executes reverse swap (JUP → SOL via AMM V4)", async function () {
+      if (!poolConfig || !jupNoteId) return this.skip();
+
+      const jup = pools.JUP;
+      const sol = pools.SOL;
+      console.log("\n🔄 Executing reverse swap JUP → SOL...");
+
+      const note = noteStorage.get(jupNoteId);
+      if (!note) throw new Error("JUP note not found");
+
+      const merkleProof = jup.offchainTree.getMerkleProof(note.leafIndex);
+      const root = jup.offchainTree.getRoot();
+
+      const dummyPrivKey = randomBytes32();
+      const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+      const dummyBlinding = randomBytes32();
+      const dummyCommitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyPubKey,
+        dummyBlinding,
+        jup.mint,
+      );
+      const dummyNullifier = computeNullifier(
+        poseidon,
+        dummyCommitment,
+        0,
+        dummyPrivKey,
+      );
+      const dummyProof = jup.offchainTree.getMerkleProof(0);
+
+      const swapAmount = note.amount;
+      const expectedSol = 100_000_000n; // ~0.1 SOL estimated output
+
+      const solOutputPrivKey = randomBytes32();
+      const solOutputPubKey = derivePublicKey(poseidon, solOutputPrivKey);
+      const solOutputBlinding = randomBytes32();
+      const solOutputCommitment = computeCommitment(
+        poseidon,
+        expectedSol,
+        solOutputPubKey,
+        solOutputBlinding,
+        sol.mint,
+      );
+
+      const changePrivKey = randomBytes32();
+      const changePubKey = derivePublicKey(poseidon, changePrivKey);
+      const changeBlinding = randomBytes32();
+      const changeCommitment = computeCommitment(
+        poseidon,
+        0n,
+        changePubKey,
+        changeBlinding,
+        jup.mint,
+      );
+
+      const extData = {
+        recipient: payer.publicKey,
+        relayer: payer.publicKey,
+        fee: new BN(1_000_000), // 0.001 SOL min fee
+        refund: new BN(0),
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const minSolOutBigInt = 1n; // Accept any output for test environment
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        jup.mint,
+        sol.mint,
+        minSolOutBigInt,
+        deadlineBigInt,
+        new Uint8Array(32),
+        expectedSol,
+      );
+
+      console.log("   Generating ZK proof...");
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
+        extDataHash,
+        sourceMint: jup.mint,
+        destMint: sol.mint,
+        inputNullifiers: [note.nullifier, dummyNullifier],
+        changeCommitment,
+        destCommitment: solOutputCommitment,
+        swapAmount,
+        inputAmounts: [note.amount, 0n],
+        inputPrivateKeys: [note.privateKey, dummyPrivKey],
+        inputPublicKeys: [note.publicKey, dummyPubKey],
+        inputBlindings: [note.blinding, dummyBlinding],
+        inputMerklePaths: [merkleProof, dummyProof],
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+        destAmount: expectedSol,
+        destPubkey: solOutputPubKey,
+        destBlinding: solOutputBlinding,
+        minAmountOut: minSolOutBigInt,
+        deadline: deadlineBigInt,
+        swapDataHash: new Uint8Array(32),
+      });
+      console.log("   ✅ ZK proof generated");
+
+      const minSolOut = new BN(minSolOutBigInt.toString());
+      const swapData = buildAmmSwapData(
+        new BN(swapAmount.toString()),
+        minSolOut,
+      );
+      const swapParams = {
+        minAmountOut: minSolOut,
+        deadline: new BN(deadlineBigInt.toString()),
+        sourceMint: jup.mint,
+        destMint: sol.mint,
+        destAmount: new BN(expectedSol.toString()),
+        swapDataHash: Buffer.alloc(32),
+      };
+
+      const [executorPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("swap_executor"),
+          jup.mint.toBuffer(),
+          sol.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
+        ],
+        program.programId,
+      );
+      const executorSourceToken = await getAssociatedTokenAddress(
+        jup.mint,
+        executorPda,
+        true,
+      );
+      const executorDestToken = await getAssociatedTokenAddress(
+        sol.tokenMint,
+        executorPda,
+        true,
+      );
+
+      const nullifierMarker0 = deriveNullifierMarkerPDA(
+        program.programId,
+        jup.mint,
+        0,
+        note.nullifier,
+      );
+      const nullifierMarker1 = deriveNullifierMarkerPDA(
+        program.programId,
+        jup.mint,
+        0,
+        dummyNullifier,
+      );
+
+      const jupVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        jup.mint,
+        jup.vault,
+        true,
+      );
+      const solVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        sol.vault,
+        true,
+      );
+      const relayerSolAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        payer.publicKey,
+      );
+
+      const recentSlot = await provider.connection.getSlot("finalized");
+      const [createLutIx, lookupTableAddress] =
+        AddressLookupTableProgram.createLookupTable({
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          recentSlot,
+        });
+      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: lookupTableAddress,
+        addresses: [
+          jup.config,
+          globalConfig,
+          jup.vault,
+          jup.noteTree,
+          jup.nullifiers,
+          jupVaultAccount.address,
+          jup.mint,
+          sol.config,
+          sol.vault,
+          sol.noteTree,
+          solVaultAccount.address,
+          sol.tokenMint,
+          RAYDIUM_AMM_V4_PROGRAM,
+          SERUM_PROGRAM,
+          TOKEN_PROGRAM_ID,
+          SystemProgram.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          poolConfig.poolId,
+          AMM_AUTHORITY,
+          poolConfig.ammOpenOrders,
+          poolConfig.ammTargetOrders,
+          poolConfig.ammBaseVault,
+          poolConfig.ammQuoteVault,
+          poolConfig.serumMarket,
+          poolConfig.serumBids,
+          poolConfig.serumAsks,
+          poolConfig.serumEventQueue,
+          poolConfig.serumBaseVault,
+          poolConfig.serumQuoteVault,
+          serumVaultSigner,
+        ],
+      });
+      await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const lookupTableAccount = (
+        await provider.connection.getAddressLookupTable(lookupTableAddress)
+      ).value;
+      if (!lookupTableAccount) throw new Error("Failed to fetch lookup table");
+
+      try {
+        const swapIx = await (program.methods as any)
+          .transactSwap(
+            proof,
+            Array.from(root),
+            0,
+            jup.mint,
+            Array.from(note.nullifier),
+            Array.from(dummyNullifier),
+            0,
+            sol.mint,
+            Array.from(changeCommitment),
+            Array.from(solOutputCommitment),
+            swapParams,
+            new BN(swapAmount.toString()),
+            swapData,
+            extData,
+          )
+          .accounts({
+            sourceConfig: jup.config,
+            globalConfig,
+            sourceVault: jup.vault,
+            sourceTree: jup.noteTree,
+            sourceNullifiers: jup.nullifiers,
+            sourceNullifierMarker0: nullifierMarker0,
+            sourceNullifierMarker1: nullifierMarker1,
+            sourceVaultTokenAccount: jupVaultAccount.address,
+            sourceMintAccount: jup.mint,
+            destConfig: sol.config,
+            destVault: sol.vault,
+            destTree: sol.noteTree,
+            destVaultTokenAccount: solVaultAccount.address,
+            destMintAccount: sol.tokenMint,
+            executor: executorPda,
+            executorSourceToken,
+            executorDestToken,
+            relayer: payer.publicKey,
+            relayerTokenAccount: relayerSolAccount.address,
+            swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+            jupiterEventAuthority: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts([
+            { pubkey: poolConfig.poolId, isSigner: false, isWritable: true },
+            { pubkey: AMM_AUTHORITY, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.ammOpenOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammTargetOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: SERUM_PROGRAM, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.serumMarket,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: poolConfig.serumBids, isSigner: false, isWritable: true },
+            { pubkey: poolConfig.serumAsks, isSigner: false, isWritable: true },
+            {
+              pubkey: poolConfig.serumEventQueue,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: serumVaultSigner, isSigner: false, isWritable: false },
+          ])
+          .instruction();
+
+        const { blockhash, lastValidBlockHeight } =
+          await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: payer.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            swapIx,
+          ],
+        }).compileToV0Message([lookupTableAccount]);
+        const versionedTx = new VersionedTransaction(messageV0);
+        versionedTx.sign([payer]);
+
+        const txSig = await provider.connection.sendTransaction(versionedTx, {
+          skipPreflight: false,
+        });
+        await provider.connection.confirmTransaction({
+          signature: txSig,
+          blockhash,
+          lastValidBlockHeight,
+        });
+        console.log(`✅ Reverse swap (JUP → SOL) executed: ${txSig}`);
+
+        const solLeafIndex = sol.offchainTree.insert(solOutputCommitment);
+        noteStorage.save({
+          amount: expectedSol,
+          commitment: solOutputCommitment,
+          nullifier: computeNullifier(
+            poseidon,
+            solOutputCommitment,
+            solLeafIndex,
+            solOutputPrivKey,
+          ),
+          blinding: solOutputBlinding,
+          privateKey: solOutputPrivKey,
+          publicKey: solOutputPubKey,
+          leafIndex: solLeafIndex,
+          merklePath: sol.offchainTree.getMerkleProof(solLeafIndex),
+          mintAddress: sol.mint,
+        });
+        console.log(`   ✅ JUP vault decreased, SOL vault increased`);
+      } catch (e: any) {
+        if (e instanceof SendTransactionError) {
+          const logs = await e.getLogs(provider.connection);
+          console.error("\n❌ Reverse JUP → SOL swap failed:");
+          logs?.slice(-10).forEach((l: string) => console.error(`   ${l}`));
+        }
+        throw e;
+      }
+    });
   });
 
   // ============================================================================
@@ -2355,8 +3477,8 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
   describe("SOL -> USD1 Swap", () => {
     const DEPOSIT_AMOUNT = 2_000_000_000n; // 2 SOL
     const SWAP_AMOUNT = 500_000_000; // 0.5 SOL
-    const EXPECTED_USD1_OUT = 75_000_000n; // ~75 USD1
-    const SWAP_FEE = 375_000n; // 0.5% of 75 USD1
+    const EXPECTED_USD1_OUT = 15_000_000n; // = minAmountOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+    const SWAP_FEE = 375_000n; // 0.5% of ~75 USD1 worst-case, covers outputs up to 75M
 
     let depositNoteId: string | null = null;
     let usd1NoteId: string | null = null;
@@ -2975,6 +4097,381 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         `✅ SOL change note verified: ${Number(note!.amount) / 1e9} SOL`,
       );
     });
+
+    it("executes reverse swap (USD1 → SOL via AMM V4)", async function () {
+      if (!poolConfig || !usd1NoteId) return this.skip();
+
+      const usd1 = pools.USD1;
+      const sol = pools.SOL;
+      console.log("\n🔄 Executing reverse swap USD1 → SOL...");
+
+      const note = noteStorage.get(usd1NoteId);
+      if (!note) throw new Error("USD1 note not found");
+
+      const merkleProof = usd1.offchainTree.getMerkleProof(note.leafIndex);
+      const root = usd1.offchainTree.getRoot();
+
+      const dummyPrivKey = randomBytes32();
+      const dummyPubKey = derivePublicKey(poseidon, dummyPrivKey);
+      const dummyBlinding = randomBytes32();
+      const dummyCommitment = computeCommitment(
+        poseidon,
+        0n,
+        dummyPubKey,
+        dummyBlinding,
+        usd1.mint,
+      );
+      const dummyNullifier = computeNullifier(
+        poseidon,
+        dummyCommitment,
+        0,
+        dummyPrivKey,
+      );
+      const dummyProof = usd1.offchainTree.getMerkleProof(0);
+
+      const swapAmount = note.amount;
+      const expectedSol = 50_000_000n; // = minSolOut: circuit requires destAmount >= minAmountOut; on-chain: actual-fee >= destAmount
+
+      const solOutputPrivKey = randomBytes32();
+      const solOutputPubKey = derivePublicKey(poseidon, solOutputPrivKey);
+      const solOutputBlinding = randomBytes32();
+      const solOutputCommitment = computeCommitment(
+        poseidon,
+        expectedSol,
+        solOutputPubKey,
+        solOutputBlinding,
+        sol.mint,
+      );
+
+      const changePrivKey = randomBytes32();
+      const changePubKey = derivePublicKey(poseidon, changePrivKey);
+      const changeBlinding = randomBytes32();
+      const changeCommitment = computeCommitment(
+        poseidon,
+        0n,
+        changePubKey,
+        changeBlinding,
+        usd1.mint,
+      );
+
+      const extData = {
+        recipient: payer.publicKey,
+        relayer: payer.publicKey,
+        fee: new BN(1_000_000), // 0.001 SOL min fee
+        refund: new BN(0),
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const minSolOutBigInt = 50_000_000n;
+      const deadlineBigInt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const swapParamsHash = computeSwapParamsHash(
+        poseidon,
+        usd1.mint,
+        sol.mint,
+        minSolOutBigInt,
+        deadlineBigInt,
+        new Uint8Array(32),
+        expectedSol,
+      );
+
+      console.log("   Generating ZK proof...");
+      const proof = await generateSwapProof({
+        sourceRoot: root,
+        swapParamsHash,
+        extDataHash,
+        sourceMint: usd1.mint,
+        destMint: sol.mint,
+        inputNullifiers: [note.nullifier, dummyNullifier],
+        changeCommitment,
+        destCommitment: solOutputCommitment,
+        swapAmount,
+        inputAmounts: [note.amount, 0n],
+        inputPrivateKeys: [note.privateKey, dummyPrivKey],
+        inputPublicKeys: [note.publicKey, dummyPubKey],
+        inputBlindings: [note.blinding, dummyBlinding],
+        inputMerklePaths: [merkleProof, dummyProof],
+        changeAmount: 0n,
+        changePubkey: changePubKey,
+        changeBlinding,
+        destAmount: expectedSol,
+        destPubkey: solOutputPubKey,
+        destBlinding: solOutputBlinding,
+        minAmountOut: minSolOutBigInt,
+        deadline: deadlineBigInt,
+        swapDataHash: new Uint8Array(32),
+      });
+      console.log("   ✅ ZK proof generated");
+
+      const minSolOut = new BN(minSolOutBigInt.toString());
+      const swapData = buildAmmSwapData(
+        new BN(swapAmount.toString()),
+        minSolOut,
+      );
+      const swapParams = {
+        minAmountOut: minSolOut,
+        deadline: new BN(deadlineBigInt.toString()),
+        sourceMint: usd1.mint,
+        destMint: sol.mint,
+        destAmount: new BN(expectedSol.toString()),
+        swapDataHash: Buffer.alloc(32),
+      };
+
+      const [executorPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("swap_executor"),
+          usd1.mint.toBuffer(),
+          sol.mint.toBuffer(),
+          Buffer.from(note.nullifier),
+          payer.publicKey.toBuffer(),
+        ],
+        program.programId,
+      );
+      const executorSourceToken = await getAssociatedTokenAddress(
+        usd1.mint,
+        executorPda,
+        true,
+      );
+      const executorDestToken = await getAssociatedTokenAddress(
+        sol.tokenMint,
+        executorPda,
+        true,
+      );
+
+      const nullifierMarker0 = deriveNullifierMarkerPDA(
+        program.programId,
+        usd1.mint,
+        0,
+        note.nullifier,
+      );
+      const nullifierMarker1 = deriveNullifierMarkerPDA(
+        program.programId,
+        usd1.mint,
+        0,
+        dummyNullifier,
+      );
+
+      const usd1VaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        usd1.mint,
+        usd1.vault,
+        true,
+      );
+      const solVaultAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        sol.vault,
+        true,
+      );
+      const relayerSolAccount = await getOrCreateAssociatedTokenAccount(
+        provider.connection,
+        payer,
+        sol.tokenMint,
+        payer.publicKey,
+      );
+
+      const recentSlot = await provider.connection.getSlot("finalized");
+      const [createLutIx, lookupTableAddress] =
+        AddressLookupTableProgram.createLookupTable({
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          recentSlot,
+        });
+      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: lookupTableAddress,
+        addresses: [
+          usd1.config,
+          globalConfig,
+          usd1.vault,
+          usd1.noteTree,
+          usd1.nullifiers,
+          usd1VaultAccount.address,
+          usd1.mint,
+          sol.config,
+          sol.vault,
+          sol.noteTree,
+          solVaultAccount.address,
+          sol.tokenMint,
+          RAYDIUM_AMM_V4_PROGRAM,
+          SERUM_PROGRAM,
+          TOKEN_PROGRAM_ID,
+          SystemProgram.programId,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+          poolConfig.poolId,
+          AMM_AUTHORITY,
+          poolConfig.ammOpenOrders,
+          poolConfig.ammTargetOrders,
+          poolConfig.ammBaseVault,
+          poolConfig.ammQuoteVault,
+          poolConfig.serumMarket,
+          poolConfig.serumBids,
+          poolConfig.serumAsks,
+          poolConfig.serumEventQueue,
+          poolConfig.serumBaseVault,
+          poolConfig.serumQuoteVault,
+          serumVaultSigner,
+        ],
+      });
+      await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+      );
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const lookupTableAccount = (
+        await provider.connection.getAddressLookupTable(lookupTableAddress)
+      ).value;
+      if (!lookupTableAccount) throw new Error("Failed to fetch lookup table");
+
+      try {
+        const swapIx = await (program.methods as any)
+          .transactSwap(
+            proof,
+            Array.from(root),
+            0,
+            usd1.mint,
+            Array.from(note.nullifier),
+            Array.from(dummyNullifier),
+            0,
+            sol.mint,
+            Array.from(changeCommitment),
+            Array.from(solOutputCommitment),
+            swapParams,
+            new BN(swapAmount.toString()),
+            swapData,
+            extData,
+          )
+          .accounts({
+            sourceConfig: usd1.config,
+            globalConfig,
+            sourceVault: usd1.vault,
+            sourceTree: usd1.noteTree,
+            sourceNullifiers: usd1.nullifiers,
+            sourceNullifierMarker0: nullifierMarker0,
+            sourceNullifierMarker1: nullifierMarker1,
+            sourceVaultTokenAccount: usd1VaultAccount.address,
+            sourceMintAccount: usd1.mint,
+            destConfig: sol.config,
+            destVault: sol.vault,
+            destTree: sol.noteTree,
+            destVaultTokenAccount: solVaultAccount.address,
+            destMintAccount: sol.tokenMint,
+            executor: executorPda,
+            executorSourceToken,
+            executorDestToken,
+            relayer: payer.publicKey,
+            relayerTokenAccount: relayerSolAccount.address,
+            swapProgram: RAYDIUM_AMM_V4_PROGRAM,
+            jupiterEventAuthority: SystemProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts([
+            { pubkey: poolConfig.poolId, isSigner: false, isWritable: true },
+            { pubkey: AMM_AUTHORITY, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.ammOpenOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammTargetOrders,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.ammQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: SERUM_PROGRAM, isSigner: false, isWritable: false },
+            {
+              pubkey: poolConfig.serumMarket,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: poolConfig.serumBids, isSigner: false, isWritable: true },
+            { pubkey: poolConfig.serumAsks, isSigner: false, isWritable: true },
+            {
+              pubkey: poolConfig.serumEventQueue,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumBaseVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: poolConfig.serumQuoteVault,
+              isSigner: false,
+              isWritable: true,
+            },
+            { pubkey: serumVaultSigner, isSigner: false, isWritable: false },
+          ])
+          .instruction();
+
+        const { blockhash, lastValidBlockHeight } =
+          await provider.connection.getLatestBlockhash();
+        const messageV0 = new TransactionMessage({
+          payerKey: payer.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            swapIx,
+          ],
+        }).compileToV0Message([lookupTableAccount]);
+        const versionedTx = new VersionedTransaction(messageV0);
+        versionedTx.sign([payer]);
+
+        const txSig = await provider.connection.sendTransaction(versionedTx, {
+          skipPreflight: false,
+        });
+        await provider.connection.confirmTransaction({
+          signature: txSig,
+          blockhash,
+          lastValidBlockHeight,
+        });
+        console.log(`✅ Reverse swap (USD1 → SOL) executed: ${txSig}`);
+
+        // Keep USD1 off-chain tree in sync: on-chain inserts changeCommitment into source tree
+        usd1.offchainTree.insert(changeCommitment);
+
+        const solLeafIndex = sol.offchainTree.insert(solOutputCommitment);
+        noteStorage.save({
+          amount: expectedSol,
+          commitment: solOutputCommitment,
+          nullifier: computeNullifier(
+            poseidon,
+            solOutputCommitment,
+            solLeafIndex,
+            solOutputPrivKey,
+          ),
+          blinding: solOutputBlinding,
+          privateKey: solOutputPrivKey,
+          publicKey: solOutputPubKey,
+          leafIndex: solLeafIndex,
+          merklePath: sol.offchainTree.getMerkleProof(solLeafIndex),
+          mintAddress: sol.mint,
+        });
+        console.log(`   ✅ USD1 vault decreased, SOL vault increased`);
+      } catch (e: any) {
+        if (e instanceof SendTransactionError) {
+          const logs = await e.getLogs(provider.connection);
+          console.error("\n❌ Reverse USD1 → SOL swap failed:");
+          logs?.slice(-10).forEach((l: string) => console.error(`   ${l}`));
+        }
+        throw e;
+      }
+    });
   });
 
   // ============================================================================
@@ -2987,11 +4484,11 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
     const SOL_DEPOSIT_AMOUNT = 2_000_000_000n; // 2 SOL
     // Step 2: Swap SOL to USDC
     const SOL_SWAP_AMOUNT = 1_000_000_000; // 1 SOL
-    const EXPECTED_USDC_OUT = 150_000_000n; // ~150 USDC (conservative estimate)
+    const EXPECTED_USDC_OUT = 41_000_000n; // = minAmountOut(41M): circuit requires destAmount >= minAmountOut
     const USDC_SWAP_FEE = 1_000_000n; // 1 USDC fee for relayer
     // Step 3: Swap USDC to JUP
-    const USDC_SWAP_AMOUNT = 50_000_000; // 50 USDC (conservative: vault may hold <100 USDC at current rates)
-    const EXPECTED_JUP_OUT = 50_000_000n; // ~50 JUP (conservative estimate)
+    const USDC_SWAP_AMOUNT = 30_000_000; // 30 USDC (safely below 41M USDC note)
+    const EXPECTED_JUP_OUT = 10_000_000n; // = minAmountOut(10M): circuit requires destAmount >= minAmountOut
     const JUP_SWAP_FEE = 5_000_000n; // 5 JUP fee for relayer
 
     let solDepositNoteId: string | null = null;
@@ -3284,7 +4781,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      const minAmountOut = new BN(15_000_000); // 15 USDC
+      const minAmountOut = new BN(41_000_000); // 41 USDC (must be > EXPECTED_USDC_OUT+USDC_SWAP_FEE to pass vault check)
       const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
 
       const swapParams = {
@@ -3704,7 +5201,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
-      const minAmountOut = new BN(25_000_000); // 25 JUP min (conservative)
+      const minAmountOut = new BN(10_000_000); // 10 JUP min (conservative, achievable from 30 USDC)
       const deadline = new BN(Math.floor(Date.now() / 1000) + 3600);
 
       const swapParams = {
