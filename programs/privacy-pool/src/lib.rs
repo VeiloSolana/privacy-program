@@ -896,6 +896,12 @@ pub struct FundNativeSource<'info> {
     #[account(mut)]
     pub relayer: Signer<'info>,
 
+    /// CHECK: Instructions sysvar — used to verify this instruction is paired
+    /// with a `transact_swap` call in the same transaction, preventing standalone
+    /// vault-drain calls with arbitrary nullifiers.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID @ PrivacyError::Unauthorized)]
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
@@ -2007,6 +2013,8 @@ pub enum PrivacyError {
     JupiterInvalidInstruction,
     #[msg("Swap params mints do not match instruction mints")]
     InvalidSwapParams,
+    #[msg("fund_native_source must be immediately followed by transact_swap in the same transaction")]
+    MissingTransactSwapInstruction,
     #[msg("Transaction deadline has expired")]
     DeadlineExpired,
 }
