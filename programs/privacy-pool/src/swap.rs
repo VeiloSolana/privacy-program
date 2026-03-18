@@ -1,4 +1,9 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::instructions::{
+    load_current_index_checked,
+    load_instruction_at_checked,
+};
+use sha2::{ Sha256, Digest };
 use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{ self, CloseAccount, Transfer, SyncNative };
@@ -143,9 +148,6 @@ pub struct SwapPublicInputs {
     pub swap_amount: u64,
 }
 
-/// Option B handler: create executor PDA + WSOL ATA, transfer swap_amount from vault via
-/// pure raw lamport edits.
-///
 /// Solana ordering rule satisfied because:
 ///   - Anchor init pre-flights (create_account + initialize_account CPIs) run BEFORE the
 ///     function body  →  CPIs first
@@ -171,37 +173,22 @@ pub fn fund_native_source(
 
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // Guard: verify the NEXT instruction in this transaction is `transact_swap` from
-    // this program.  Prevents a whitelisted relayer from calling fund_native_source as
-    // a standalone transaction with arbitrary nullifiers, which would lock vault funds
-    // for STALE_THRESHOLD_SLOTS (~2 min) per call.
-    {
-        use anchor_lang::solana_program::sysvar::instructions::{
-            load_current_index_checked,
-            load_instruction_at_checked,
-        };
-        use sha2::{ Sha256, Digest };
+    // Anchor discriminator = sha256("global:transact_swap")[0..8]
+    let transact_swap_disc: [u8; 8] = Sha256::digest(b"global:transact_swap")[..8]
+        .try_into()
+        .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
 
-        // Anchor discriminator = sha256("global:transact_swap")[0..8]
-        let transact_swap_disc: [u8; 8] = Sha256::digest(b"global:transact_swap")[..8]
-            .try_into()
-            .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
+    let ix_sysvar = ctx.accounts.instructions_sysvar.to_account_info();
+    let current_idx = load_current_index_checked(&ix_sysvar)? as usize;
+    let next_ix = load_instruction_at_checked(current_idx + 1, &ix_sysvar).map_err(|_|
+        error!(PrivacyError::MissingTransactSwapInstruction)
+    )?;
 
-        let ix_sysvar = ctx.accounts.instructions_sysvar.to_account_info();
-        let current_idx = load_current_index_checked(&ix_sysvar)? as usize;
-        let next_ix = load_instruction_at_checked(current_idx + 1, &ix_sysvar)
-            .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
-
-        require_keys_eq!(
-            next_ix.program_id,
-            crate::ID,
-            PrivacyError::MissingTransactSwapInstruction
-        );
-        require!(
-            next_ix.data.len() >= 8 && next_ix.data[..8] == transact_swap_disc,
-            PrivacyError::MissingTransactSwapInstruction
-        );
-    }
+    require_keys_eq!(next_ix.program_id, crate::ID, PrivacyError::MissingTransactSwapInstruction);
+    require!(
+        next_ix.data.len() >= 8 && next_ix.data[..8] == transact_swap_disc,
+        PrivacyError::MissingTransactSwapInstruction
+    );
 
     let vault_ai = ctx.accounts.source_vault.to_account_info();
     let rent_exempt_min = anchor_lang::solana_program::rent::Rent
@@ -465,7 +452,6 @@ pub fn transact_swap<'info>(
 
     if source_is_native {
         if executor.is_prefunded == 1 {
-            // Option B: vault already debited by fund_native_source; sync_native only.
             require!(executor.swap_amount == swap_amount, PrivacyError::InvalidSwapParams);
 
             token::sync_native(
@@ -474,7 +460,6 @@ pub fn transact_swap<'info>(
                 })
             )?;
         } else {
-            // Option A: relayer floats swap_amount; vault reimburses at end of instruction.
             let vault_ai = ctx.accounts.source_vault.to_account_info();
             let rent_exempt_min = anchor_lang::solana_program::rent::Rent
                 ::get()?
@@ -1062,7 +1047,6 @@ pub fn transact_swap<'info>(
         )?;
     }
 
-    // Option A only: reimburse relayer for fronted swap_amount (raw edit after CPIs).
     if source_is_native && is_prefunded == 0 {
         let vault_ai = ctx.accounts.source_vault.to_account_info();
         **vault_ai.try_borrow_mut_lamports()? = vault_ai
