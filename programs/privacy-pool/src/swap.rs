@@ -16,7 +16,6 @@ use crate::{
     PrivacyError,
     TransactSwap,
     FundNativeSource,
-    ReclaimStaleExecutor,
     is_token_mint,
 };
 
@@ -26,8 +25,6 @@ pub struct SwapExecutor {
     pub source_mint: Pubkey,
     pub dest_mint: Pubkey,
     pub nullifier: [u8; 32],
-    /// Slot when this executor was created (for stale detection)
-    pub created_slot: u64,
     pub bump: u8,
     /// Swap amount stored by fund_native_source for validation in transact_swap.
     /// Zero when executor was created directly in transact_swap (relayer-float path).
@@ -40,11 +37,7 @@ pub struct SwapExecutor {
 }
 
 impl SwapExecutor {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 1 + 32;
-
-    /// Number of slots after which an executor is considered stale and can be reclaimed
-    /// ~2 minutes at 400ms slot time (enough for any reasonable transaction)
-    pub const STALE_THRESHOLD_SLOTS: u64 = 300;
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 1 + 8 + 1 + 32;
 }
 
 /// Swap parameters committed to in the ZK proof
@@ -204,7 +197,6 @@ pub fn fund_native_source(
     executor.source_mint = source_mint;
     executor.dest_mint = dest_mint;
     executor.nullifier = input_nullifier_0;
-    executor.created_slot = Clock::get()?.slot;
     executor.bump = ctx.bumps.executor;
     executor.swap_amount = swap_amount;
     executor.is_prefunded = 1;
@@ -224,69 +216,6 @@ pub fn fund_native_source(
             .lamports()
             .checked_add(swap_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
-
-    Ok(())
-}
-
-/// Reclaim a stale prefunded executor that was abandoned after `fund_native_source`.
-pub fn reclaim_stale_executor(
-    ctx: Context<ReclaimStaleExecutor>,
-    source_mint: Pubkey,
-    _dest_mint: Pubkey,
-    _input_nullifier_0: [u8; 32]
-) -> Result<()> {
-    let executor = &ctx.accounts.executor;
-
-    // Only reclaim prefunded executors (is_prefunded == 1).
-    // is_prefunded == 0 means it was created inside transact_swap and will be closed
-    // by that instruction itself — nothing is stuck.
-    require!(executor.is_prefunded == 1, PrivacyError::InvalidSwapParams);
-
-    // Enforce stale threshold — prevents reclaiming a live in-flight executor.
-    let current_slot = Clock::get()?.slot;
-    require!(
-        current_slot >= executor.created_slot.saturating_add(SwapExecutor::STALE_THRESHOLD_SLOTS),
-        PrivacyError::ExecutorNotStale
-    );
-
-    let swap_amount = executor.swap_amount;
-    let executor_bump = executor.bump;
-
-    // Build executor signer seeds.
-    let relayer_key = ctx.accounts.relayer.key();
-    let executor_seeds: &[&[u8]] = &[
-        b"swap_executor",
-        source_mint.as_ref(),
-        ctx.accounts.executor.dest_mint.as_ref(),
-        ctx.accounts.executor.nullifier.as_ref(),
-        relayer_key.as_ref(),
-        &[executor_bump],
-    ];
-
-    // Unwrap WSOL: close executor_source_token → source_vault gets the lamports.
-    // This reverses exactly what fund_native_source did: vault → executor_source_token.
-    token::close_account(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            CloseAccount {
-                account: ctx.accounts.executor_source_token.to_account_info(),
-                destination: ctx.accounts.source_vault.to_account_info(),
-                authority: ctx.accounts.executor.to_account_info(),
-            },
-            &[executor_seeds]
-        )
-    )?;
-
-    // Close executor PDA — return rent to relayer via raw lamport edit (after all CPIs).
-    let executor_lamports = ctx.accounts.executor.to_account_info().lamports();
-    **ctx.accounts.executor.to_account_info().try_borrow_mut_lamports()? = 0;
-    **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
-        .to_account_info()
-        .lamports()
-        .checked_add(executor_lamports)
-        .ok_or(PrivacyError::ArithmeticOverflow)?;
-
-    msg!("Reclaimed stale executor: {} lamports returned to vault, rent returned to relayer", swap_amount);
 
     Ok(())
 }
@@ -419,14 +348,12 @@ pub fn transact_swap<'info>(
     )?;
 
     let executor = &mut ctx.accounts.executor;
-    let current_slot = Clock::get()?.slot;
     let is_prefunded = executor.is_prefunded;
 
     if is_prefunded == 0 {
         executor.source_mint = source_mint;
         executor.dest_mint = dest_mint;
         executor.nullifier = input_nullifiers[0];
-        executor.created_slot = current_slot;
         executor.bump = ctx.bumps.executor;
         executor.swap_amount = swap_amount;
         executor.is_prefunded = 0;

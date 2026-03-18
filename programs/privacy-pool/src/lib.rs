@@ -907,67 +907,6 @@ pub struct FundNativeSource<'info> {
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
 
-/// Reclaim a stale prefunded executor PDA that was never completed by `transact_swap`.
-///
-/// Returns stuck SOL to the source vault and closes both accounts.
-/// Only callable after `STALE_THRESHOLD_SLOTS` slots and only by the original relayer.
-/// User's notes remain valid for retry since nullifiers were not spent.
-#[derive(Accounts)]
-#[instruction(source_mint: Pubkey, dest_mint: Pubkey, input_nullifier_0: [u8; 32])]
-pub struct ReclaimStaleExecutor<'info> {
-    /// Executor PDA created by fund_native_source — must be stale.
-    /// The `constraint` explicitly verifies the signer is the original relayer who
-    /// created this executor; the PDA seeds enforce the same thing cryptographically.
-    #[account(
-        mut,
-        seeds = [
-            b"swap_executor",
-            source_mint.as_ref(),
-            dest_mint.as_ref(),
-            input_nullifier_0.as_ref(),
-            relayer.key().as_ref(),
-        ],
-        bump = executor.bump,
-        constraint = executor.relayer == relayer.key() @ PrivacyError::Unauthorized,
-    )]
-    pub executor: Box<Account<'info, SwapExecutor>>,
-
-    /// Executor's WSOL ATA holding the stuck swap_amount.
-    #[account(
-        mut,
-        associated_token::mint = source_mint_account,
-        associated_token::authority = executor,
-    )]
-    pub executor_source_token: Box<Account<'info, TokenAccount>>,
-
-    /// Source vault PDA — receives the returned SOL.
-    #[account(
-        mut,
-        seeds = [b"privacy_vault_v3", source_mint.as_ref()],
-        bump = source_config.vault_bump,
-    )]
-    pub source_vault: Box<Account<'info, Vault>>,
-
-    /// Source pool config — used for vault_bump and relayer check.
-    #[account(
-        seeds = [b"privacy_config_v3", source_mint.as_ref()],
-        bump = source_config.bump,
-    )]
-    pub source_config: Box<Account<'info, PrivacyConfig>>,
-
-    /// WSOL mint — required for ATA constraint on executor_source_token.
-    #[account(address = effective_mint(&source_mint) @ PrivacyError::InvalidMintAddress)]
-    pub source_mint_account: Box<Account<'info, Mint>>,
-
-    /// Original relayer — must match the seeds used in fund_native_source.
-    #[account(mut)]
-    pub relayer: Signer<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
-}
-
 // ---- Program ----
 
 #[program]
@@ -1536,18 +1475,6 @@ pub mod privacy_pool {
         swap::fund_native_source(ctx, source_mint, dest_mint, input_nullifier_0, swap_amount)
     }
 
-    /// Reclaim a stale prefunded executor that was never completed by `transact_swap`.
-    /// Returns the stuck SOL to the source vault and closes the executor accounts.
-    /// Only callable after `SwapExecutor::STALE_THRESHOLD_SLOTS` slots have elapsed.
-    pub fn reclaim_stale_executor(
-        ctx: Context<ReclaimStaleExecutor>,
-        source_mint: Pubkey,
-        dest_mint: Pubkey,
-        input_nullifier_0: [u8; 32],
-    ) -> Result<()> {
-        swap::reclaim_stale_executor(ctx, source_mint, dest_mint, input_nullifier_0)
-    }
-
     /// Atomic cross-pool private swap
     /// Consumes notes from source pool, swaps via Raydium CPMM (no Serum), creates notes in dest pool
     /// All in one transaction - see swap.rs for implementation details
@@ -2003,8 +1930,6 @@ pub enum PrivacyError {
     InsufficientDelegation,
     #[msg("Invalid swap program: must be Raydium CPMM or AMM")]
     InvalidSwapProgram,
-    #[msg("Executor PDA exists and is not stale - cannot reclaim yet")]
-    ExecutorNotStale,
     #[msg("Invalid remaining accounts: wrong count or ownership")]
     InvalidRemainingAccounts,
     #[msg("Jupiter swap requires additional routing accounts")]
