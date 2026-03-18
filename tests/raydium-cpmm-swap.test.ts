@@ -4201,4 +4201,184 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       }
     });
   });
+
+  // ── Stale Executor Recovery Tests ──────────────────────────────────────────
+  describe("reclaim_stale_executor", () => {
+    // Use a fresh nullifier so this describe block is fully independent.
+    let staleNullifier: Uint8Array;
+    let executorPda: PublicKey;
+    let executorSourceToken: PublicKey;
+    let fundSlot: number;
+
+    const RECLAIM_SWAP_AMOUNT = 100_000_000; // 0.1 SOL in lamports
+
+    before(async () => {
+      staleNullifier = randomBytes32();
+
+      [executorPda] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("swap_executor"),
+          SOL_MINT.toBuffer(),
+          USDC_MINT.toBuffer(),
+          Buffer.from(staleNullifier),
+          payer.publicKey.toBuffer(),
+        ],
+        program.programId,
+      );
+
+      executorSourceToken = await getAssociatedTokenAddress(
+        NATIVE_MINT,
+        executorPda,
+        true, // allowOwnerOffCurve — PDA can own ATAs
+      );
+    });
+
+    it("fund_native_source creates a prefunded executor and debits vault", async () => {
+      const vaultLamportsBefore = await provider.connection.getBalance(
+        sourceVault,
+      );
+
+      await (program.methods as any)
+        .fundNativeSource(
+          SOL_MINT,
+          USDC_MINT,
+          Array.from(staleNullifier),
+          new BN(RECLAIM_SWAP_AMOUNT),
+        )
+        .accounts({
+          executor: executorPda,
+          executorSourceToken,
+          sourceVault,
+          sourceConfig,
+          sourceMintAccount: NATIVE_MINT,
+          relayer: payer.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+
+      fundSlot = await provider.connection.getSlot();
+
+      const vaultLamportsAfter = await provider.connection.getBalance(
+        sourceVault,
+      );
+      expect(vaultLamportsBefore - vaultLamportsAfter).to.equal(
+        RECLAIM_SWAP_AMOUNT,
+        "vault should be debited by swap_amount",
+      );
+
+      // Verify executor state
+      const executorAcc = await (program.account as any).swapExecutor.fetch(
+        executorPda,
+      );
+      expect(executorAcc.isPrefunded).to.equal(1);
+      expect(executorAcc.swapAmount.toNumber()).to.equal(RECLAIM_SWAP_AMOUNT);
+      expect(executorAcc.relayer.toBase58()).to.equal(
+        payer.publicKey.toBase58(),
+      );
+      console.log(
+        `   ✅ Executor created at slot ${fundSlot}, is_prefunded=1, swap_amount=${RECLAIM_SWAP_AMOUNT}`,
+      );
+    });
+
+    it("rejects reclaim_stale_executor before threshold (ExecutorNotStale)", async () => {
+      // Attempt reclaim immediately — executor is live, should be rejected.
+      try {
+        await (program.methods as any)
+          .reclaimStaleExecutor(SOL_MINT, USDC_MINT, Array.from(staleNullifier))
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault,
+            sourceConfig,
+            sourceMintAccount: NATIVE_MINT,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .rpc();
+        expect.fail("Should have thrown ExecutorNotStale");
+      } catch (e: any) {
+        const msg = JSON.stringify(e);
+        expect(msg).to.include(
+          "ExecutorNotStale",
+          "expected ExecutorNotStale error",
+        );
+        console.log(`   ✅ Correctly rejected with ExecutorNotStale`);
+      }
+    });
+
+    it("reclaim_stale_executor succeeds after 300 slots and restores vault", async () => {
+      // Advance past STALE_THRESHOLD_SLOTS (300) by confirming cheap transactions.
+      const targetSlot = fundSlot + 302; // 2-slot buffer
+      console.log(
+        `   Advancing to slot ${targetSlot} (currently at ${fundSlot})...`,
+      );
+      let lastLog = fundSlot;
+      while (true) {
+        const current = await provider.connection.getSlot();
+        if (current >= targetSlot) break;
+        if (current - lastLog >= 50) {
+          console.log(`   ...at slot ${current}, target ${targetSlot}`);
+          lastLog = current;
+        }
+        // send a no-op transaction to push the validator forward
+        await provider.sendAndConfirm(
+          new Transaction().add(
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 100 }),
+          ),
+        );
+      }
+      const currentSlot = await provider.connection.getSlot();
+      console.log(`   ✅ Reached slot ${currentSlot}, calling reclaim...`);
+
+      const vaultLamportsBefore = await provider.connection.getBalance(
+        sourceVault,
+      );
+
+      const txSig = await (program.methods as any)
+        .reclaimStaleExecutor(SOL_MINT, USDC_MINT, Array.from(staleNullifier))
+        .accounts({
+          executor: executorPda,
+          executorSourceToken,
+          sourceVault,
+          sourceConfig,
+          sourceMintAccount: NATIVE_MINT,
+          relayer: payer.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+
+      console.log(`   ✅ reclaim_stale_executor: ${txSig}`);
+
+      // Vault should be fully restored
+      const vaultLamportsAfter = await provider.connection.getBalance(
+        sourceVault,
+      );
+      expect(vaultLamportsAfter - vaultLamportsBefore).to.equal(
+        RECLAIM_SWAP_AMOUNT,
+        "vault lamports should be restored by swap_amount",
+      );
+
+      // Executor PDA must be closed
+      const executorInfo = await provider.connection.getAccountInfo(
+        executorPda,
+      );
+      expect(executorInfo).to.be.null;
+
+      // Executor source token ATA must be closed
+      const executorAtaInfo = await provider.connection.getAccountInfo(
+        executorSourceToken,
+      );
+      expect(executorAtaInfo).to.be.null;
+
+      console.log(
+        `   ✅ Vault restored (+${RECLAIM_SWAP_AMOUNT} lamports), executor PDA closed`,
+      );
+    });
+  });
 });
