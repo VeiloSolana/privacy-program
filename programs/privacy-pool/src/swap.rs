@@ -619,7 +619,7 @@ pub fn transact_swap<'info>(
             ctx.accounts.swap_program.to_account_info(),
         ];
 
-        // invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+        invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
     } else if is_amm {
         // Raydium AMM V4 Swap
         // Accounts layout in remaining_accounts:
@@ -642,6 +642,10 @@ pub fn transact_swap<'info>(
         // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
         // AMM V4 swap_base_in layout: [1-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
         require!(swap_data.len() >= 17, PrivacyError::InvalidPublicAmount);
+        let dex_amount_in = u64::from_le_bytes(
+            swap_data[1..9].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
+        );
+        require!(dex_amount_in == swap_amount, PrivacyError::InvalidSwapParams);
         let dex_min_out = u64::from_le_bytes(
             swap_data[9..17].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
         );
