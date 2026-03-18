@@ -171,6 +171,38 @@ pub fn fund_native_source(
 
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
+    // Guard: verify the NEXT instruction in this transaction is `transact_swap` from
+    // this program.  Prevents a whitelisted relayer from calling fund_native_source as
+    // a standalone transaction with arbitrary nullifiers, which would lock vault funds
+    // for STALE_THRESHOLD_SLOTS (~2 min) per call.
+    {
+        use anchor_lang::solana_program::sysvar::instructions::{
+            load_current_index_checked,
+            load_instruction_at_checked,
+        };
+        use sha2::{ Sha256, Digest };
+
+        // Anchor discriminator = sha256("global:transact_swap")[0..8]
+        let transact_swap_disc: [u8; 8] = Sha256::digest(b"global:transact_swap")[..8]
+            .try_into()
+            .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
+
+        let ix_sysvar = ctx.accounts.instructions_sysvar.to_account_info();
+        let current_idx = load_current_index_checked(&ix_sysvar)? as usize;
+        let next_ix = load_instruction_at_checked(current_idx + 1, &ix_sysvar)
+            .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
+
+        require_keys_eq!(
+            next_ix.program_id,
+            crate::ID,
+            PrivacyError::MissingTransactSwapInstruction
+        );
+        require!(
+            next_ix.data.len() >= 8 && next_ix.data[..8] == transact_swap_disc,
+            PrivacyError::MissingTransactSwapInstruction
+        );
+    }
+
     let vault_ai = ctx.accounts.source_vault.to_account_info();
     let rent_exempt_min = anchor_lang::solana_program::rent::Rent
         ::get()?
