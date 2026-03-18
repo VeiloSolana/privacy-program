@@ -11,6 +11,7 @@ use crate::{
     PrivacyError,
     TransactSwap,
     FundNativeSource,
+    ReclaimStaleExecutor,
     is_token_mint,
 };
 
@@ -29,10 +30,13 @@ pub struct SwapExecutor {
     /// 1 when executor was pre-funded by fund_native_source (vault already debited).
     /// 0 for the single-instruction relayer-float path (backward compatible).
     pub is_prefunded: u8,
+    /// Relayer who created this executor — only they may call reclaim_stale_executor.
+    pub relayer: Pubkey,
 }
 
 impl SwapExecutor {
-    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 1;
+    // +32 for relayer Pubkey field
+    pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 1 + 32;
 
     /// Number of slots after which an executor is considered stale and can be reclaimed
     /// ~2 minutes at 400ms slot time (enough for any reasonable transaction)
@@ -186,6 +190,7 @@ pub fn fund_native_source(
     executor.bump = ctx.bumps.executor;
     executor.swap_amount = swap_amount;
     executor.is_prefunded = 1;
+    executor.relayer = ctx.accounts.relayer.key();
 
     // ── Pure raw lamport transfer: vault → executor_source_token ─────────────────────────
     // This is the ONLY code in the function body; no CPIs appear here.
@@ -201,6 +206,74 @@ pub fn fund_native_source(
             .lamports()
             .checked_add(swap_amount)
             .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    Ok(())
+}
+
+/// Reclaim a stale prefunded executor that was abandoned after `fund_native_source`.
+pub fn reclaim_stale_executor(
+    ctx: Context<ReclaimStaleExecutor>,
+    source_mint: Pubkey,
+    _dest_mint: Pubkey,
+    _input_nullifier_0: [u8; 32]
+) -> Result<()> {
+    let executor = &ctx.accounts.executor;
+
+    // Only reclaim prefunded executors (is_prefunded == 1).
+    // is_prefunded == 0 means it was created inside transact_swap and will be closed
+    // by that instruction itself — nothing is stuck.
+    require!(executor.is_prefunded == 1, PrivacyError::InvalidSwapParams);
+
+    // Enforce stale threshold — prevents reclaiming a live in-flight executor.
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot >= executor.created_slot.saturating_add(SwapExecutor::STALE_THRESHOLD_SLOTS),
+        PrivacyError::ExecutorNotStale
+    );
+
+    let swap_amount = executor.swap_amount;
+    let executor_bump = executor.bump;
+
+    // Build executor signer seeds.
+    let relayer_key = ctx.accounts.relayer.key();
+    let executor_seeds: &[&[u8]] = &[
+        b"swap_executor",
+        source_mint.as_ref(),
+        ctx.accounts.executor.dest_mint.as_ref(),
+        ctx.accounts.executor.nullifier.as_ref(),
+        relayer_key.as_ref(),
+        &[executor_bump],
+    ];
+
+    // Unwrap WSOL: close executor_source_token → source_vault gets the lamports.
+    // This reverses exactly what fund_native_source did: vault → executor_source_token.
+    token::close_account(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            CloseAccount {
+                account: ctx.accounts.executor_source_token.to_account_info(),
+                destination: ctx.accounts.source_vault.to_account_info(),
+                authority: ctx.accounts.executor.to_account_info(),
+            },
+            &[executor_seeds]
+        )
+    )?;
+
+    // Restore source vault TVL.  fund_native_source does NOT update total_tvl
+    // (that happens in transact_swap), so no TVL adjustment is needed here.
+    // We only need to verify the vault received its lamports back (done by close_account above).
+    let _ = swap_amount; // documented: vault lamports restored via close_account
+
+    // Close executor PDA — return rent to relayer via raw lamport edit (after all CPIs).
+    let executor_lamports = ctx.accounts.executor.to_account_info().lamports();
+    **ctx.accounts.executor.to_account_info().try_borrow_mut_lamports()? = 0;
+    **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
+        .to_account_info()
+        .lamports()
+        .checked_add(executor_lamports)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+
+    msg!("Reclaimed stale executor: {} lamports returned to vault, rent returned to relayer", swap_amount);
 
     Ok(())
 }
@@ -365,6 +438,7 @@ pub fn transact_swap<'info>(
         executor.bump = ctx.bumps.executor;
         executor.swap_amount = swap_amount;
         executor.is_prefunded = 0;
+        executor.relayer = ctx.accounts.relayer.key();
     } else {
         // Pre-initialized by fund_native_source — verify fields are consistent with this proof
         require!(executor.source_mint == source_mint, PrivacyError::InvalidSwapParams);
@@ -837,10 +911,7 @@ pub fn transact_swap<'info>(
     // in the destination note (output_commitments[1]).  If vault_amount < dest_amount,
     // the dest note would claim more value than actually entered the vault — a solvency
     // violation.  This check binds the on-chain token flow to the ZK-proven amount.
-    require!(
-        vault_amount >= swap_params.dest_amount,
-        PrivacyError::InvalidPublicAmount
-    );
+    require!(vault_amount >= swap_params.dest_amount, PrivacyError::InvalidPublicAmount);
 
     let dest_is_native = !is_token_mint(&dest_mint);
 
