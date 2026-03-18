@@ -35,7 +35,6 @@ pub struct SwapExecutor {
 }
 
 impl SwapExecutor {
-    // +32 for relayer Pubkey field
     pub const LEN: usize = 8 + 32 + 32 + 32 + 8 + 1 + 8 + 1 + 32;
 
     /// Number of slots after which an executor is considered stale and can be reclaimed
@@ -259,11 +258,6 @@ pub fn reclaim_stale_executor(
         )
     )?;
 
-    // Restore source vault TVL.  fund_native_source does NOT update total_tvl
-    // (that happens in transact_swap), so no TVL adjustment is needed here.
-    // We only need to verify the vault received its lamports back (done by close_account above).
-    let _ = swap_amount; // documented: vault lamports restored via close_account
-
     // Close executor PDA — return rent to relayer via raw lamport edit (after all CPIs).
     let executor_lamports = ctx.accounts.executor.to_account_info().lamports();
     **ctx.accounts.executor.to_account_info().try_borrow_mut_lamports()? = 0;
@@ -352,18 +346,7 @@ pub fn transact_swap<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    // ╔══════════════════════════════════════════════════════════════════════════╗
-    // ║ ZK PROOF VERIFICATION - ALWAYS ENABLED                                  ║
-    // ║ This verification MUST NEVER be disabled via feature flags              ║
-    // ║ Verifies:                                                                ║
-    // ║   1. User owns input notes (knows preimages for nullifiers)              ║
-    // ║   2. Input notes exist in source Merkle tree (root membership)           ║
-    // ║   3. Output commitments are correctly formed                             ║
-    // ║   4. swap_amount + change = sum(input_notes)                             ║
-    // ║   5. ext_data_hash matches Poseidon(relayer, fee)                        ║
-    // ║   6. swap_params_hash matches committed swap parameters                  ║
-    // ╚══════════════════════════════════════════════════════════════════════════╝
-    let swap_params_hash = swap_params.hash()?;
+    let swap_params_hash: [u8; 32] = swap_params.hash()?;
     let ext_data_hash_val = ext_data.hash()?;
 
     let public_inputs = SwapPublicInputs {
@@ -377,19 +360,13 @@ pub fn transact_swap<'info>(
         swap_amount,
     };
 
-    // CRITICAL: ZK verification consumes ~400K CUs (4 pairings + 10 scalar muls)
-    // This verification is MANDATORY and cannot be disabled
     verify_swap_transaction_groth16(proof, &public_inputs)?;
 
     // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;
     require!(MerkleTree::is_known_root(&*source_tree, source_root), PrivacyError::UnknownRoot);
 
-    // Upfront capacity check for both trees before any state changes
-    // While Solana transactions are atomic (failures revert all state), this:
-    // 1. Provides clearer error messages by failing early
-    // 2. Saves compute units by avoiding partial processing
-    // 3. Improves UX with predictable behavior
+    // Upfront capacity check for both trees
     let source_max_capacity = 1u64 << (source_tree.height as u64);
     let source_remaining = source_max_capacity.saturating_sub(source_tree.next_index);
     require!(source_remaining >= 1, PrivacyError::MerkleTreeFull);
@@ -422,10 +399,6 @@ pub fn transact_swap<'info>(
         source_tree_id
     )?;
 
-    // Initialize or validate executor PDA.
-    // With init_if_needed:
-    //   - is_prefunded == 0: freshly created here (relayer-float path) → set all fields.
-    //   - is_prefunded == 1: created by fund_native_source (Option B path) → validate fields match.
     let executor = &mut ctx.accounts.executor;
     let current_slot = Clock::get()?.slot;
     let is_prefunded = executor.is_prefunded;
@@ -460,14 +433,7 @@ pub fn transact_swap<'info>(
 
     if source_is_native {
         if executor.is_prefunded == 1 {
-            // ── Option B path (3-instruction flow) ────────────────────────────────────────
-            // fund_native_source already ran in a prior instruction within this same
-            // atomic transaction.  It did a pure raw-edit vault → executor_source_token
-            // (no CPIs in that instruction body) and stored swap_amount + is_prefunded=1
-            // in the executor account.
-            //
-            // Here we only need to call sync_native so the Token Program sees the
-            // lamports that are already sitting in executor_source_token.
+            // Option B: vault already debited by fund_native_source; sync_native only.
             require!(executor.swap_amount == swap_amount, PrivacyError::InvalidSwapParams);
 
             token::sync_native(
@@ -476,11 +442,7 @@ pub fn transact_swap<'info>(
                 })
             )?;
         } else {
-            // ── Option A path (single-instruction relayer-float, backward compat) ────────
-            // Vault is Program-Owned and cannot sign system_program::transfer, so the
-            // relayer floats the swap_amount as a temporary bridge.  The vault reimburses
-            // the relayer at the end of this instruction via raw lamport edit (after ALL
-            // CPIs have completed).
+            // Option A: relayer floats swap_amount; vault reimburses at end of instruction.
             let vault_ai = ctx.accounts.source_vault.to_account_info();
             let rent_exempt_min = anchor_lang::solana_program::rent::Rent
                 ::get()?
@@ -993,11 +955,6 @@ pub fn transact_swap<'info>(
         .checked_add(vault_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Insert swap output (commitment 0) into destination tree
-    // Insert commitments into trees
-    // output_commitments[0] = changeCommitment (goes back to source tree)
-    // output_commitments[1] = destCommitment (goes to dest tree)
-
     // Insert dest note (commitment 1) into dest tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
 
@@ -1069,11 +1026,7 @@ pub fn transact_swap<'info>(
         )?;
     }
 
-    // Raw lamport edits — MUST come after all CPIs (Solana runtime ordering requirement).
-    // For native SOL source (Option A / relayer-float only): reimburse the relayer who
-    // temporarily fronted swap_amount via system_program::transfer CPI earlier.
-    // Option B (is_prefunded == 1): vault was already debited in fund_native_source
-    // (a separate instruction), so no vault raw-edit is needed here.
+    // Option A only: reimburse relayer for fronted swap_amount (raw edit after CPIs).
     if source_is_native && is_prefunded == 0 {
         let vault_ai = ctx.accounts.source_vault.to_account_info();
         **vault_ai.try_borrow_mut_lamports()? = vault_ai

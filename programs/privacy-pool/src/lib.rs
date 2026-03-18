@@ -19,14 +19,6 @@ declare_id!("GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU");
 
 // ---- Constants ----
 
-// NOTE: Admin authorization is now handled via Squads multisig.
-// The program stores the Squads vault PDA as admin, and Squads
-// handles approval off-chain before executing admin instructions.
-// No hardcoded admin addresses needed.
-
-#[cfg(not(any(feature = "localnet", test)))]
-pub const _DEPRECATED_AUTHORIZED_ADMIN: Option<Pubkey> = None; // Removed: use Squads vault instead
-
 pub type PoseidonHasher = Poseidon;
 pub const MAX_RELAYERS: usize = 16;
 
@@ -372,8 +364,6 @@ impl ExtData {
         Ok(final_hash)
     }
 }
-
-// ---- Legacy: Keep for backwards compatibility, will be removed ----
 
 // ---- Instruction contexts ----
 
@@ -836,8 +826,6 @@ pub struct TransactSwap<'info> {
     // 2: token_vault_0 - Pool's first token vault
     // 3: token_vault_1 - Pool's second token vault
     // 4: observation_state - Oracle observation (optional)
-    //
-    // Only 5 accounts needed! Much simpler than legacy AMM.
 
     // ---- Jupiter Integration ----
     /// Jupiter Event Authority (required for Jupiter V6 swaps)
@@ -852,16 +840,9 @@ pub struct TransactSwap<'info> {
 
 /// Option B: fund_native_source instruction context.
 ///
-/// This is the first of two instructions sent in ONE atomic transaction for native SOL swaps.
-/// It creates the executor PDA + executor_source_token ATA and does a **pure raw-lamport**
-/// vault → executor_source_token transfer in the instruction body (no CPIs inside body).
-///
-/// Solana ordering rule: CPIs must precede raw lamport edits within an instruction body.
-/// Anchor's account init constraints (create_account + initialize_account) run as **pre-flight**
-/// *before* the function body, so they count as "CPIs first". The body then only does raw edits.
-///
-/// The following `transact_swap` instruction uses `init_if_needed` for executor/ATAs:
-/// if `executor.is_prefunded == 1`, it skips the relayer-float path entirely.
+/// First instruction of an atomic pair for native SOL swaps.
+/// Creates the executor PDA + WSOL ATA and transfers swap_amount from vault.
+/// Must be sent in the same transaction as `transact_swap`.
 #[derive(Accounts)]
 #[instruction(source_mint: Pubkey, dest_mint: Pubkey, input_nullifier_0: [u8; 32], swap_amount: u64)]
 pub struct FundNativeSource<'info> {
@@ -922,19 +903,9 @@ pub struct FundNativeSource<'info> {
 
 /// Reclaim a stale prefunded executor PDA that was never completed by `transact_swap`.
 ///
-/// If `fund_native_source` succeeded but the subsequent `transact_swap` never landed
-/// (e.g., the relayer dropped the transaction), the vault is effectively drained with no
-/// corresponding note insertion.  After `STALE_THRESHOLD_SLOTS` slots the relayer (or
-/// anyone who funded it) may call this to:
-///   1. Return the stuck SOL from executor_source_token → source vault.
-///   2. Close both the executor_source_token ATA and the executor PDA, reclaiming rent.
-///
-/// Security properties:
-///   - Only callable when `executor.is_prefunded == 1` (prefunded path only).
-///   - Only callable after `STALE_THRESHOLD_SLOTS` slots have elapsed since creation.
-///   - executor seeds include `relayer.key()`, so only the original relayer can reclaim.
-///   - Nullifiers were NOT marked spent by fund_native_source, so the user's notes
-///     remain valid and the user can retry the swap with a fresh relayer.
+/// Returns stuck SOL to the source vault and closes both accounts.
+/// Only callable after `STALE_THRESHOLD_SLOTS` slots and only by the original relayer.
+/// User's notes remain valid for retry since nullifiers were not spent.
 #[derive(Accounts)]
 #[instruction(source_mint: Pubkey, dest_mint: Pubkey, input_nullifier_0: [u8; 32])]
 pub struct ReclaimStaleExecutor<'info> {
@@ -1006,10 +977,6 @@ pub mod privacy_pool {
         min_withdraw_amount: Option<u64>,
         max_withdraw_amount: Option<u64>
     ) -> Result<()> {
-        // Authorization is handled by requiring admin to be a Signer.
-        // When using Squads multisig, admin = Squads vault PDA which signs
-        // after multisig approval. No hardcoded admin checks needed.
-
         let cfg = &mut ctx.accounts.config;
         let vault = &mut ctx.accounts.vault;
         let nulls = &mut ctx.accounts.nullifiers;
@@ -1042,10 +1009,7 @@ pub mod privacy_pool {
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
 
-        // Enforce token whitelist on pool creation to prevent fund trapping.
-        // If a non-whitelisted pool could be created, users could swap INTO it
-        // via transact_swap (no whitelist check) but then be unable to withdraw
-        // via transact (which enforces the whitelist), permanently trapping funds.
+        // Enforce token whitelist to prevent fund-trapping via unwhitelisted pools.
         if is_token_mint(&mint_address) {
             require!(
                 ALLOW_ALL_SPL_TOKENS || ALLOWED_TOKENS.contains(&mint_address),
@@ -1180,8 +1144,6 @@ pub mod privacy_pool {
             cfg.min_swap_fee = val;
         }
         if let Some(val) = swap_fee_bps {
-            // Validate swap_fee_bps does not exceed maximum (10%)
-            // Note: Swap fees are higher than withdrawal fees - see MAX_SWAP_FEE_BPS docs
             require!(val <= MAX_SWAP_FEE_BPS, PrivacyError::ExcessiveFeeBps);
             cfg.swap_fee_bps = val;
         }
@@ -1200,9 +1162,6 @@ pub mod privacy_pool {
     }
 
     pub fn initialize_global_config(ctx: Context<InitializeGlobalConfig>) -> Result<()> {
-        // Authorization is handled by requiring admin to be a Signer.
-        // When using Squads multisig, admin = Squads vault PDA.
-
         let global_cfg = &mut ctx.accounts.global_config;
 
         global_cfg.bump = ctx.bumps.global_config;

@@ -1254,4 +1254,172 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       );
     });
   });
+
+  // --------------------------------------------------------------------------
+  // TEST SUITE: reclaim_stale_executor
+  // --------------------------------------------------------------------------
+  describe("reclaim_stale_executor", () => {
+    const RECLAIM_SWAP_AMOUNT = 100_000_000; // 0.1 SOL
+
+    let staleNullifier: Uint8Array;
+    let executorPda: PublicKey;
+    let executorSourceToken: PublicKey;
+    let fundSlot: number;
+
+    before(async () => {
+      staleNullifier = randomBytes32();
+      [executorPda] = deriveSwapExecutorPDA(
+        program.programId,
+        SOL_MINT,
+        pools["USDC"].mint,
+        staleNullifier,
+        payer.publicKey,
+      );
+      executorSourceToken = await getAssociatedTokenAddress(
+        NATIVE_MINT,
+        executorPda,
+        true,
+      );
+    });
+
+    it("fund_native_source creates a prefunded executor and debits vault", async function () {
+      const solPool = pools["SOL"];
+      const vaultBefore = await connection.getBalance(solPool.vault);
+
+      await (program.methods as any)
+        .fundNativeSource(
+          SOL_MINT,
+          pools["USDC"].mint,
+          Array.from(staleNullifier),
+          new BN(RECLAIM_SWAP_AMOUNT),
+        )
+        .accounts({
+          executor: executorPda,
+          executorSourceToken,
+          sourceVault: solPool.vault,
+          sourceConfig: solPool.config,
+          sourceMintAccount: NATIVE_MINT,
+          relayer: payer.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .signers([payer])
+        .rpc();
+
+      fundSlot = await connection.getSlot();
+
+      const vaultAfter = await connection.getBalance(solPool.vault);
+      expect(vaultBefore - vaultAfter).to.equal(RECLAIM_SWAP_AMOUNT);
+
+      const executorAccount = await (program.account as any).swapExecutor.fetch(
+        executorPda,
+      );
+      expect(executorAccount.isPrefunded).to.equal(1);
+      expect(executorAccount.swapAmount.toNumber()).to.equal(
+        RECLAIM_SWAP_AMOUNT,
+      );
+      expect(executorAccount.relayer.toBase58()).to.equal(
+        payer.publicKey.toBase58(),
+      );
+
+      console.log(
+        `  ✅ Executor funded at slot ${fundSlot}, vault debited ${RECLAIM_SWAP_AMOUNT} lamports`,
+      );
+    });
+
+    it("rejects reclaim_stale_executor before staleness threshold (ExecutorNotStale)", async function () {
+      try {
+        await (program.methods as any)
+          .reclaimStaleExecutor(
+            SOL_MINT,
+            pools["USDC"].mint,
+            Array.from(staleNullifier),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: pools["SOL"].vault,
+            sourceConfig: pools["SOL"].config,
+            sourceMintAccount: NATIVE_MINT,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .signers([payer])
+          .rpc();
+        throw new Error(
+          "Expected ExecutorNotStale error but instruction succeeded",
+        );
+      } catch (err: any) {
+        const msg: string = err?.message ?? "";
+        expect(msg).to.include("ExecutorNotStale");
+        console.log(
+          "  ✅ Correctly rejected early reclaim with ExecutorNotStale",
+        );
+      }
+    });
+
+    it("reclaim_stale_executor succeeds after 300 slots and restores vault", async function () {
+      this.timeout(600_000); // slot-advancing can take a few minutes
+
+      const solPool = pools["SOL"];
+
+      // Advance the validator past the staleness threshold (300 slots)
+      console.log(
+        `  ⏳ Advancing slots from ${fundSlot} (need >= ${fundSlot + 302})...`,
+      );
+      let currentSlot = await connection.getSlot();
+      while (currentSlot < fundSlot + 302) {
+        const tx = new anchor.web3.Transaction().add(
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 5000 }),
+        );
+        await anchor.web3.sendAndConfirmTransaction(connection, tx, [payer]);
+        currentSlot = await connection.getSlot();
+      }
+      console.log(`  ✅ Reached slot ${currentSlot}`);
+
+      const vaultBefore = await connection.getBalance(solPool.vault);
+
+      await (program.methods as any)
+        .reclaimStaleExecutor(
+          SOL_MINT,
+          pools["USDC"].mint,
+          Array.from(staleNullifier),
+        )
+        .accounts({
+          executor: executorPda,
+          executorSourceToken,
+          sourceVault: solPool.vault,
+          sourceConfig: solPool.config,
+          sourceMintAccount: NATIVE_MINT,
+          relayer: payer.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        })
+        .signers([payer])
+        .rpc();
+
+      const vaultAfter = await connection.getBalance(solPool.vault);
+      const vaultGain = vaultAfter - vaultBefore;
+      // vault receives swap_amount + ATA rent (token::close_account closes to source_vault)
+      expect(vaultGain).to.be.gte(RECLAIM_SWAP_AMOUNT);
+
+      const executorInfo = await connection.getAccountInfo(executorPda);
+      expect(executorInfo).to.be.null;
+
+      const executorTokenInfo = await connection.getAccountInfo(
+        executorSourceToken,
+      );
+      expect(executorTokenInfo).to.be.null;
+
+      console.log(
+        `  ✅ Vault restored by ${vaultGain} lamports (${RECLAIM_SWAP_AMOUNT} swap + ${
+          vaultGain - RECLAIM_SWAP_AMOUNT
+        } ATA rent), executor accounts closed`,
+      );
+    });
+  });
 });
