@@ -29,7 +29,8 @@
     "deploy:devnet:binary": "anchor deploy --program-name privacy_pool --provider.cluster devnet --program-keypair keys/program-keypair-devnet.json",
     "deploy:mainnet:binary": "anchor deploy --program-name privacy_pool --provider.cluster mainnet --program-keypair keys/program-keypair-mainnet.json",
     "keys:show": "node -e \"const fs=require('fs'),{Keypair}=require('@solana/web3.js'); ['admin','deployer','relayer','spl-relayer','program-keypair-devnet','program-keypair-mainnet'].forEach(n=>{try{const kp=Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync('keys/'+n+'.json')))); console.log(n+':\\n  pub: '+kp.publicKey.toBase58());}catch(e){}});\"",
-    "freeze:mainnet": "solana program set-upgrade-authority GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU --final --keypair keys/program-keypair-mainnet.json --url mainnet-beta"
+    "freeze:mainnet": "solana prograhhhm set-upgrade-authority GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU --final --keypair keys/program-keypair-mainnet.json --url mainnet-beta",
+    "upgrade:mainnet": "anchor upgrade target/deploy/privacy_pool.so --program-id GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU --provider.cluster mainnet --provider.wallet keys/deployer-keypair.json"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
