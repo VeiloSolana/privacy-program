@@ -11,7 +11,7 @@ pnpm-lock.yaml
 # Rust / Cargo
 test-ledger
 target/
-Cargo.lock
+# Cargo.lock is intentionally tracked for solana-verify deterministic builds
 
 # Anchor
 .DS_Store
