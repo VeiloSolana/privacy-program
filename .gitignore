@@ -51,6 +51,10 @@ Thumbs.db
 .env.production.local
 keys/
 
+# Sensitive – deployment data and operational scripts
+deployments/
+scripts/
+
 # Tests / coverage
 coverage/
 .nyc_output/
