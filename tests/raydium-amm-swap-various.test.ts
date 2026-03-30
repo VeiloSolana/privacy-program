@@ -870,6 +870,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         poolConfig.serumBaseVault,
         poolConfig.serumQuoteVault,
         serumVaultSigner,
+        executorPda,
+        executorSourceToken,
+        executorDestToken,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayerTokenAccount.address,
       ];
 
       const [createLutIx, lookupTableAddress] =
@@ -878,16 +884,20 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           payer: payer.publicKey,
           recentSlot,
         });
-      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
-        payer: payer.publicKey,
-        authority: payer.publicKey,
-        lookupTable: lookupTableAddress,
-        addresses: lookupTableAddresses,
-      });
-
       await provider.sendAndConfirm(
-        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+        new anchor.web3.Transaction().add(createLutIx),
       );
+      for (let i = 0; i < lookupTableAddresses.length; i += 20) {
+        const extendIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: lookupTableAddresses.slice(i, i + 20),
+        });
+        await provider.sendAndConfirm(
+          new anchor.web3.Transaction().add(extendIx),
+        );
+      }
       await new Promise((r) => setTimeout(r, 1000));
 
       const lookupTableAccount =
@@ -896,6 +906,26 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         throw new Error("Failed to fetch lookup table");
 
       try {
+        const fundNativeSourceIx = await (program.methods as any)
+          .fundNativeSource(
+            sol.mint,
+            usdc.mint,
+            Array.from(note.nullifier),
+            new BN(SWAP_AMOUNT),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: sol.vault,
+            sourceConfig: sol.config,
+            sourceMintAccount: sol.tokenMint,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .instruction();
+
         const swapIx = await (program.methods as any)
           .transactSwap(
             proof,
@@ -998,7 +1028,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         const messageV0 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
-          instructions: [computeBudgetIx, swapIx],
+          instructions: [computeBudgetIx, fundNativeSourceIx, swapIx],
         }).compileToV0Message([lookupTableAccount.value]);
 
         const versionedTx = new VersionedTransaction(messageV0);
@@ -1877,6 +1907,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         poolConfig.serumBaseVault,
         poolConfig.serumQuoteVault,
         serumVaultSigner,
+        executorPda,
+        executorSourceToken,
+        executorDestToken,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayerTokenAccount.address,
       ];
 
       const [createLutIx, lookupTableAddress] =
@@ -1885,16 +1921,20 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           payer: payer.publicKey,
           recentSlot,
         });
-      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
-        payer: payer.publicKey,
-        authority: payer.publicKey,
-        lookupTable: lookupTableAddress,
-        addresses: lookupTableAddresses,
-      });
-
       await provider.sendAndConfirm(
-        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+        new anchor.web3.Transaction().add(createLutIx),
       );
+      for (let i = 0; i < lookupTableAddresses.length; i += 20) {
+        const extendIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: lookupTableAddresses.slice(i, i + 20),
+        });
+        await provider.sendAndConfirm(
+          new anchor.web3.Transaction().add(extendIx),
+        );
+      }
       await new Promise((r) => setTimeout(r, 1000));
 
       const lookupTableAccount =
@@ -1903,6 +1943,26 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         throw new Error("Failed to fetch lookup table");
 
       try {
+        const fundNativeSourceIx = await (program.methods as any)
+          .fundNativeSource(
+            sol.mint,
+            usdt.mint,
+            Array.from(note.nullifier),
+            new BN(SWAP_AMOUNT),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: sol.vault,
+            sourceConfig: sol.config,
+            sourceMintAccount: sol.tokenMint,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .instruction();
+
         const swapIx = await (program.methods as any)
           .transactSwap(
             proof,
@@ -2004,7 +2064,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         const messageV0 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
-          instructions: [computeBudgetIx, swapIx],
+          instructions: [computeBudgetIx, fundNativeSourceIx, swapIx],
         }).compileToV0Message([lookupTableAccount.value]);
         const versionedTx = new VersionedTransaction(messageV0);
         versionedTx.sign([payer]);
@@ -2883,6 +2943,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         poolConfig.serumBaseVault,
         poolConfig.serumQuoteVault,
         serumVaultSigner,
+        executorPda,
+        executorSourceToken,
+        executorDestToken,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayerTokenAccount.address,
       ];
 
       const [createLutIx, lookupTableAddress] =
@@ -2891,16 +2957,20 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           payer: payer.publicKey,
           recentSlot,
         });
-      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
-        payer: payer.publicKey,
-        authority: payer.publicKey,
-        lookupTable: lookupTableAddress,
-        addresses: lookupTableAddresses,
-      });
-
       await provider.sendAndConfirm(
-        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+        new anchor.web3.Transaction().add(createLutIx),
       );
+      for (let i = 0; i < lookupTableAddresses.length; i += 20) {
+        const extendIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: lookupTableAddresses.slice(i, i + 20),
+        });
+        await provider.sendAndConfirm(
+          new anchor.web3.Transaction().add(extendIx),
+        );
+      }
       await new Promise((r) => setTimeout(r, 1000));
 
       const lookupTableAccount =
@@ -2909,6 +2979,26 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         throw new Error("Failed to fetch lookup table");
 
       try {
+        const fundNativeSourceIx = await (program.methods as any)
+          .fundNativeSource(
+            sol.mint,
+            jup.mint,
+            Array.from(note.nullifier),
+            new BN(SWAP_AMOUNT),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: sol.vault,
+            sourceConfig: sol.config,
+            sourceMintAccount: sol.tokenMint,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .instruction();
+
         const swapIx = await (program.methods as any)
           .transactSwap(
             proof,
@@ -3010,7 +3100,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         const messageV0 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
-          instructions: [computeBudgetIx, swapIx],
+          instructions: [computeBudgetIx, fundNativeSourceIx, swapIx],
         }).compileToV0Message([lookupTableAccount.value]);
         const versionedTx = new VersionedTransaction(messageV0);
         versionedTx.sign([payer]);
@@ -3882,6 +3972,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         poolConfig.serumBaseVault,
         poolConfig.serumQuoteVault,
         serumVaultSigner,
+        executorPda,
+        executorSourceToken,
+        executorDestToken,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayerTokenAccount.address,
       ];
 
       const [createLutIx, lookupTableAddress] =
@@ -3890,16 +3986,20 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           payer: payer.publicKey,
           recentSlot,
         });
-      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
-        payer: payer.publicKey,
-        authority: payer.publicKey,
-        lookupTable: lookupTableAddress,
-        addresses: lookupTableAddresses,
-      });
-
       await provider.sendAndConfirm(
-        new anchor.web3.Transaction().add(createLutIx).add(extendLutIx),
+        new anchor.web3.Transaction().add(createLutIx),
       );
+      for (let i = 0; i < lookupTableAddresses.length; i += 20) {
+        const extendIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: lookupTableAddresses.slice(i, i + 20),
+        });
+        await provider.sendAndConfirm(
+          new anchor.web3.Transaction().add(extendIx),
+        );
+      }
       await new Promise((r) => setTimeout(r, 1000));
 
       const lookupTableAccount =
@@ -3908,6 +4008,26 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         throw new Error("Failed to fetch lookup table");
 
       try {
+        const fundNativeSourceIx = await (program.methods as any)
+          .fundNativeSource(
+            sol.mint,
+            usd1.mint,
+            Array.from(note.nullifier),
+            new BN(SWAP_AMOUNT),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: sol.vault,
+            sourceConfig: sol.config,
+            sourceMintAccount: sol.tokenMint,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .instruction();
+
         const swapIx = await (program.methods as any)
           .transactSwap(
             proof,
@@ -4009,7 +4129,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         const messageV0 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
-          instructions: [computeBudgetIx, swapIx],
+          instructions: [computeBudgetIx, fundNativeSourceIx, swapIx],
         }).compileToV0Message([lookupTableAccount.value]);
         const versionedTx = new VersionedTransaction(messageV0);
         versionedTx.sign([payer]);
@@ -4924,6 +5044,12 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
         solUsdcPoolConfig.serumBaseVault,
         solUsdcPoolConfig.serumQuoteVault,
         solUsdcSerumVaultSigner,
+        executorPda,
+        executorSourceToken,
+        executorDestToken,
+        nullifierMarker0,
+        nullifierMarker1,
+        relayerTokenAccount.address,
       ];
 
       const [createLutIx, lookupTableAddress] =
@@ -4932,15 +5058,16 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           payer: payer.publicKey,
           recentSlot,
         });
-      const extendLutIx = AddressLookupTableProgram.extendLookupTable({
-        payer: payer.publicKey,
-        authority: payer.publicKey,
-        lookupTable: lookupTableAddress,
-        addresses: lookupTableAddresses,
-      });
-
-      const lutTx = new Transaction().add(createLutIx, extendLutIx);
-      await provider.sendAndConfirm(lutTx);
+      await provider.sendAndConfirm(new Transaction().add(createLutIx));
+      for (let i = 0; i < lookupTableAddresses.length; i += 20) {
+        const extendIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: lookupTableAddresses.slice(i, i + 20),
+        });
+        await provider.sendAndConfirm(new Transaction().add(extendIx));
+      }
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
       const lookupTableAccount = (
@@ -4948,6 +5075,26 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       ).value!;
 
       try {
+        const fundNativeSourceIx = await (program.methods as any)
+          .fundNativeSource(
+            sol.mint,
+            usdc.mint,
+            Array.from(note.nullifier),
+            new BN(SOL_SWAP_AMOUNT),
+          )
+          .accounts({
+            executor: executorPda,
+            executorSourceToken,
+            sourceVault: sol.vault,
+            sourceConfig: sol.config,
+            sourceMintAccount: sol.tokenMint,
+            relayer: payer.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          })
+          .instruction();
+
         const swapIx = await (program.methods as any)
           .transactSwap(
             proof,
@@ -5063,6 +5210,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           recentBlockhash: blockhash,
           instructions: [
             ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            fundNativeSourceIx,
             swapIx,
           ],
         }).compileToV0Message([lookupTableAccount]);

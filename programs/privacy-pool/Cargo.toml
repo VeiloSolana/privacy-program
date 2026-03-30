@@ -1,12 +1,12 @@
 [package]
-name = "privacy-pool"
+name = "veilo"
 version = "0.1.0"
-description = "Created with Anchor"
+description = "Veilo - Privacy Layer on Solana"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "privacy_pool"
+name = "Veilo"
 
 [features]
 no-entrypoint = []
