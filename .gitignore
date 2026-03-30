@@ -59,3 +59,11 @@ scripts/
 coverage/
 .nyc_output/
 .jest/
+docs/
+
+# ZK circuits (private)
+zk/
+circuits/
+
+zk copy/
+circuits copy/
