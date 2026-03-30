@@ -1393,6 +1393,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "privacy_pool"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "ark-bn254 0.5.0",
+ "ark-ff 0.5.0",
+ "ark-serialize 0.5.0",
+ "bytemuck",
+ "indexmap",
+ "light-hasher",
+ "num-bigint",
+ "proc-macro2",
+ "sha2 0.10.9",
+ "solana-bn254",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3157,24 +3175,6 @@ checksum = "0200d0fc04d809396c2ad43f3c95da3582a2556eba8d453c1087f4120ee352ff"
 dependencies = [
  "fnv",
  "lazy_static",
-]
-
-[[package]]
-name = "veilo"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "anchor-spl",
- "ark-bn254 0.5.0",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "bytemuck",
- "indexmap",
- "light-hasher",
- "num-bigint",
- "proc-macro2",
- "sha2 0.10.9",
- "solana-bn254",
 ]
 
 [[package]]

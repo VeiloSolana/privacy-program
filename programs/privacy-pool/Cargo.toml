@@ -1,5 +1,5 @@
 [package]
-name = "veilo"
+name = "privacy_pool"
 version = "0.1.0"
 description = "Veilo - Privacy Layer on Solana"
 edition = "2021"
