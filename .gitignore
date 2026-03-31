@@ -60,10 +60,8 @@ coverage/
 .nyc_output/
 .jest/
 docs/
+docss/
 
 # ZK circuits (private)
 zk/
 circuits/
-
-zk copy/
-circuits copy/
