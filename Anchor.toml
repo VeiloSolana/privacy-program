@@ -28,7 +28,7 @@ privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "mainnet"
 wallet = "./keys/deployer-keypair.json"
 
 [scripts]
