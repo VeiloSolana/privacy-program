@@ -1,13 +1,13 @@
 use anchor_lang::prelude::*;
 use ark_bn254::G1Affine as G1;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+use ark_serialize::{ CanonicalDeserialize, CanonicalSerialize, Compress, Validate };
 use num_bigint::BigUint;
 use std::ops::Neg;
 
 use crate::groth16::Groth16Verifier;
 use crate::swap::SwapPublicInputs;
-use crate::vk_constants::{SWAP_VK, TRANSACTION_VK};
-use crate::{PrivacyError, TransactionPublicInputs};
+use crate::vk_constants::{ SWAP_VK, TRANSACTION_VK };
+use crate::{ PrivacyError, TransactionPublicInputs };
 
 /// Proof broken into (a, b, c) parts - for legacy withdraw
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -44,9 +44,8 @@ pub fn change_endianness(bytes: &[u8]) -> Vec<u8> {
 fn reduce_to_field_be(bytes: [u8; 32]) -> [u8; 32] {
     // BN254 Fr modulus as 32-byte BE
     const FR_MODULUS: [u8; 32] = [
-        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
-        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
-        0x00, 0x01,
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+        0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
     ];
 
     // Quick check: if bytes < modulus, no reduction needed (common case)
@@ -116,9 +115,8 @@ fn subtract_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 /// Negative values use field arithmetic: -x ≡ Fr - x (mod Fr)
 fn i64_to_field_be(value: i64) -> [u8; 32] {
     const FR_MODULUS: [u8; 32] = [
-        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
-        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
-        0x00, 0x01,
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+        0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
     ];
 
     let mut bytes = [0u8; 32];
@@ -157,9 +155,10 @@ fn i64_to_field_be(value: i64) -> [u8; 32] {
 /// 6. inputNullifiers[1]
 /// 7. outputCommitments[0]
 /// 8. outputCommitments[1]
+#[inline(never)]
 pub fn verify_transaction_groth16(
     proof: TransactionProof,
-    inputs: &TransactionPublicInputs,
+    inputs: &TransactionPublicInputs
 ) -> Result<()> {
     // ----- 1. Build public input array (8 inputs) -----
     let mut public_inputs: [[u8; 32]; 8] = [[0u8; 32]; 8];
@@ -188,18 +187,15 @@ pub fn verify_transaction_groth16(
     let g1_point = G1::deserialize_with_mode(
         &*[&change_endianness(&proof.proof_a[..]), &[0u8][..]].concat(),
         Compress::No,
-        Validate::Yes,
-    )
-    .map_err(|_| PrivacyError::InvalidProof)?;
+        Validate::Yes
+    ).map_err(|_| PrivacyError::InvalidProof)?;
 
     let g1_neg = g1_point.neg();
     let mut proof_a_neg = [0u8; 65];
-    g1_neg
-        .x
+    g1_neg.x
         .serialize_with_mode(&mut proof_a_neg[..32], Compress::No)
         .map_err(|_| PrivacyError::InvalidProof)?;
-    g1_neg
-        .y
+    g1_neg.y
         .serialize_with_mode(&mut proof_a_neg[32..64], Compress::No)
         .map_err(|_| PrivacyError::InvalidProof)?;
 
@@ -208,14 +204,9 @@ pub fn verify_transaction_groth16(
         .map_err(|_| PrivacyError::InvalidProof)?;
 
     // ----- 3. Verify with Groth16Verifier<8> -----
-    let mut verifier = Groth16Verifier::<8>::new(
-        &proof_a,
-        &proof.proof_b,
-        &proof.proof_c,
-        &public_inputs,
-        &TRANSACTION_VK,
-    )
-    .map_err(|_| PrivacyError::InvalidProof)?;
+    let mut verifier = Groth16Verifier::<8>
+        ::new(&proof_a, &proof.proof_b, &proof.proof_c, &public_inputs, &TRANSACTION_VK)
+        .map_err(|_| PrivacyError::InvalidProof)?;
 
     let ok = verifier.verify().map_err(|_| PrivacyError::VerifyFailed)?;
 
@@ -251,6 +242,7 @@ fn u64_to_field_be(value: u64) -> [u8; 32] {
 /// 8. changeCommitment   - Change output commitment (source token)
 /// 9. destCommitment     - Destination output commitment (dest token)
 /// 10. swapAmount        - Amount being swapped (public for DEX CPI)
+#[inline(never)]
 pub fn verify_swap_transaction_groth16(proof: SwapProof, inputs: &SwapPublicInputs) -> Result<()> {
     // ----- 1. Build public input array (10 inputs) -----
     let mut public_inputs: [[u8; 32]; 10] = [[0u8; 32]; 10];
@@ -287,18 +279,15 @@ pub fn verify_swap_transaction_groth16(proof: SwapProof, inputs: &SwapPublicInpu
     let g1_point = G1::deserialize_with_mode(
         &*[&change_endianness(&proof.proof_a[..]), &[0u8][..]].concat(),
         Compress::No,
-        Validate::Yes,
-    )
-    .map_err(|_| PrivacyError::InvalidProof)?;
+        Validate::Yes
+    ).map_err(|_| PrivacyError::InvalidProof)?;
 
     let g1_neg = g1_point.neg();
     let mut proof_a_neg = [0u8; 65];
-    g1_neg
-        .x
+    g1_neg.x
         .serialize_with_mode(&mut proof_a_neg[..32], Compress::No)
         .map_err(|_| PrivacyError::InvalidProof)?;
-    g1_neg
-        .y
+    g1_neg.y
         .serialize_with_mode(&mut proof_a_neg[32..64], Compress::No)
         .map_err(|_| PrivacyError::InvalidProof)?;
 
@@ -307,14 +296,9 @@ pub fn verify_swap_transaction_groth16(proof: SwapProof, inputs: &SwapPublicInpu
         .map_err(|_| PrivacyError::InvalidProof)?;
 
     // ----- 3. Verify with Groth16Verifier<10> -----
-    let mut verifier = Groth16Verifier::<10>::new(
-        &proof_a,
-        &proof.proof_b,
-        &proof.proof_c,
-        &public_inputs,
-        &SWAP_VK,
-    )
-    .map_err(|_| PrivacyError::InvalidProof)?;
+    let mut verifier = Groth16Verifier::<10>
+        ::new(&proof_a, &proof.proof_b, &proof.proof_c, &public_inputs, &SWAP_VK)
+        .map_err(|_| PrivacyError::InvalidProof)?;
 
     let ok = verifier.verify().map_err(|_| PrivacyError::VerifyFailed)?;
 
