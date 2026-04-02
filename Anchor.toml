@@ -28,11 +28,11 @@ privacy_pool = "GYy4kM6GHhpgLCUscuABbzkD2ZbJ2fneYryaZ6Ch7fFU"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "mainnet"
+cluster = "localnet"
 wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:amm-various"
+test = "npm run test:amm-various-jup"
 
 [test]
 startup_wait = 60000
