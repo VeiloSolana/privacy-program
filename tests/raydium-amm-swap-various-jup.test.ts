@@ -36,6 +36,76 @@ import {
 
 const SOL_MINT = PublicKey.default;
 
+// =====================================================
+// Dynamic swap fee tier system
+// =====================================================
+interface FeeTier {
+  threshold: bigint;
+  bps: number;
+}
+
+/**
+ * Per-token fee tier schedules.
+ * Stablecoins (USDC, USDT, USD1) use 6-decimal base units ≈ USD cents.
+ * JUP (6 dec, ~$0.50) uses doubled thresholds so dollar buckets align.
+ * SOL/wSOL (9 dec, ~$130) uses lamport thresholds matching similar swap sizes.
+ * Any unlisted token falls back to STABLECOIN tiers (charges more, never less).
+ */
+const STABLECOIN_TIERS: FeeTier[] = [
+  { threshold: 0n, bps: 700 }, // < $1
+  { threshold: 1_000_000n, bps: 700 }, // $1–$10
+  { threshold: 10_000_000n, bps: 500 }, // $10–$20
+  { threshold: 20_000_000n, bps: 300 }, // $20–$50
+  { threshold: 50_000_000n, bps: 200 }, // $50–$200
+  { threshold: 200_000_000n, bps: 100 }, // $200–$1000
+  { threshold: 1_000_000_000n, bps: 50 }, // $1000+
+];
+
+const JUP_TIERS: FeeTier[] = [
+  { threshold: 0n, bps: 700 }, // < ~$1 (< 2 JUP)
+  { threshold: 2_000_000n, bps: 700 }, // ~$1–$10
+  { threshold: 20_000_000n, bps: 500 }, // ~$10–$20
+  { threshold: 40_000_000n, bps: 300 }, // ~$20–$50
+  { threshold: 100_000_000n, bps: 200 }, // ~$50–$200
+  { threshold: 400_000_000n, bps: 100 }, // ~$200–$1000
+  { threshold: 2_000_000_000n, bps: 50 }, // ~$1000+
+];
+
+// SOL/wSOL: 1 SOL = 1_000_000_000 lamports, assumed ~$130
+const SOL_TIERS: FeeTier[] = [
+  { threshold: 0n, bps: 700 }, // < 0.1 SOL (~$13)
+  { threshold: 100_000_000n, bps: 500 }, // 0.1–0.2 SOL (~$13–$26)
+  { threshold: 200_000_000n, bps: 300 }, // 0.2–0.5 SOL (~$26–$65)
+  { threshold: 500_000_000n, bps: 200 }, // 0.5–2 SOL (~$65–$260)
+  { threshold: 2_000_000_000n, bps: 100 }, // 2–10 SOL (~$260–$1300)
+  { threshold: 10_000_000_000n, bps: 50 }, // 10+ SOL (~$1300+)
+];
+
+const TOKEN_FEE_TIERS: Record<string, FeeTier[]> = {
+  // USDC
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: STABLECOIN_TIERS,
+  // USDT
+  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: STABLECOIN_TIERS,
+  // USD1
+  USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB: STABLECOIN_TIERS,
+  // JUP
+  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: JUP_TIERS,
+  // Wrapped SOL
+  So11111111111111111111111111111111111111112: SOL_TIERS,
+  // Native SOL (all zeros)
+  "11111111111111111111111111111111": SOL_TIERS,
+};
+
+/** Returns the fee in bps for a given output amount and dest mint. */
+function getSwapFeeBps(outputAmount: bigint, destMintAddress: string): number {
+  const tiers = TOKEN_FEE_TIERS[destMintAddress] ?? STABLECOIN_TIERS;
+  let feeBps = tiers[0].bps;
+  for (const tier of tiers) {
+    if (outputAmount >= tier.threshold) feeBps = tier.bps;
+  }
+  return feeBps;
+}
+
 /** For native SOL pools, SPL operations use WSOL (NATIVE_MINT) */
 function tokenMintFor(mint: PublicKey): PublicKey {
   return mint.equals(PublicKey.default) ? NATIVE_MINT : mint;
@@ -689,8 +759,8 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       return;
     }
 
-    const minAmountOut = BigInt(quote.otherAmountThreshold);
-    console.log(`  Swap in: ${swapAmount}, Min out: ${minAmountOut}`);
+    const jupiterMinOut = BigInt(quote.otherAmountThreshold);
+    console.log(`  Swap in: ${swapAmount}, Jupiter min out: ${jupiterMinOut}`);
 
     // Executor PDA - includes relayer key (AUDIT-001 fix)
     const [executorPDA] = deriveSwapExecutorPDA(
@@ -724,7 +794,22 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       return Uint8Array.from(createHash("sha256").update(swapData).digest());
     })(); // MEDIUM-001: commit swap_data to prevent relayer substitution
 
-    // Prepare Notes
+    // Dynamic fee based on dest token tier schedule
+    const dynamicFeeBps = getSwapFeeBps(
+      jupiterMinOut,
+      destPool.mint.toBase58(),
+    );
+    const relayerFee = (jupiterMinOut * BigInt(dynamicFeeBps)) / 10000n;
+    // After-fee amount: used as both destAmount and minAmountOut in ZK circuit
+    // (circuit enforces destAmount >= minAmountOut, so they must be equal)
+    const minAmountOut = jupiterMinOut - relayerFee;
+    console.log(
+      `  Dynamic Fee Tier: ${dynamicFeeBps} bps (${
+        dynamicFeeBps / 100
+      }%) for ${destName} output of ${jupiterMinOut}, fee=${relayerFee}, after-fee minOut=${minAmountOut}`,
+    );
+
+    // Prepare Notes — destAmount = minAmountOut = jupiterMinOut - fee
     const destAmount = minAmountOut;
     const destBlinding = randomBytes32();
     const destCommitment = computeCommitment(
@@ -786,8 +871,6 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       destAmount,
     );
 
-    // Fee: 0.5% of output
-    const relayerFee = (minAmountOut * 50n) / 10000n;
     const extData = {
       recipient: payer.publicKey,
       relayer: payer.publicKey,
@@ -875,14 +958,14 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
 
     const swapIx = await (program.methods as any)
       .transactSwap(
-        proof,
-        Array.from(root),
         0,
         sourcePool.mint,
         Array.from(nullifier),
         Array.from(dummyNullifier),
         0,
         destPool.mint,
+        proof,
+        Array.from(root),
         Array.from(changeCommitment),
         Array.from(destCommitment),
         swapParams,
@@ -1048,9 +1131,14 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
 
     console.log(`\n💰 TOKEN OUTPUT & FEES:`);
     console.log(`  Swap Input Amount: ${swapAmount} ${sourceName}`);
-    console.log(`  Expected Min Output: ${minAmountOut} ${destName}`);
+    console.log(`  Jupiter Min Output: ${jupiterMinOut} ${destName}`);
+    console.log(
+      `  After-Fee Min Output (circuit): ${minAmountOut} ${destName}`,
+    );
     console.log(`  Actual Output to Vault: ${destVaultChange} ${destName}`);
-    console.log(`  Fee (0.5% of min out): ${relayerFee} ${destName}`);
+    console.log(
+      `  Fee (${dynamicFeeBps} bps of jupiter out): ${relayerFee} ${destName}`,
+    );
     console.log(`  Actual Fee Collected: ${relayerChange} ${destName}`);
     console.log(
       `  Fee Match: ${
@@ -1063,8 +1151,8 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     console.log(`\n🔍 VERIFICATION:`);
     console.log(`  Total Output (vault + fee): ${totalOutput} ${destName}`);
     console.log(
-      `  Min Amount Out Met: ${
-        totalOutput >= minAmountOut ? "✅ YES" : "❌ NO"
+      `  Jupiter Min Output Met: ${
+        totalOutput >= jupiterMinOut ? "✅ YES" : "❌ NO"
       }`,
     );
     console.log(

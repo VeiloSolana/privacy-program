@@ -3,7 +3,6 @@ use anchor_lang::solana_program::sysvar::instructions::{
     load_current_index_checked,
     load_instruction_at_checked,
 };
-use sha2::{ Sha256, Digest };
 use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{ self, CloseAccount, Transfer, SyncNative };
@@ -166,8 +165,10 @@ pub fn fund_native_source(
 
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // Anchor discriminator = sha256("global:transact_swap")[0..8]
-    let transact_swap_disc: [u8; 8] = Sha256::digest(b"global:transact_swap")[..8]
+    // Anchor discriminator = solana_sha256_hasher::hash("global:transact_swap")[0..8]
+    let hash = solana_sha256_hasher::hash(b"global:transact_swap");
+    let transact_swap_disc: [u8; 8] = hash
+        .to_bytes()[..8]
         .try_into()
         .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
 
@@ -221,16 +222,17 @@ pub fn fund_native_source(
 }
 
 /// Atomic cross-pool swap: source pool → DEX → destination pool
+#[inline(never)]
 pub fn transact_swap<'info>(
     ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
-    proof: SwapProof,
-    source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     dest_tree_id: u16,
     dest_mint: Pubkey,
+    proof: SwapProof,
+    source_root: [u8; 32],
     output_commitment_0: [u8; 32],
     output_commitment_1: [u8; 32],
     swap_params: SwapParams,
@@ -294,10 +296,14 @@ pub fn transact_swap<'info>(
         PrivacyError::ZeroCommitment
     );
 
+    let proof = Box::new(proof);
+    let swap_params = Box::new(swap_params);
+    let ext_data = Box::new(ext_data);
+
     let swap_params_hash: [u8; 32] = swap_params.hash()?;
     let ext_data_hash_val = ext_data.hash()?;
 
-    let public_inputs = SwapPublicInputs {
+    let public_inputs = Box::new(SwapPublicInputs {
         source_root,
         swap_params_hash,
         ext_data_hash: ext_data_hash_val,
@@ -306,9 +312,9 @@ pub fn transact_swap<'info>(
         input_nullifiers,
         output_commitments,
         swap_amount,
-    };
+    });
 
-    verify_swap_transaction_groth16(proof, &public_inputs)?;
+    verify_swap_transaction_groth16(&proof, &public_inputs)?;
 
     // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;
@@ -547,7 +553,7 @@ pub fn transact_swap<'info>(
 
         msg!("Raydium CPMM: Executing Swap...");
 
-        let account_infos = &[
+        let account_infos = vec![
             executor.to_account_info(),
             remaining[0].to_account_info(),
             remaining[1].to_account_info(),
@@ -560,10 +566,10 @@ pub fn transact_swap<'info>(
             remaining[5].to_account_info(),
             remaining[6].to_account_info(),
             remaining[7].to_account_info(),
-            ctx.accounts.swap_program.to_account_info(),
+            ctx.accounts.swap_program.to_account_info()
         ];
 
-        invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
     } else if is_amm {
         // Raydium AMM V4 Swap
         // Accounts layout in remaining_accounts:
@@ -654,8 +660,6 @@ pub fn transact_swap<'info>(
             ctx.accounts.jupiter_event_authority.key() == crate::JUPITER_EVENT_AUTHORITY,
             PrivacyError::Unauthorized
         );
-
-        msg!("Jupiter Event Authority: {}", ctx.accounts.jupiter_event_authority.key());
 
         let mut jupiter_accounts = Vec::new();
         let mut account_infos = Vec::new();
@@ -775,11 +779,8 @@ pub fn transact_swap<'info>(
 
         // Verify swap_data matches the hash committed in the ZK proof to prevent
         // relayer substitution of swap instructions.
-        {
-            use sha2::{ Sha256, Digest };
-            let computed: [u8; 32] = Sha256::digest(&swap_data).into();
-            require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
-        }
+        let computed: [u8; 32] = solana_sha256_hasher::hash(&swap_data).to_bytes();
+        require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
 
         // Construct instruction
         let swap_ix = Instruction {

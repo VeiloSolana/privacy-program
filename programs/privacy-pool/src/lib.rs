@@ -650,16 +650,12 @@ fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
 /// All atomic - succeeds or reverts entirely
 #[derive(Accounts)]
 #[instruction(
-    proof: zk::SwapProof,
-    source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     dest_tree_id: u16,
     dest_mint: Pubkey,
-    output_commitment_0: [u8; 32],
-    output_commitment_1: [u8; 32],
 )]
 pub struct TransactSwap<'info> {
     // ---- Source Pool (tokens being swapped FROM) ----
@@ -881,10 +877,7 @@ pub struct FundNativeSource<'info> {
     pub source_vault: Box<Account<'info, Vault>>,
 
     /// Source pool config — checked for vault_bump and relayer authorisation.
-    #[account(
-        seeds = [b"privacy_config_v3", source_mint.as_ref()],
-        bump = source_config.bump
-    )]
+    #[account(seeds = [b"privacy_config_v3", source_mint.as_ref()], bump = source_config.bump)]
     pub source_config: Box<Account<'info, PrivacyConfig>>,
 
     /// WSOL mint (So111…1112) — required for executor_source_token ATA constraint.
@@ -1470,7 +1463,7 @@ pub mod privacy_pool {
         source_mint: Pubkey,
         dest_mint: Pubkey,
         input_nullifier_0: [u8; 32],
-        swap_amount: u64,
+        swap_amount: u64
     ) -> Result<()> {
         swap::fund_native_source(ctx, source_mint, dest_mint, input_nullifier_0, swap_amount)
     }
@@ -1480,14 +1473,14 @@ pub mod privacy_pool {
     /// All in one transaction - see swap.rs for implementation details
     pub fn transact_swap<'info>(
         ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
-        proof: zk::SwapProof,
-        source_root: [u8; 32],
         source_tree_id: u16,
         source_mint: Pubkey,
         input_nullifier_0: [u8; 32],
         input_nullifier_1: [u8; 32],
         dest_tree_id: u16,
         dest_mint: Pubkey,
+        proof: zk::SwapProof,
+        source_root: [u8; 32],
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
         swap_params: SwapParams,
@@ -1497,14 +1490,14 @@ pub mod privacy_pool {
     ) -> Result<()> {
         swap::transact_swap(
             ctx,
-            proof,
-            source_root,
             source_tree_id,
             source_mint,
             input_nullifier_0,
             input_nullifier_1,
             dest_tree_id,
             dest_mint,
+            proof,
+            source_root,
             output_commitment_0,
             output_commitment_1,
             swap_params,
@@ -1938,7 +1931,9 @@ pub enum PrivacyError {
     JupiterInvalidInstruction,
     #[msg("Swap params mints do not match instruction mints")]
     InvalidSwapParams,
-    #[msg("fund_native_source must be immediately followed by transact_swap in the same transaction")]
+    #[msg(
+        "fund_native_source must be immediately followed by transact_swap in the same transaction"
+    )]
     MissingTransactSwapInstruction,
     #[msg("Transaction deadline has expired")]
     DeadlineExpired,
