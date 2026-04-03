@@ -928,14 +928,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             sol.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             usdc.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,
@@ -1349,14 +1349,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             usdc.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             sol.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(solOutputCommitment),
             swapParams,
@@ -1965,14 +1965,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             sol.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             usdt.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,
@@ -2383,14 +2383,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             usdt.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             sol.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(solOutputCommitment),
             swapParams,
@@ -3001,14 +3001,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             sol.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             jup.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,
@@ -3417,14 +3417,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             jup.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             sol.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(solOutputCommitment),
             swapParams,
@@ -4030,14 +4030,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             sol.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             usd1.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,
@@ -4448,14 +4448,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             usd1.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             sol.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(solOutputCommitment),
             swapParams,
@@ -5097,14 +5097,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
 
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             sol.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             usdc.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,
@@ -5519,14 +5519,14 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       try {
         const swapIx = await (program.methods as any)
           .transactSwap(
-            proof,
-            Array.from(root),
             0,
             usdc.mint,
             Array.from(note.nullifier),
             Array.from(dummyNullifier),
             0,
             jup.mint,
+            proof,
+            Array.from(root),
             Array.from(changeCommitment),
             Array.from(destCommitment),
             swapParams,

@@ -38,3 +38,4 @@ num-bigint = "0.4"
 solana-bn254 = { version = "2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 proc-macro2 = "=1.0.94"
+solana-sha256-hasher = "2.3.0"

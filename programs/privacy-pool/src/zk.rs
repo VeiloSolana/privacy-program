@@ -243,9 +243,9 @@ fn u64_to_field_be(value: u64) -> [u8; 32] {
 /// 9. destCommitment     - Destination output commitment (dest token)
 /// 10. swapAmount        - Amount being swapped (public for DEX CPI)
 #[inline(never)]
-pub fn verify_swap_transaction_groth16(proof: SwapProof, inputs: &SwapPublicInputs) -> Result<()> {
+pub fn verify_swap_transaction_groth16(proof: &SwapProof, inputs: &SwapPublicInputs) -> Result<()> {
     // ----- 1. Build public input array (10 inputs) -----
-    let mut public_inputs: [[u8; 32]; 10] = [[0u8; 32]; 10];
+    let mut public_inputs = Box::new([[0u8; 32]; 10]);
 
     // 1. sourceRoot
     public_inputs[0] = reduce_to_field_be(inputs.source_root);

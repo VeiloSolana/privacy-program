@@ -968,14 +968,14 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Execute swap - build instruction for versioned transaction with ALT
     const swapIx = await (program.methods as any)
       .transactSwap(
-        proof,
-        Array.from(root),
         0, // source_tree_id
         SOL_MINT,
         Array.from(nullifier),
         Array.from(dummyNullifier),
         0, // dest_tree_id
         USDC_MINT,
+        proof,
+        Array.from(root),
         Array.from(changeCommitment),
         Array.from(destCommitment),
         swapParams,
