@@ -68,7 +68,6 @@ fn reduce_to_field_be(bytes: [u8; 32]) -> [u8; 32] {
 }
 
 /// Compare two 32-byte big-endian values: returns true if a < b
-#[inline]
 fn is_less_than(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in 0..32 {
         if a[i] < b[i] {
@@ -82,7 +81,6 @@ fn is_less_than(a: &[u8; 32], b: &[u8; 32]) -> bool {
 }
 
 /// Subtract b from a (a >= b assumed, returns a - b)
-#[inline]
 fn subtract_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     let mut result = [0u8; 32];
     let mut borrow = 0i32;

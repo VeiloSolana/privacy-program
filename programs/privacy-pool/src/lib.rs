@@ -333,6 +333,7 @@ impl ExtData {
 
     /// Compute Poseidon hash of external data
     /// Returns 32-byte field element
+    #[inline(never)]
     pub fn hash(&self) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
 
@@ -1458,6 +1459,7 @@ pub mod privacy_pool {
     /// failure in `transact_swap` reverts the vault debit atomically.
     ///
     /// Only for native SOL source pools.  SPL-source swaps use `transact_swap` directly.
+    #[inline(never)]
     pub fn fund_native_source(
         ctx: Context<FundNativeSource>,
         source_mint: Pubkey,
@@ -1471,6 +1473,7 @@ pub mod privacy_pool {
     /// Atomic cross-pool private swap
     /// Consumes notes from source pool, swaps via Raydium CPMM (no Serum), creates notes in dest pool
     /// All in one transaction - see swap.rs for implementation details
+    #[inline(never)]
     pub fn transact_swap<'info>(
         ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
         source_tree_id: u16,
@@ -1511,6 +1514,7 @@ pub mod privacy_pool {
 // ---- Helper Functions ----
 
 /// Mark a nullifier as spent. Metadata is emitted via event.
+#[inline(never)]
 pub fn mark_nullifier_spent(
     marker: &mut Account<NullifierMarker>,
     nullifier_set: &mut Account<NullifierSet>,
@@ -1544,6 +1548,7 @@ pub fn mark_nullifier_spent(
 /// public_amount > 0: DEPOSIT (user -> vault, funds entering pool)
 /// public_amount < 0: WITHDRAWAL (vault -> recipient + relayer, funds leaving pool)
 /// public_amount = 0: PRIVATE TRANSFER (no SOL/token crosses pool boundary)
+#[inline(never)]
 fn handle_public_amount<'info>(
     config: &mut PrivacyConfig,
     _global_config: &GlobalConfig,
