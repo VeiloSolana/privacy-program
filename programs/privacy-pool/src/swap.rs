@@ -99,6 +99,7 @@ impl SwapParams {
         result
     }
 
+    #[inline(never)]
     pub fn hash(&self) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
 
@@ -147,6 +148,7 @@ pub struct SwapPublicInputs {
 ///
 /// This instruction must be the FIRST instruction in an atomic tx whose SECOND instruction
 /// is `transact_swap`.  Atomicity guarantees the vault debit reverts if the swap fails.
+#[inline(never)]
 pub fn fund_native_source(
     ctx: Context<FundNativeSource>,
     source_mint: Pubkey,
