@@ -658,6 +658,10 @@ describe("Privacy Pool Jupiter Swap", () => {
           refund: extData.refund,
         },
         proof,
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
       )
       .accounts({
         config: sourceConfig,
@@ -987,6 +991,7 @@ describe("Privacy Pool Jupiter Swap", () => {
           fee: extData.fee,
           refund: extData.refund,
         },
+        null,
       )
       .accounts({
         sourceConfig,

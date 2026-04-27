@@ -12,6 +12,7 @@
     "test:amm-various-jup": "mocha -r ts-node/register -t 1000000 'tests/raydium-amm-swap-various-jup.test.ts'",
     "test:spl": "mocha -r ts-node/register -t 1000000 'tests/privacy-pool-spl.test.ts'",
     "test:multi-tree": "mocha -r ts-node/register -t 1000000 'tests/multi-tree.test.ts'",
+    "test:note-ciphers": "mocha -r ts-node/register -t 1000000 'tests/note-ciphers.test.ts'",
     "deploy:devnet": "ts-node scripts/deploy-devnet.ts",
     "check-pool": "ts-node scripts/check-pool.ts",
     "init-global-config": "ts-node scripts/initialize-global-config.ts",

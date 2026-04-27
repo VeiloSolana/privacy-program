@@ -514,6 +514,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: tokenConfig,
@@ -764,6 +765,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: tokenConfig,
@@ -986,6 +988,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
+        null,
       )
       .accounts({
         config: tokenConfig,
@@ -1161,6 +1164,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
+        null,
       )
       .accounts({
         config: tokenConfig,
@@ -1506,6 +1510,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
+        null,
       )
       .accounts({
         config: tokenConfig,
@@ -1657,6 +1662,7 @@ describe("Privacy Pool - SPL Token Support", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
+        null,
       )
       .accounts({
         config: tokenConfig,
@@ -2004,6 +2010,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: tokenConfig,

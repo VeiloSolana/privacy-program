@@ -409,6 +409,7 @@ async function doTransact(
       new BN(9_999_999_999), // deadline far future
       opts.extData,
       opts.proof,
+        null,
     )
     .accounts({
       config: opts.config,

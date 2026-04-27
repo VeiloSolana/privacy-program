@@ -617,6 +617,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           refund: extData.refund,
         },
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -994,6 +995,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           new BN(SWAP_AMOUNT.toString()),
           swapData,
           extData,
+        null,
         )
         .accounts({
           sourceConfig,
@@ -1275,6 +1277,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -1451,6 +1454,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: destConfig,
@@ -1799,6 +1803,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           new BN(swapAmount.toString()),
           swapData,
           extData,
+        null,
         )
         .accounts({
           sourceConfig: destConfig, // USDC pool config

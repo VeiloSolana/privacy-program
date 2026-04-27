@@ -607,6 +607,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: sol.config,
@@ -733,8 +734,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: sol.mint,
-        destMint: usdc.mint,
         destAmount: new BN(EXPECTED_USDC_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -942,6 +941,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -1231,8 +1231,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut: minSolOut,
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: usdc.mint,
-        destMint: sol.mint,
         destAmount: new BN(expectedSol.toString()),
         swapDataHash: Buffer.alloc(32),
       };
@@ -1363,6 +1361,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: usdc.config,
@@ -1648,6 +1647,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: sol.config,
@@ -1771,8 +1771,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: sol.mint,
-        destMint: usdt.mint,
         destAmount: new BN(EXPECTED_USDT_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -1979,6 +1977,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -2265,8 +2264,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut: minSolOut,
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: usdt.mint,
-        destMint: sol.mint,
         destAmount: new BN(expectedSol.toString()),
         swapDataHash: Buffer.alloc(32),
       };
@@ -2397,6 +2394,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: usdt.config,
@@ -2684,6 +2682,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: sol.config,
@@ -2807,8 +2806,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: sol.mint,
-        destMint: jup.mint,
         destAmount: new BN(EXPECTED_JUP_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -3015,6 +3012,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -3299,8 +3297,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut: minSolOut,
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: jup.mint,
-        destMint: sol.mint,
         destAmount: new BN(expectedSol.toString()),
         swapDataHash: Buffer.alloc(32),
       };
@@ -3431,6 +3427,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: jup.config,
@@ -3713,6 +3710,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: sol.config,
@@ -3836,8 +3834,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: sol.mint,
-        destMint: usd1.mint,
         destAmount: new BN(EXPECTED_USD1_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -4044,6 +4040,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -4330,8 +4327,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut: minSolOut,
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: usd1.mint,
-        destMint: sol.mint,
         destAmount: new BN(expectedSol.toString()),
         swapDataHash: Buffer.alloc(32),
       };
@@ -4462,6 +4457,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: usd1.config,
@@ -4781,6 +4777,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+        null,
         )
         .accounts({
           config: sol.config,
@@ -4907,8 +4904,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: sol.mint,
-        destMint: usdc.mint,
         destAmount: new BN(EXPECTED_USDC_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -5111,6 +5106,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SOL_SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -5355,8 +5351,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
       const swapParams = {
         minAmountOut,
         deadline,
-        sourceMint: usdc.mint,
-        destMint: jup.mint,
         destAmount: new BN(EXPECTED_JUP_OUT.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -5533,6 +5527,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(USDC_SWAP_AMOUNT),
             swapData,
             extData,
+        null,
           )
           .accounts({
             sourceConfig: usdc.config,
