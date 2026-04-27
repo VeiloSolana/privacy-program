@@ -457,6 +457,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
           refund: extData.refund,
         },
         proof,
+        null,
       )
       .accounts({
         config: pool.config,
@@ -856,8 +857,6 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     const swapParams = {
       minAmountOut: new BN(minAmountOut.toString()),
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-      sourceMint: sourcePool.mint,
-      destMint: destPool.mint,
       destAmount: new BN(destAmount.toString()),
       swapDataHash: Buffer.from(swapDataHash), // MEDIUM-001
     };
@@ -972,6 +971,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
         new BN(swapAmount.toString()),
         swapData,
         extData,
+        null,
       )
       .accounts({
         sourceConfig: sourcePool.config,

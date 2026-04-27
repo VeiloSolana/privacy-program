@@ -32,11 +32,6 @@ pub const MAX_MERKLE_TREES: u16 = 10000;
 pub const MAX_FEE_BPS: u16 = 100;
 
 /// Maximum swap fee basis points: 1000 = 10%
-/// Swap fees are higher than withdrawal fees to account for:
-/// - DEX slippage and price impact on large swaps
-/// - MEV protection costs
-/// - Additional complexity of cross-pool atomic operations
-/// Note: Users can always exit via standard withdrawal at lower fees (max 1%)
 pub const MAX_SWAP_FEE_BPS: u16 = 1000;
 
 /// SPL token whitelist enforcement — MUST remain false in production.
@@ -929,7 +924,6 @@ pub mod privacy_pool {
 
         MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
-        // Bumps
         cfg.bump = ctx.bumps.config;
         cfg.vault_bump = ctx.bumps.vault;
         vault.bump = ctx.bumps.vault;
@@ -944,7 +938,6 @@ pub mod privacy_pool {
         cfg.min_withdrawal_fee = 1_000_000; // Default: 0.001 SOL minimum fee
         cfg.fee_error_margin_bps = 500; // Default: 5% margin to prevent timing attacks
 
-        // UTXO model: no fixed denominations
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
 
@@ -1001,13 +994,9 @@ pub mod privacy_pool {
         let caller = relayer.key();
         require!(cfg.admin == caller || cfg.is_relayer(&caller), PrivacyError::RelayerNotAllowed);
 
-        // Validate tree_id is sequential
         require!(tree_id == cfg.num_trees, PrivacyError::InvalidTreeId);
-
-        // Validate max trees not exceeded
         require!(cfg.num_trees < MAX_MERKLE_TREES, PrivacyError::TooManyTrees);
 
-        // Initialize the new tree
         let mut tree = ctx.accounts.note_tree.load_init()?;
         tree.authority = cfg.admin;
         tree.height = MERKLE_TREE_HEIGHT as u8;
@@ -1017,7 +1006,6 @@ pub mod privacy_pool {
 
         MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
-        // Update pool config
         cfg.num_trees = cfg.num_trees.checked_add(1).ok_or(PrivacyError::ArithmeticOverflow)?;
 
         Ok(())
@@ -1138,8 +1126,19 @@ pub mod privacy_pool {
         output_commitment_1: [u8; 32],
         deadline: i64,
         ext_data: ExtData,
-        proof: zk::TransactionProof
+        proof: zk::TransactionProof,
+        note_ciphers: Option<NoteCiphers>
     ) -> Result<()> {
+        let (note0_epk, note0_enc, note1_epk, note1_enc) = match note_ciphers {
+            Some(c) =>
+                (
+                    c.note0_ephemeral_key,
+                    c.note0_encrypted,
+                    c.note1_ephemeral_key,
+                    c.note1_encrypted,
+                ),
+            None => ([0u8; 32], [0u8; 80], [0u8; 32], [0u8; 80]),
+        };
         // Combine individual nullifiers/commitments into arrays for processing
         let input_nullifiers = [input_nullifier_0, input_nullifier_1];
         let output_commitments = [output_commitment_0, output_commitment_1];
@@ -1423,6 +1422,8 @@ pub mod privacy_pool {
             timestamp,
             mint_address,
             tree_id: output_tree_id,
+            ephemeral_public_key: note0_epk,
+            encrypted_blob: note0_enc,
         });
         emit!(CommitmentEvent {
             commitment: output_commitments[1],
@@ -1431,6 +1432,8 @@ pub mod privacy_pool {
             timestamp,
             mint_address,
             tree_id: output_tree_id,
+            ephemeral_public_key: note1_epk,
+            encrypted_blob: note1_enc,
         });
 
         // 10. Handle public amount (deposits/withdrawals)
@@ -1489,7 +1492,8 @@ pub mod privacy_pool {
         swap_params: SwapParams,
         swap_amount: u64,
         swap_data: Vec<u8>,
-        ext_data: ExtData
+        ext_data: ExtData,
+        note_ciphers: Option<NoteCiphers>
     ) -> Result<()> {
         swap::transact_swap(
             ctx,
@@ -1506,7 +1510,8 @@ pub mod privacy_pool {
             swap_params,
             swap_amount,
             swap_data,
-            ext_data
+            ext_data,
+            note_ciphers
         )
     }
 }
@@ -1793,6 +1798,19 @@ fn handle_public_amount<'info>(
 
 // ---- Events ----
 
+/// Encrypted note data passed by the relayer so users can recover funds
+/// from chain history alone if the off-chain note DB is lost.
+/// `ephemeral_public_key`: fresh Curve25519 pubkey for ECDH — reveals nothing
+/// `encrypted_blob`: NaCl secretbox of (blinding[32] || amount[8]); 40-byte
+///   plaintext → 80-byte ciphertext (24-byte nonce + 16-byte MAC)
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct NoteCiphers {
+    pub note0_ephemeral_key: [u8; 32],
+    pub note0_encrypted: [u8; 80],
+    pub note1_ephemeral_key: [u8; 32],
+    pub note1_encrypted: [u8; 80],
+}
+
 #[event]
 pub struct CommitmentEvent {
     pub commitment: [u8; 32],
@@ -1801,6 +1819,11 @@ pub struct CommitmentEvent {
     pub timestamp: i64,
     pub mint_address: Pubkey,
     pub tree_id: u16,
+    /// Ephemeral Curve25519 public key for ECDH — generated fresh per note
+    pub ephemeral_public_key: [u8; 32],
+    /// NaCl secretbox ciphertext of (blinding[32] || amount[8])
+    /// Zero bytes when relayer passes None (tests / non-recovery mode)
+    pub encrypted_blob: [u8; 80],
 }
 
 #[event]
