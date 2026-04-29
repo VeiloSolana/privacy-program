@@ -760,7 +760,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           refund: extData.refund,
         },
         proof,
-        null,
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
       )
       .accounts({
         config: sourceConfig,
@@ -899,6 +902,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const swapParams = {
       minAmountOut: new BN(1_000_000),
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
+      sourceMint: sourceTokenMint,
+      destMint: destTokenMint,
       destAmount: new BN(1_000_000),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
@@ -909,17 +914,15 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     expect(swapParams.deadline.toNumber()).to.be.greaterThan(
       Math.floor(Date.now() / 1000),
     );
-    expect(swapParams.sourceMint.toBase58()).to.not.equal(
-      swapParams.destMint.toBase58(),
-    );
+    expect(sourceTokenMint.toBase58()).to.not.equal(destTokenMint.toBase58());
 
     console.log("\n✅ Swap params validated:");
     console.log(`   Min output: ${swapParams.minAmountOut.toString()}`);
     console.log(`   Deadline: ${swapParams.deadline.toString()}`);
     console.log(
-      `   Source→Dest: ${swapParams.sourceMint
+      `   Source→Dest: ${sourceTokenMint
         .toBase58()
-        .slice(0, 8)}...→${swapParams.destMint.toBase58().slice(0, 8)}...`,
+        .slice(0, 8)}...→${destTokenMint.toBase58().slice(0, 8)}...`,
     );
   });
 
@@ -1299,6 +1302,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const swapParams = {
       minAmountOut: new BN(minAmountOutBigInt.toString()),
       deadline: new BN(deadlineBigInt.toString()),
+      sourceMint: sourceTokenMint,
+      destMint: destTokenMint,
       destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
@@ -2144,7 +2149,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
-        null,
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
       )
       .accounts({
         config: destConfig,
@@ -2581,7 +2589,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
-        null,
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
       )
       .accounts({
         config: sourceConfig,
@@ -2843,7 +2854,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          Array.from(new Uint8Array(32)),
+          Array.from(new Uint8Array(80)),
+          Array.from(new Uint8Array(32)),
+          Array.from(new Uint8Array(80)),
         )
         .accounts({
           config: destConfig,
@@ -3270,7 +3284,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             refund: extData.refund,
           },
           proof,
-        null,
+          Array.from(new Uint8Array(32)),
+          Array.from(new Uint8Array(80)),
+          Array.from(new Uint8Array(32)),
+          Array.from(new Uint8Array(80)),
         )
         .accounts({
           config: sourceConfig,
@@ -3537,6 +3554,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const swapParams = {
         minAmountOut: new BN(minAmountOutBigInt.toString()),
         deadline: new BN(deadlineBigInt.toString()),
+        sourceMint: SOL_MINT,
+        destMint: USDT_MINT,
         destAmount: new BN(destAmount.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -3612,7 +3631,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           new BN(USDT_SWAP_AMOUNT.toString()),
           swapData,
           extData,
-        null,
+          null,
         )
         .accounts({
           sourceConfig,
@@ -4084,7 +4103,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           new BN(note.amount.toString()), // swap_amount
           swapData,
           extData,
-        null,
+          null,
         )
         .accounts({
           sourceConfig: usdtConfig,
