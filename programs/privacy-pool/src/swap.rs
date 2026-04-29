@@ -231,10 +231,17 @@ pub fn transact_swap<'info>(
     ext_data: ExtData,
     note_ciphers: Option<crate::NoteCiphers>
 ) -> Result<()> {
-    let (note0_epk, note0_enc, note1_epk, note1_enc) = match note_ciphers {
+    let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
         Some(c) =>
-            (c.note0_ephemeral_key, c.note0_encrypted, c.note1_ephemeral_key, c.note1_encrypted),
-        None => ([0u8; 32], [0u8; 80], [0u8; 32], [0u8; 80]),
+            (
+                c.note0_ephemeral_key,
+                c.note0_encrypted,
+                c.note0_view_tag,
+                c.note1_ephemeral_key,
+                c.note1_encrypted,
+                c.note1_view_tag,
+            ),
+        None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
     };
     // Prevents arbitrary CPI to malicious programs
     require!(
@@ -901,6 +908,7 @@ pub fn transact_swap<'info>(
         tree_id: dest_tree_id,
         ephemeral_public_key: note1_epk,
         encrypted_blob: note1_enc,
+        view_tag: note1_vt,
     });
 
     let mut source_tree = ctx.accounts.source_tree.load_mut()?;
@@ -924,6 +932,7 @@ pub fn transact_swap<'info>(
         tree_id: source_tree_id,
         ephemeral_public_key: note0_epk,
         encrypted_blob: note0_enc,
+        view_tag: note0_vt,
     });
 
     // Close executor token accounts (CPIs — must come before any raw lamport edits)
