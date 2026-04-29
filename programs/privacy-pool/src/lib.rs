@@ -1129,15 +1129,17 @@ pub mod privacy_pool {
         proof: zk::TransactionProof,
         note_ciphers: Option<NoteCiphers>
     ) -> Result<()> {
-        let (note0_epk, note0_enc, note1_epk, note1_enc) = match note_ciphers {
+        let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
             Some(c) =>
                 (
                     c.note0_ephemeral_key,
                     c.note0_encrypted,
+                    c.note0_view_tag,
                     c.note1_ephemeral_key,
                     c.note1_encrypted,
+                    c.note1_view_tag,
                 ),
-            None => ([0u8; 32], [0u8; 80], [0u8; 32], [0u8; 80]),
+            None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
         };
         // Combine individual nullifiers/commitments into arrays for processing
         let input_nullifiers = [input_nullifier_0, input_nullifier_1];
@@ -1424,6 +1426,7 @@ pub mod privacy_pool {
             tree_id: output_tree_id,
             ephemeral_public_key: note0_epk,
             encrypted_blob: note0_enc,
+            view_tag: note0_vt,
         });
         emit!(CommitmentEvent {
             commitment: output_commitments[1],
@@ -1434,6 +1437,7 @@ pub mod privacy_pool {
             tree_id: output_tree_id,
             ephemeral_public_key: note1_epk,
             encrypted_blob: note1_enc,
+            view_tag: note1_vt,
         });
 
         // 10. Handle public amount (deposits/withdrawals)
@@ -1807,8 +1811,10 @@ fn handle_public_amount<'info>(
 pub struct NoteCiphers {
     pub note0_ephemeral_key: [u8; 32],
     pub note0_encrypted: [u8; 80],
+    pub note0_view_tag: u8,
     pub note1_ephemeral_key: [u8; 32],
     pub note1_encrypted: [u8; 80],
+    pub note1_view_tag: u8,
 }
 
 #[event]
@@ -1824,6 +1830,8 @@ pub struct CommitmentEvent {
     /// NaCl secretbox ciphertext of (blinding[32] || amount[8])
     /// Zero bytes when relayer passes None (tests / non-recovery mode)
     pub encrypted_blob: [u8; 80],
+    /// sha256(X25519SharedSecret)[0] — one-byte scan filter; 0 when None
+    pub view_tag: u8,
 }
 
 #[event]
