@@ -29,10 +29,11 @@ url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"
-wallet = "./keys/deployer-keypair.json"
+wallet = "/Users/admin/.config/solana/id.json"
+# wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:amm-various-jup"
+test = "npm run test:note-ciphers"
 
 [test]
 startup_wait = 60000

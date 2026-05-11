@@ -3,7 +3,6 @@ use anchor_lang::solana_program::sysvar::instructions::{
     load_current_index_checked,
     load_instruction_at_checked,
 };
-use sha2::{ Sha256, Digest };
 use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{ self, CloseAccount, Transfer, SyncNative };
@@ -40,13 +39,13 @@ impl SwapExecutor {
     pub const LEN: usize = 8 + 32 + 32 + 32 + 1 + 8 + 1 + 32;
 }
 
-/// Swap parameters committed to in the ZK proof
+/// Swap parameters committed to in the ZK proof.
+/// `source_mint` and `dest_mint` are passed as separate `transact_swap` args
+/// and supplied to `hash()` at call time.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct SwapParams {
     pub min_amount_out: u64,
     pub deadline: i64,
-    pub source_mint: Pubkey,
-    pub dest_mint: Pubkey,
     /// Amount of destination tokens the user commits to receiving.
     /// Included in swapParamsHash — cryptographically binds the ZK circuit's
     /// destAmount to the on-chain vault deposit, preventing an attacker from
@@ -100,12 +99,13 @@ impl SwapParams {
         result
     }
 
-    pub fn hash(&self) -> Result<[u8; 32]> {
+    #[inline(never)]
+    pub fn hash(&self, source_mint: &Pubkey, dest_mint: &Pubkey) -> Result<[u8; 32]> {
         use light_hasher::Hasher;
 
         // Reduce mints to field elements (pubkeys may exceed Fr modulus)
-        let source_mint_bytes = Self::reduce_to_field(self.source_mint.to_bytes());
-        let dest_mint_bytes = Self::reduce_to_field(self.dest_mint.to_bytes());
+        let source_mint_bytes = Self::reduce_to_field(source_mint.to_bytes());
+        let dest_mint_bytes = Self::reduce_to_field(dest_mint.to_bytes());
 
         let mut min_out_bytes = [0u8; 32];
         min_out_bytes[24..].copy_from_slice(&self.min_amount_out.to_be_bytes());
@@ -141,13 +141,9 @@ pub struct SwapPublicInputs {
     pub swap_amount: u64,
 }
 
-/// Solana ordering rule satisfied because:
-///   - Anchor init pre-flights (create_account + initialize_account CPIs) run BEFORE the
-///     function body  →  CPIs first
-///   - Function body contains ONLY raw lamport edits  →  raw edits last
-///
-/// This instruction must be the FIRST instruction in an atomic tx whose SECOND instruction
-/// is `transact_swap`.  Atomicity guarantees the vault debit reverts if the swap fails.
+/// First instruction of an atomic pair with `transact_swap`.
+/// Creates the executor PDA + WSOL ATA and transfers `swap_amount` from the source vault.
+#[inline(never)]
 pub fn fund_native_source(
     ctx: Context<FundNativeSource>,
     source_mint: Pubkey,
@@ -155,19 +151,17 @@ pub fn fund_native_source(
     input_nullifier_0: [u8; 32],
     swap_amount: u64
 ) -> Result<()> {
-    // Must be a native SOL pool (mint == Pubkey::default())
     require!(!crate::is_token_mint(&source_mint), PrivacyError::InvalidMintAddress);
-
-    // Relayer must be whitelisted in the source pool
     require!(
         ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
-
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // Anchor discriminator = sha256("global:transact_swap")[0..8]
-    let transact_swap_disc: [u8; 8] = Sha256::digest(b"global:transact_swap")[..8]
+    // Anchor discriminator = solana_sha256_hasher::hash("global:transact_swap")[0..8]
+    let hash = solana_sha256_hasher::hash(b"global:transact_swap");
+    let transact_swap_disc: [u8; 8] = hash
+        .to_bytes()[..8]
         .try_into()
         .map_err(|_| error!(PrivacyError::MissingTransactSwapInstruction))?;
 
@@ -202,9 +196,6 @@ pub fn fund_native_source(
     executor.is_prefunded = 1;
     executor.relayer = ctx.accounts.relayer.key();
 
-    // ── Pure raw lamport transfer: vault → executor_source_token ─────────────────────────
-    // This is the ONLY code in the function body; no CPIs appear here.
-    // Anchor's init pre-flights (above) are the CPIs; raw edits come after them.
     **vault_ai.try_borrow_mut_lamports()? = vault_ai
         .lamports()
         .checked_sub(swap_amount)
@@ -221,23 +212,37 @@ pub fn fund_native_source(
 }
 
 /// Atomic cross-pool swap: source pool → DEX → destination pool
+#[inline(never)]
 pub fn transact_swap<'info>(
     ctx: Context<'_, '_, 'info, 'info, TransactSwap<'info>>,
-    proof: SwapProof,
-    source_root: [u8; 32],
     source_tree_id: u16,
     source_mint: Pubkey,
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     dest_tree_id: u16,
     dest_mint: Pubkey,
+    proof: SwapProof,
+    source_root: [u8; 32],
     output_commitment_0: [u8; 32],
     output_commitment_1: [u8; 32],
     swap_params: SwapParams,
     swap_amount: u64,
     swap_data: Vec<u8>,
-    ext_data: ExtData
+    ext_data: ExtData,
+    note_ciphers: Option<crate::NoteCiphers>
 ) -> Result<()> {
+    let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
+        Some(c) =>
+            (
+                c.note0_ephemeral_key,
+                c.note0_encrypted,
+                c.note0_view_tag,
+                c.note1_ephemeral_key,
+                c.note1_encrypted,
+                c.note1_view_tag,
+            ),
+        None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
+    };
     // Prevents arbitrary CPI to malicious programs
     require!(
         ctx.accounts.swap_program.key() == crate::RAYDIUM_CPMM_PROGRAM_ID ||
@@ -258,9 +263,7 @@ pub fn transact_swap<'info>(
     require!(source_tree_id < ctx.accounts.source_config.num_trees, PrivacyError::InvalidTreeId);
     require!(dest_tree_id < ctx.accounts.dest_config.num_trees, PrivacyError::InvalidTreeId);
 
-    // Check relayer is whitelisted in BOTH source and dest pools
-    // This prevents relayers authorized only for one pool from facilitating
-    // swaps across pool boundaries they shouldn't access
+    // Relayer must be whitelisted in both source and dest pools
     require!(
         ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
@@ -272,11 +275,6 @@ pub fn transact_swap<'info>(
 
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= swap_params.deadline, PrivacyError::InvalidPublicAmount);
-
-    // Ensure swap_params mints match instruction mints so the ZK-committed hash
-    // binds to the actual swap direction.
-    require!(swap_params.source_mint == source_mint, PrivacyError::InvalidSwapParams);
-    require!(swap_params.dest_mint == dest_mint, PrivacyError::InvalidSwapParams);
 
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
@@ -294,10 +292,14 @@ pub fn transact_swap<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    let swap_params_hash: [u8; 32] = swap_params.hash()?;
+    let proof = Box::new(proof);
+    let swap_params = Box::new(swap_params);
+    let ext_data = Box::new(ext_data);
+
+    let swap_params_hash: [u8; 32] = swap_params.hash(&source_mint, &dest_mint)?;
     let ext_data_hash_val = ext_data.hash()?;
 
-    let public_inputs = SwapPublicInputs {
+    let public_inputs = Box::new(SwapPublicInputs {
         source_root,
         swap_params_hash,
         ext_data_hash: ext_data_hash_val,
@@ -306,15 +308,13 @@ pub fn transact_swap<'info>(
         input_nullifiers,
         output_commitments,
         swap_amount,
-    };
+    });
 
-    verify_swap_transaction_groth16(proof, &public_inputs)?;
+    verify_swap_transaction_groth16(&proof, &public_inputs)?;
 
-    // Verify root is known
     let source_tree = ctx.accounts.source_tree.load()?;
     require!(MerkleTree::is_known_root(&*source_tree, source_root), PrivacyError::UnknownRoot);
 
-    // Upfront capacity check for both trees
     let source_max_capacity = 1u64 << (source_tree.height as u64);
     let source_remaining = source_max_capacity.saturating_sub(source_tree.next_index);
     require!(source_remaining >= 1, PrivacyError::MerkleTreeFull);
@@ -329,7 +329,6 @@ pub fn transact_swap<'info>(
     require!(!ctx.accounts.source_nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
     require!(!ctx.accounts.source_nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
-    // Mark nullifiers as spent
     crate::mark_nullifier_spent(
         &mut ctx.accounts.source_nullifier_marker_0,
         &mut ctx.accounts.source_nullifiers,
@@ -451,12 +450,10 @@ pub fn transact_swap<'info>(
         )?;
     }
 
-    // Update source pool TVL (decrease by swap_amount)
     ctx.accounts.source_config.total_tvl = ctx.accounts.source_config.total_tvl
         .checked_sub(swap_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // CPI to Swap Program (Jupiter / Raydium)
     let relayer_key = ctx.accounts.relayer.key();
     let executor_seeds: &[&[u8]] = &[
         b"swap_executor",
@@ -522,7 +519,6 @@ pub fn transact_swap<'info>(
             PrivacyError::InvalidMintAddress
         );
 
-        // Build CPMM swap instruction accounts
         let cpmm_accounts = vec![
             AccountMeta::new_readonly(executor.key(), true),
             AccountMeta::new_readonly(remaining[0].key(), false),
@@ -547,7 +543,7 @@ pub fn transact_swap<'info>(
 
         msg!("Raydium CPMM: Executing Swap...");
 
-        let account_infos = &[
+        let account_infos = vec![
             executor.to_account_info(),
             remaining[0].to_account_info(),
             remaining[1].to_account_info(),
@@ -560,12 +556,11 @@ pub fn transact_swap<'info>(
             remaining[5].to_account_info(),
             remaining[6].to_account_info(),
             remaining[7].to_account_info(),
-            ctx.accounts.swap_program.to_account_info(),
+            ctx.accounts.swap_program.to_account_info()
         ];
 
-        invoke_signed(&swap_ix, account_infos, &[executor_seeds])?;
+        invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
     } else if is_amm {
-        // Raydium AMM V4 Swap
         // Accounts layout in remaining_accounts:
         // [0] = Amm Id (owned by AMM program)
         // [1] = Amm Authority (PDA derived from Amm Id)
@@ -595,8 +590,7 @@ pub fn transact_swap<'info>(
         );
         require!(dex_min_out >= swap_params.min_amount_out, PrivacyError::InvalidPublicAmount);
 
-        // Validate Serum/OpenBook Program ID - this is the critical check
-        // (AMM will validate all other account ownership/derivations internally)
+        // Validate OpenBook program ID
         require!(
             remaining[6].key() == crate::OPENBOOK_PROGRAM_ID,
             PrivacyError::InvalidRemainingAccounts
@@ -631,7 +625,6 @@ pub fn transact_swap<'info>(
 
         msg!("Raydium AMM: Executing Swap...");
 
-        // Construct account_infos including all dependencies
         let mut account_infos = vec![
             ctx.accounts.token_program.to_account_info(),
             ctx.accounts.executor_source_token.to_account_info(),
@@ -646,7 +639,6 @@ pub fn transact_swap<'info>(
 
         invoke_signed(&swap_ix, &account_infos, &[executor_seeds])?;
     } else if is_jupiter {
-        // Jupiter V6 Route Swap
         msg!("Jupiter V6: Executing Route Swap...");
 
         // Security: Verify Jupiter Event Authority matches expected constant
@@ -654,8 +646,6 @@ pub fn transact_swap<'info>(
             ctx.accounts.jupiter_event_authority.key() == crate::JUPITER_EVENT_AUTHORITY,
             PrivacyError::Unauthorized
         );
-
-        msg!("Jupiter Event Authority: {}", ctx.accounts.jupiter_event_authority.key());
 
         let mut jupiter_accounts = Vec::new();
         let mut account_infos = Vec::new();
@@ -775,11 +765,8 @@ pub fn transact_swap<'info>(
 
         // Verify swap_data matches the hash committed in the ZK proof to prevent
         // relayer substitution of swap instructions.
-        {
-            use sha2::{ Sha256, Digest };
-            let computed: [u8; 32] = Sha256::digest(&swap_data).into();
-            require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
-        }
+        let computed: [u8; 32] = solana_sha256_hasher::hash(&swap_data).to_bytes();
+        require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
 
         // Construct instruction
         let swap_ix = Instruction {
@@ -797,7 +784,6 @@ pub fn transact_swap<'info>(
         return err!(PrivacyError::InvalidPublicAmount);
     }
 
-    // Transfer swapped tokens to dest vault (minus fee)
     ctx.accounts.executor_dest_token.reload()?;
     let swapped_amount = ctx.accounts.executor_dest_token.amount;
 
@@ -806,7 +792,6 @@ pub fn transact_swap<'info>(
     let relayer_fee = ext_data.fee;
     require!(swapped_amount > relayer_fee, PrivacyError::InvalidPublicAmount);
 
-    // Validate fee meets pool requirements
     let dest_config = &ctx.accounts.dest_config;
     let percentage_fee = (swapped_amount as u128)
         .checked_mul(dest_config.swap_fee_bps as u128)
@@ -898,12 +883,10 @@ pub fn transact_swap<'info>(
         }
     }
 
-    // Update dest pool TVL (increase by vault_amount)
     ctx.accounts.dest_config.total_tvl = ctx.accounts.dest_config.total_tvl
         .checked_add(vault_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Insert dest note (commitment 1) into dest tree
     let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
 
     let max_capacity = 1u64 << (dest_tree.height as u64);
@@ -923,9 +906,11 @@ pub fn transact_swap<'info>(
         timestamp: clock.unix_timestamp,
         mint_address: dest_mint,
         tree_id: dest_tree_id,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
     });
 
-    // Insert change note (commitment 0) back into source tree
     let mut source_tree = ctx.accounts.source_tree.load_mut()?;
 
     let max_capacity = 1u64 << (source_tree.height as u64);
@@ -945,6 +930,9 @@ pub fn transact_swap<'info>(
         timestamp: clock.unix_timestamp,
         mint_address: source_mint,
         tree_id: source_tree_id,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
     });
 
     // Close executor token accounts (CPIs — must come before any raw lamport edits)

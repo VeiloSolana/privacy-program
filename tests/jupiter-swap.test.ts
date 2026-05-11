@@ -658,6 +658,10 @@ describe("Privacy Pool Jupiter Swap", () => {
           refund: extData.refund,
         },
         proof,
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
+        Array.from(new Uint8Array(32)),
+        Array.from(new Uint8Array(80)),
       )
       .accounts({
         config: sourceConfig,
@@ -968,14 +972,14 @@ describe("Privacy Pool Jupiter Swap", () => {
     // Execute swap - build instruction for versioned transaction with ALT
     const swapIx = await (program.methods as any)
       .transactSwap(
-        proof,
-        Array.from(root),
         0, // source_tree_id
         SOL_MINT,
         Array.from(nullifier),
         Array.from(dummyNullifier),
         0, // dest_tree_id
         USDC_MINT,
+        proof,
+        Array.from(root),
         Array.from(changeCommitment),
         Array.from(destCommitment),
         swapParams,
@@ -987,6 +991,7 @@ describe("Privacy Pool Jupiter Swap", () => {
           fee: extData.fee,
           refund: extData.refund,
         },
+        null,
       )
       .accounts({
         sourceConfig,
@@ -1084,16 +1089,14 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`✅ Jupiter swap tx: ${tx}`);
 
     // Verify nullifiers marked as spent
-    const nullifierMarker0Account = await program.account.nullifierMarker.fetch(
-      nullifierMarker0,
-    );
+    const nullifierMarker0Account =
+      await program.account.nullifierMarker.fetch(nullifierMarker0);
     expect(
       Buffer.from(nullifierMarker0Account.nullifier).toString("hex"),
     ).to.equal(Buffer.from(nullifier).toString("hex"));
 
-    const nullifierMarker1Account = await program.account.nullifierMarker.fetch(
-      nullifierMarker1,
-    );
+    const nullifierMarker1Account =
+      await program.account.nullifierMarker.fetch(nullifierMarker1);
     expect(
       Buffer.from(nullifierMarker1Account.nullifier).toString("hex"),
     ).to.equal(Buffer.from(dummyNullifier).toString("hex"));
@@ -1108,12 +1111,10 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`✅ Change commitment inserted at index ${sourceLeafIndex}`);
 
     // Verify TVL updates
-    const sourceConfigAccount = await program.account.privacyConfig.fetch(
-      sourceConfig,
-    );
-    const destConfigAccount = await program.account.privacyConfig.fetch(
-      destConfig,
-    );
+    const sourceConfigAccount =
+      await program.account.privacyConfig.fetch(sourceConfig);
+    const destConfigAccount =
+      await program.account.privacyConfig.fetch(destConfig);
 
     console.log(`  Source TVL: ${sourceConfigAccount.totalTvl}`);
     console.log(`  Dest TVL: ${destConfigAccount.totalTvl}`);

@@ -760,6 +760,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           refund: extData.refund,
         },
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -898,8 +899,6 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const swapParams = {
       minAmountOut: new BN(1_000_000),
       deadline: new BN(Math.floor(Date.now() / 1000) + 3600),
-      sourceMint: sourceTokenMint,
-      destMint: destTokenMint,
       destAmount: new BN(1_000_000),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
@@ -1300,8 +1299,6 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const swapParams = {
       minAmountOut: new BN(minAmountOutBigInt.toString()),
       deadline: new BN(deadlineBigInt.toString()),
-      sourceMint: sourceTokenMint,
-      destMint: destTokenMint,
       destAmount: new BN(swappedAmount.toString()),
       swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
     };
@@ -1405,9 +1402,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Fetch the lookup table account
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value) {
       throw new Error("Failed to fetch lookup table");
     }
@@ -1418,20 +1414,21 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // dest_tree_id, dest_mint, output_commitment_0, output_commitment_1, swap_params, swap_amount, swap_data, ext_data
       const swapIx = await (program.methods as any)
         .transactSwap(
-          proof, // ZK swap proof (first parameter)
-          Array.from(root), // source_root
           0, // source_tree_id
           sourceTokenMint, // source_mint
           Array.from(note.nullifier), // input_nullifier_0
           Array.from(dummyNullifier), // input_nullifier_1
           0, // dest_tree_id
           destTokenMint, // dest_mint
+          proof, // ZK swap proof
+          Array.from(root), // source_root
           Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
           Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParams, // swap_params
           new BN(SWAP_AMOUNT.toString()), // swap_amount
           swapData, // swap_data - pass Buffer directly for Vec<u8>
           extData, // ext_data
+          null,
         )
         .accounts({
           sourceConfig,
@@ -1814,9 +1811,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     expect(wsolAccount).to.be.instanceOf(PublicKey);
 
     // Check balance
-    const balance = await provider.connection.getTokenAccountBalance(
-      wsolAccount,
-    );
+    const balance =
+      await provider.connection.getTokenAccountBalance(wsolAccount);
     expect(parseInt(balance.value.amount)).to.equal(wrapAmount);
 
     // Unwrap back to SOL
@@ -2146,6 +2142,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: destConfig,
@@ -2582,6 +2579,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -2705,9 +2703,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         destTokenMint,
         usdcHolder.publicKey,
       );
-      const balance = await provider.connection.getTokenAccountBalance(
-        holderTokenAccount,
-      );
+      const balance =
+        await provider.connection.getTokenAccountBalance(holderTokenAccount);
       console.log(`   Holder USDC Balance: ${balance.value.uiAmount}`);
 
       if (BigInt(balance.value.amount) < amount) {
@@ -2843,6 +2840,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+          null,
         )
         .accounts({
           config: destConfig,
@@ -3269,6 +3267,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             refund: extData.refund,
           },
           proof,
+          null,
         )
         .accounts({
           config: sourceConfig,
@@ -3535,8 +3534,6 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const swapParams = {
         minAmountOut: new BN(minAmountOutBigInt.toString()),
         deadline: new BN(deadlineBigInt.toString()),
-        sourceMint: SOL_MINT,
-        destMint: USDT_MINT,
         destAmount: new BN(destAmount.toString()),
         swapDataHash: Buffer.alloc(32), // MEDIUM-001: zero for CPMM/AMM
       };
@@ -3598,20 +3595,21 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // Build swap instruction
       const swapIx = await (program.methods as any)
         .transactSwap(
-          proof, // ZK swap proof (first parameter)
-          Array.from(root),
           0,
           SOL_MINT,
           Array.from(note!.nullifier),
           Array.from(dummyNullifier),
           0,
           USDT_MINT,
+          proof, // ZK swap proof
+          Array.from(root),
           Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
           Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParams,
           new BN(USDT_SWAP_AMOUNT.toString()),
           swapData,
           extData,
+          null,
         )
         .accounts({
           sourceConfig,
@@ -4069,20 +4067,21 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       // The transact_swap instruction
       const swapIx = await (program.methods as any)
         .transactSwap(
-          proof, // ZK swap proof (first parameter)
-          Array.from(root),
           0, // source_tree_id
           USDT_MINT, // source_mint
           Array.from(note.nullifier), // input_nullifier_0
           Array.from(dummyNullifier), // input_nullifier_1
           0, // dest_tree_id
           SOL_MINT, // dest_mint
+          proof, // ZK swap proof
+          Array.from(root),
           Array.from(changeCommitment), // output_commitment_0 (change goes back to source pool)
           Array.from(destCommitment), // output_commitment_1 (dest goes to dest pool)
           swapParamsArg, // swap_params
           new BN(note.amount.toString()), // swap_amount
           swapData,
           extData,
+          null,
         )
         .accounts({
           sourceConfig: usdtConfig,

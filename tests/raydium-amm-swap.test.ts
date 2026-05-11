@@ -617,6 +617,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           refund: extData.refund,
         },
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -965,9 +966,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value)
       throw new Error("Failed to fetch lookup table");
 
@@ -980,20 +980,21 @@ describe("Privacy Pool AMM V4 Swap", () => {
       // 11: Serum Coin Vault, 12: Serum Pc Vault, 13: Serum Vault Signer
       const swapIx = await (program.methods as any)
         .transactSwap(
-          proof,
-          Array.from(root),
           0,
           sourceTokenMint,
           Array.from(note.nullifier),
           Array.from(dummyNullifier),
           0,
           destTokenMint,
+          proof,
+          Array.from(root),
           Array.from(changeCommitment),
           Array.from(destCommitment),
           swapParams,
           new BN(SWAP_AMOUNT.toString()),
           swapData,
           extData,
+          null,
         )
         .accounts({
           sourceConfig,
@@ -1275,6 +1276,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -1451,6 +1453,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
+        null,
       )
       .accounts({
         config: destConfig,
@@ -1771,9 +1774,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value)
       throw new Error("Failed to fetch lookup table");
 
@@ -1785,20 +1787,21 @@ describe("Privacy Pool AMM V4 Swap", () => {
       // - Output: SOL (base/coin)
       const swapIx = await (program.methods as any)
         .transactSwap(
-          proof,
-          Array.from(root),
           0,
           destTokenMint, // Source is USDC
           Array.from(note.nullifier),
           Array.from(dummyNullifier),
           0,
           sourceTokenMint, // Dest is SOL
+          proof,
+          Array.from(root),
           Array.from(changeCommitment), // output_commitment_0 → source pool (USDC change)
           Array.from(solOutputCommitment), // output_commitment_1 → dest pool (SOL)
           swapParams,
           new BN(swapAmount.toString()),
           swapData,
           extData,
+          null,
         )
         .accounts({
           sourceConfig: destConfig, // USDC pool config

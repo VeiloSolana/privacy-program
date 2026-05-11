@@ -1118,6 +1118,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+          null,
         )
         .accounts({
           config,
@@ -1496,6 +1497,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+          null,
         )
         .accounts({
           config,
@@ -1830,6 +1832,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit1,
         deposit1Proof,
+        null,
       )
       .accounts({
         config,
@@ -2000,6 +2003,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit2,
         deposit2Proof,
+        null,
       )
       .accounts({
         config,
@@ -2195,6 +2199,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
+        null,
       )
       .accounts({
         config,
@@ -2442,6 +2447,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
+          null,
         )
         .accounts({
           config,
@@ -2713,6 +2719,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             new BN(9999999999), // deadline (far future for tests)
             data.extData,
             data.proof,
+            null,
           )
           .accounts({
             config,
@@ -2971,6 +2978,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
+        null,
       )
       .accounts({
         config,
@@ -3510,6 +3518,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit1,
         deposit1Proof,
+        null,
       )
       .accounts({
         config,
@@ -3581,6 +3590,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit2,
         deposit2Proof,
+        null,
       )
       .accounts({
         config,
@@ -3671,6 +3681,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataWithdraw,
         withdrawProof,
+        null,
       )
       .accounts({
         config,
@@ -3808,9 +3819,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Create the tree using admin (admin always has authorization)
     try {
       // Check if account exists and is already initialized
-      const treeAccountInfo = await provider.connection.getAccountInfo(
-        noteTreeDestination,
-      );
+      const treeAccountInfo =
+        await provider.connection.getAccountInfo(noteTreeDestination);
 
       if (treeAccountInfo && treeAccountInfo.owner.equals(program.programId)) {
         console.log(
@@ -4051,6 +4061,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
+        null,
       )
       .accounts({
         config,
@@ -4231,6 +4242,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
+        null,
       )
       .accounts({
         config,
@@ -4433,6 +4445,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extDataWithdraw,
           wrongTreeProof,
+          null,
         )
         .accounts({
           config,
@@ -4610,6 +4623,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         tree0DepositProof,
+        null,
       )
       .accounts({
         config,
@@ -4710,6 +4724,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extDataWithdraw,
           wrongTreeProof2,
+          null,
         )
         .accounts({
           config,
@@ -4927,6 +4942,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataDeposit,
         depositProof,
+        null,
       )
       .accounts({
         config,
@@ -5151,6 +5167,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataTransfer,
         transferProof,
+        null,
       )
       .accounts({
         config,
@@ -5562,6 +5579,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         new BN(9999999999), // deadline (far future for tests)
         extDataBobWithdraw,
         bobWithdrawProof,
+        null,
       )
       .accounts({
         config,
