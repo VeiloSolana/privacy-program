@@ -42,6 +42,7 @@ import {
   AddressLookupTableAccount,
 } from "@solana/web3.js";
 import nacl from "tweetnacl";
+import { createHash } from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -563,7 +564,7 @@ function encryptNoteSecrets(
   recipientX25519Pubkey: Uint8Array, // user's X25519 public key
   blinding: Uint8Array, // 32-byte note blinding factor
   amount: bigint, // note amount
-): { ephemeralKey: Uint8Array; encryptedBlob: Uint8Array } {
+): { ephemeralKey: Uint8Array; encryptedBlob: Uint8Array; viewTag: number } {
   const ephemeral = nacl.box.keyPair();
   const nonce = nacl.randomBytes(24);
 
@@ -587,7 +588,14 @@ function encryptNoteSecrets(
   encryptedBlob.set(nonce, 0);
   encryptedBlob.set(boxed, 24);
 
-  return { ephemeralKey: ephemeral.publicKey, encryptedBlob };
+  // View tag: sha256(X25519SharedSecret)[0] — one-byte scan filter
+  const rawSharedSecret = nacl.scalarMult(
+    ephemeral.secretKey,
+    recipientX25519Pubkey,
+  );
+  const viewTag = createHash("sha256").update(rawSharedSecret).digest()[0];
+
+  return { ephemeralKey: ephemeral.publicKey, encryptedBlob, viewTag };
 }
 
 function decryptNoteSecrets(
@@ -624,6 +632,7 @@ interface ParsedCommitmentEvent {
   treeId: number;
   ephemeralPublicKey: Buffer;
   encryptedBlob: Buffer;
+  viewTag: number;
 }
 
 function parseCommitmentEvents(
@@ -649,6 +658,7 @@ function parseCommitmentEvents(
         d.ephemeralPublicKey ?? d.ephemeral_public_key,
       ),
       encryptedBlob: Buffer.from(d.encryptedBlob ?? d.encrypted_blob),
+      viewTag: Number(d.viewTag ?? d.view_tag ?? 0),
     });
   }
   return events;
@@ -1202,22 +1212,28 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
         .toString("hex")
         .slice(0, 16)}... blob=${Buffer.from(cipher0.encryptedBlob)
         .toString("hex")
-        .slice(0, 16)}...`,
+        .slice(0, 16)}... viewTag=0x${cipher0.viewTag
+        .toString(16)
+        .padStart(2, "0")}`,
     );
     console.log(
       `   note1: epk=${Buffer.from(cipher1.ephemeralKey)
         .toString("hex")
         .slice(0, 16)}... blob=${Buffer.from(cipher1.encryptedBlob)
         .toString("hex")
-        .slice(0, 16)}...`,
+        .slice(0, 16)}... viewTag=0x${cipher1.viewTag
+        .toString(16)
+        .padStart(2, "0")}`,
     );
 
     // ---- Build NoteCiphers struct ------------------------------------------
     const noteCiphers = {
       note0EphemeralKey: Array.from(cipher0.ephemeralKey),
       note0Encrypted: Array.from(cipher0.encryptedBlob),
+      note0ViewTag: cipher0.viewTag,
       note1EphemeralKey: Array.from(cipher1.ephemeralKey),
       note1Encrypted: Array.from(cipher1.encryptedBlob),
+      note1ViewTag: cipher1.viewTag,
     };
 
     // ---- Dummy inputs (zero-value, not in tree — valid for deposit) --------
@@ -1456,6 +1472,9 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       console.log(
         `           blob=${ev.encryptedBlob.toString("hex").slice(0, 16)}...`,
       );
+      console.log(
+        `           viewTag=0x${ev.viewTag.toString(16).padStart(2, "0")}`,
+      );
     }
 
     // Map events to note0 and note1 by commitment bytes
@@ -1482,7 +1501,16 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       eventForNote0!.encryptedBlob.equals(Buffer.from(cipher0.encryptedBlob)),
       "note0 encrypted_blob mismatch in CommitmentEvent",
     );
-    console.log("✅ note0 cipher bytes match CommitmentEvent");
+    assert.strictEqual(
+      eventForNote0!.viewTag,
+      cipher0.viewTag,
+      "note0 view_tag mismatch in CommitmentEvent",
+    );
+    console.log(
+      `✅ note0 cipher bytes + viewTag match CommitmentEvent (viewTag=0x${cipher0.viewTag
+        .toString(16)
+        .padStart(2, "0")})`,
+    );
 
     // note1: real cipher
     assert.ok(
@@ -1495,7 +1523,16 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       eventForNote1!.encryptedBlob.equals(Buffer.from(cipher1.encryptedBlob)),
       "note1 encrypted_blob mismatch in CommitmentEvent",
     );
-    console.log("✅ note1 cipher bytes match CommitmentEvent");
+    assert.strictEqual(
+      eventForNote1!.viewTag,
+      cipher1.viewTag,
+      "note1 view_tag mismatch in CommitmentEvent",
+    );
+    console.log(
+      `✅ note1 cipher bytes + viewTag match CommitmentEvent (viewTag=0x${cipher1.viewTag
+        .toString(16)
+        .padStart(2, "0")})`,
+    );
 
     // ---- Decrypt and verify the user can recover note secrets --------------
     // Simulates the user's SDK scanning chain history and decrypting blobs.
@@ -1871,6 +1908,11 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
           "hex",
         )} (expect all zeros)`,
       );
+      console.log(
+        `           viewTag=0x${ev.viewTag
+          .toString(16)
+          .padStart(2, "0")} (expect 0x00)`,
+      );
     }
 
     for (const event of events) {
@@ -1884,13 +1926,20 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
         allZeroBlob,
         "encrypted_blob should be all-zero for null ciphers",
       );
+      assert.strictEqual(
+        event.viewTag,
+        0,
+        "view_tag should be 0 for null ciphers",
+      );
     }
 
     // Keep offchainTree in sync so test 4's Merkle path is valid against on-chain root
     offchainTree.insert(out0Commitment);
     offchainTree.insert(out1Commitment);
 
-    console.log("✅ null ciphers → CommitmentEvent has all-zero cipher fields");
+    console.log(
+      "✅ null ciphers → CommitmentEvent has all-zero cipher fields (viewTag=0x00)",
+    );
     console.log(
       "✅ Backward compatibility confirmed: tests/legacy callers unaffected",
     );
@@ -1990,7 +2039,9 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
     console.log(
       `   change blob: ${Buffer.from(cipherChange.encryptedBlob)
         .toString("hex")
-        .slice(0, 16)}...`,
+        .slice(0, 16)}... viewTag=0x${cipherChange.viewTag
+        .toString(16)
+        .padStart(2, "0")}`,
     );
     console.log(
       `   dest epk:    ${Buffer.from(cipherDest.ephemeralKey)
@@ -2000,15 +2051,19 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
     console.log(
       `   dest blob:   ${Buffer.from(cipherDest.encryptedBlob)
         .toString("hex")
-        .slice(0, 16)}...`,
+        .slice(0, 16)}... viewTag=0x${cipherDest.viewTag
+        .toString(16)
+        .padStart(2, "0")}`,
     );
 
     // note0 = change note (source pool), note1 = dest note (dest pool)
     const noteCiphers = {
       note0EphemeralKey: Array.from(cipherChange.ephemeralKey),
       note0Encrypted: Array.from(cipherChange.encryptedBlob),
+      note0ViewTag: cipherChange.viewTag,
       note1EphemeralKey: Array.from(cipherDest.ephemeralKey),
       note1Encrypted: Array.from(cipherDest.encryptedBlob),
+      note1ViewTag: cipherDest.viewTag,
     };
 
     // ---- External data -----------------------------------------------------
@@ -2400,6 +2455,9 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       `           blob=${evDest.encryptedBlob.toString("hex").slice(0, 16)}...`,
     );
     console.log(
+      `           viewTag=0x${evDest.viewTag.toString(16).padStart(2, "0")}`,
+    );
+    console.log(
       `   event[1] (change): leafIndex=${
         evChange.leafIndex
       }, commitment=${evChange.commitment.toString("hex").slice(0, 16)}...`,
@@ -2413,6 +2471,9 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       `           blob=${evChange.encryptedBlob
         .toString("hex")
         .slice(0, 16)}...`,
+    );
+    console.log(
+      `           viewTag=0x${evChange.viewTag.toString(16).padStart(2, "0")}`,
     );
 
     // ---- Assert cipher bytes round-tripped correctly -----------------------
@@ -2436,8 +2497,22 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       Array.from(cipherDest.encryptedBlob),
       "dest note: encryptedBlob mismatch",
     );
+    assert.strictEqual(
+      evChange.viewTag,
+      cipherChange.viewTag,
+      "change note: view_tag mismatch",
+    );
+    assert.strictEqual(
+      evDest.viewTag,
+      cipherDest.viewTag,
+      "dest note: view_tag mismatch",
+    );
     console.log(
-      "✅ Cipher bytes match what relayer passed in noteCiphers struct",
+      `✅ Cipher bytes + viewTags match (change=0x${cipherChange.viewTag
+        .toString(16)
+        .padStart(2, "0")}, dest=0x${cipherDest.viewTag
+        .toString(16)
+        .padStart(2, "0")})`,
     );
 
     // ---- Decrypt both blobs and verify secrets ----------------------------
