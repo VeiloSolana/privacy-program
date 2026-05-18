@@ -558,11 +558,12 @@ pub struct Transact<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    /// First nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
-    /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// Nullifier marker for input 0 — single-use, created here and never reusable.
+    /// init (not init_if_needed) ensures the transaction fails if this PDA already exists,
+    /// which means the nullifier has been seen before (double-spend blocked at account resolution).
     /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
         bump,
@@ -570,11 +571,12 @@ pub struct Transact<'info> {
     )]
     pub nullifier_marker_0: Account<'info, NullifierMarker>,
 
-    /// Second nullifier marker (must not exist for withdrawals - ensures nullifier is fresh)
-    /// For deposits (public_amount > 0), this should be the zero nullifier marker (reusable)
+    /// Nullifier marker for input 1 — single-use, created here and never reusable.
+    /// init (not init_if_needed) ensures the transaction fails if this PDA already exists,
+    /// which means the nullifier has been seen before (double-spend blocked at account resolution).
     /// NOTE: Nullifier markers are global (no tree_id) to prevent cross-tree double-spend
     #[account(
-        init_if_needed,
+        init,
         payer = relayer,
         seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
         bump,
@@ -1165,22 +1167,16 @@ pub mod privacy_pool {
         //
         // The circuit always computes nullifiers as Poseidon(commitment, pathIndex, signature)
         // which are never zero. Deposits use dummy witnesses that produce non-zero but harmless nullifiers.
+        // Validate nullifiers on ALL paths (deposits and withdrawals alike).
+        // Dummy deposit witnesses produce non-zero Poseidon outputs, so this is always satisfiable
+        // by honest clients. Enforcing it unconditionally prevents an attacker from crafting a
+        // deposit proof with a real note's nullifier and bypassing the spent check.
         let zero_nullifier = [0u8; 32];
-        if public_amount > 0 {
-            // For deposits, nullifier markers are created but allow reuse via init_if_needed
-            // The circuit accepts any computed nullifiers for dummy inputs (amount=0)
-            // Still check for duplicates to prevent any edge cases
-            require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
-        } else {
-            // For withdrawals/transfers, validate no duplicate nullifiers
-            require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
-
-            // Also ensure neither nullifier is zero (must be real notes)
-            require!(
-                input_nullifiers[0] != zero_nullifier && input_nullifiers[1] != zero_nullifier,
-                PrivacyError::ZeroNullifier
-            );
-        }
+        require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
+        require!(
+            input_nullifiers[0] != zero_nullifier && input_nullifiers[1] != zero_nullifier,
+            PrivacyError::ZeroNullifier
+        );
 
         // Validate no duplicate output commitments (prevents creating identical notes)
         require!(
@@ -1374,30 +1370,32 @@ pub mod privacy_pool {
 
         drop(input_tree); // Release immutable borrow
 
-        // 8. Mark both input nullifiers as spent (only for withdrawals/transfers)
-        // For deposits (public_amount > 0), no notes are consumed so nullifiers shouldn't be marked
-        if public_amount <= 0 {
-            require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
-            require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+        // 8. Mark both input nullifiers as spent on ALL paths (deposits and withdrawals).
+        // The `init` constraint on the marker accounts already blocks reuse at account resolution,
+        // but setting is_spent provides a defence-in-depth layer and keeps state consistent.
+        // Dummy deposit nullifiers are Poseidon outputs of random witnesses — they are fresh
+        // per transaction and safe to burn. An attacker cannot reuse a real note's nullifier
+        // as a deposit input because the marker PDA will already exist from this call.
+        require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+        require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
-            mark_nullifier_spent(
-                &mut ctx.accounts.nullifier_marker_0,
-                &mut ctx.accounts.nullifiers,
-                input_nullifiers[0],
-                ctx.bumps.nullifier_marker_0,
-                mint_address,
-                input_tree_id
-            )?;
+        mark_nullifier_spent(
+            &mut ctx.accounts.nullifier_marker_0,
+            &mut ctx.accounts.nullifiers,
+            input_nullifiers[0],
+            ctx.bumps.nullifier_marker_0,
+            mint_address,
+            input_tree_id
+        )?;
 
-            mark_nullifier_spent(
-                &mut ctx.accounts.nullifier_marker_1,
-                &mut ctx.accounts.nullifiers,
-                input_nullifiers[1],
-                ctx.bumps.nullifier_marker_1,
-                mint_address,
-                input_tree_id
-            )?;
-        }
+        mark_nullifier_spent(
+            &mut ctx.accounts.nullifier_marker_1,
+            &mut ctx.accounts.nullifiers,
+            input_nullifiers[1],
+            ctx.bumps.nullifier_marker_1,
+            mint_address,
+            input_tree_id
+        )?;
 
         // 9. Insert both output commitments into output tree
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
