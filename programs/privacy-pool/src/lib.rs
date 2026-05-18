@@ -1289,32 +1289,13 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // Two deposit patterns for SPL tokens:
-                // 1. Relayer-owned: user_token.owner == relayer (user transferred tokens to relayer first)
-                // 2. Delegated: user_token.delegate == relayer with sufficient delegated_amount
-                //
-                // Pattern 2 allows trustless deposits without requiring users to send tokens to relayer first.
-                // The user pre-approves the exact deposit amount, relayer submits the transaction.
-                let is_relayer_owned = user_token.owner == ctx.accounts.relayer.key();
-                let is_delegated_to_relayer = user_token.delegate
-                    .map(|d| d == ctx.accounts.relayer.key())
-                    .unwrap_or(false);
-
-                if is_relayer_owned {
-                    // Pattern 1: Relayer owns the token account - no delegation allowed
-                    require!(user_token.delegate.is_none(), PrivacyError::InvalidTokenAuthority);
-                } else if is_delegated_to_relayer {
-                    // Pattern 2: Token account is delegated to relayer
-                    // Verify sufficient delegation for the deposit amount
-                    let deposit_amount = public_amount as u64;
-                    require!(
-                        user_token.delegated_amount >= deposit_amount,
-                        PrivacyError::InsufficientDelegation
-                    );
-                } else {
-                    // Neither pattern matches - invalid
-                    return Err(error!(PrivacyError::DepositorTokenAccountMismatch));
-                }
+                // The relayer must own the source token account outright (user pre-transferred
+                // tokens before calling transact).
+                require!(
+                    user_token.owner == ctx.accounts.relayer.key(),
+                    PrivacyError::DepositorTokenAccountMismatch
+                );
+                require!(user_token.delegate.is_none(), PrivacyError::InvalidTokenAuthority);
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
