@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:note-ciphers"
+test = "npm run test:phoenix"
 
 [test]
 startup_wait = 60000
@@ -102,6 +102,34 @@ address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 
 [[test.validator.clone]]
 address = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+
+# ── Phoenix Eternal ──────────────────────────────────────────────────────────
+[[test.validator.clone]]
+address = "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"   # Phoenix Eternal program
+
+[[test.validator.clone]]
+address = "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"   # Phoenix global configuration PDA ["global"]
+
+[[test.validator.clone]]
+address = "2nHGAaEw3D5dd4hVueaUNoygkQFmoeKqRQWnSPqSMFUC"   # Phoenix perpAssetMap (global)
+
+[[test.validator.clone]]
+address = "HCrPXLByGqRh2szQi3gj7oRdRVBNi1gccAyn4CQCT3HK"   # Phoenix globalTraderIndex
+
+[[test.validator.clone]]
+address = "2U32rSzzrQS3eVmGHsnbw5kcqKF3wQXpHGd3hMq5YJok"   # Phoenix activeTraderBuffer
+
+[[test.validator.clone]]
+address = "AXFz1MuzMUBHi5UKJuK3FDCQ73o3rSzubGU2mPr4LLU7"   # Phoenix orderbook
+
+[[test.validator.clone]]
+address = "Dh9NrYjzzdvcYgFSbrkATQ1rPkPjDovXWnFVhfWmD2ZF"   # Phoenix splines
+
+[[test.validator.clone]]
+address = "csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu"    # Phoenix globalVault (PhUSD token account)
+
+[[test.validator.clone]]
+address = "3c3NTwpg7yW91FxijkHBXwVH1xUifun3Z8TC5eW5Si3K"   # Phoenix withdrawQueue
 
 [[test.validator.clone]]
 address = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"

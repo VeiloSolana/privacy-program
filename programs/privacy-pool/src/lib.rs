@@ -5,9 +5,12 @@ use light_hasher::Poseidon;
 
 pub mod groth16;
 pub mod merkle_tree;
+pub mod phoenix;
 pub mod swap;
 pub mod vk_constants;
 pub mod zk;
+
+pub use phoenix::PHOENIX_PROGRAM_ID;
 
 // Re-export swap types for Anchor
 pub use swap::{ SwapExecutor, SwapParams, SwapPublicInputs };
@@ -625,7 +628,7 @@ pub fn is_token_mint(mint: &Pubkey) -> bool {
 
 /// Safely deserialize a token account with owner validation
 /// Prevents malicious programs from passing fake token accounts
-fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
+pub(crate) fn deserialize_token_account(account: &AccountInfo) -> Result<TokenAccount> {
     // Verify account is owned by SPL Token Program
     require_keys_eq!(*account.owner, token::ID, PrivacyError::InvalidTokenAccountOwner);
 
@@ -894,6 +897,184 @@ pub struct FundNativeSource<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+}
+
+// ---- Phoenix Integration Account Contexts ----
+
+/// ZK-verified USDC note withdrawal → Phoenix Eternal `depositFunds` CPI.
+/// Phoenix-specific accounts are supplied via `remaining_accounts` (see `phoenix.rs`).
+#[derive(Accounts)]
+#[instruction(
+    root: [u8; 32],
+    input_tree_id: u16,
+    output_tree_id: u16,
+    deposit_amount: u64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+)]
+pub struct PhoenixDepositFromPool<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        bump = config.bump
+    )]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
+        bump = config.vault_bump
+    )]
+    pub vault: Account<'info, Vault>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes()],
+        bump
+    )]
+    pub input_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &output_tree_id.to_le_bytes()],
+        bump
+    )]
+    pub output_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
+        bump = nullifiers.bump
+    )]
+    pub nullifiers: Account<'info, NullifierSet>,
+
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_0: Account<'info, NullifierMarker>,
+
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_1: Account<'info, NullifierMarker>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    /// Vault's USDC ATA — source of funds for Phoenix deposit.
+    /// CHECK: Must be the canonical ATA of the vault for `mint_address`; validated in handler.
+    #[account(mut)]
+    pub vault_token_account: UncheckedAccount<'info>,
+
+    /// Relayer's USDC ATA — receives the relayer fee.
+    /// CHECK: Must be owned by `ext_data.relayer`; validated in handler.
+    #[account(mut)]
+    pub relayer_token_account: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_deposit_from_pool
+}
+
+/// Relayer-submitted order placement on Phoenix using the vault's trader account.
+/// Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
+pub struct PhoenixPlaceOrder<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    pub vault: Account<'info, Vault>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_place_order
+}
+
+/// Cancel all open Phoenix orders for the vault's trader account.
+/// Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
+pub struct PhoenixCancelOrders<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    pub vault: Account<'info, Vault>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_orders
+}
+
+/// Queue a Phoenix withdrawal back to the vault's USDC ATA.
+/// After `consumeWithdrawQueue` settles funds, users call `transact` to mint new notes.
+/// Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
+pub struct PhoenixQueueWithdraw<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    pub vault: Account<'info, Vault>,
+
+    /// Vault's USDC ATA — destination for withdrawn USDC.
+    /// CHECK: Must be the canonical ATA of vault for `mint_address`; validated in handler.
+    #[account(mut)]
+    pub vault_token_account: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_queue_withdraw
+}
+
+/// Accounts for `phoenix_register_pool_trader`.
+///
+/// Registers the vault PDA as a trader on Phoenix Eternal (one-time setup).
+/// The vault PDA signs the `registerTrader` CPI via `invoke_signed`.
+/// The `payer` account covers the rent for the new Phoenix trader account.
+/// All Phoenix-specific accounts (log authority, global config, trader PDA)
+/// are supplied via `remaining_accounts` — see `phoenix::phoenix_register_pool_trader`.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
+pub struct PhoenixRegisterTrader<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Account<'info, PrivacyConfig>,
+
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    pub vault: Account<'info, Vault>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts: [0]=phoenixProgram, [1]=logAuthority, [2]=globalConfig,
+    //                   [3]=traderAccount (new), [4]=payer
+    // supplied via remaining_accounts — see phoenix::phoenix_register_pool_trader
 }
 
 // ---- Program ----
@@ -1518,6 +1699,112 @@ pub mod privacy_pool {
             note_ciphers
         )
     }
+
+    // ---- Phoenix Eternal Integration ----
+
+    /// ZK-verified USDC withdrawal from pool → Phoenix Eternal `depositFunds` CPI.
+    ///
+    /// Atomically burns private USDC notes and deposits the amount into the
+    /// vault's Phoenix Eternal perpetual trading account. Output change notes
+    /// are inserted into the Merkle tree in the same transaction.
+    ///
+    /// `ext_data.recipient` **must** equal the vault PDA (enforced on-chain and
+    /// committed in the ZK proof).
+    ///
+    /// See `phoenix::phoenix_deposit_from_pool` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_deposit_from_pool<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixDepositFromPool<'info>>,
+        root: [u8; 32],
+        input_tree_id: u16,
+        output_tree_id: u16,
+        deposit_amount: u64,
+        ext_data_hash: [u8; 32],
+        mint_address: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        deadline: i64,
+        ext_data: ExtData,
+        proof: zk::TransactionProof,
+        note_ciphers: Option<NoteCiphers>
+    ) -> Result<()> {
+        phoenix::phoenix_deposit_from_pool(
+            ctx,
+            root,
+            input_tree_id,
+            output_tree_id,
+            deposit_amount,
+            ext_data_hash,
+            mint_address,
+            input_nullifier_0,
+            input_nullifier_1,
+            output_commitment_0,
+            output_commitment_1,
+            deadline,
+            ext_data,
+            proof,
+            note_ciphers
+        )
+    }
+
+    /// Place a market or limit order on Phoenix using the vault's trader account.
+    ///
+    /// `order_data` is the full Anchor-encoded instruction: discriminator (8 bytes)
+    /// + borsh-serialised `OrderPacket`. Only `placeMarketOrder` and `placeLimitOrder`
+    /// discriminators are accepted.
+    ///
+    /// See `phoenix::phoenix_place_order` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_place_order<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixPlaceOrder<'info>>,
+        mint_address: Pubkey,
+        order_data: Vec<u8>
+    ) -> Result<()> {
+        phoenix::phoenix_place_order(ctx, mint_address, order_data)
+    }
+
+    /// Cancel all open orders for the vault's Phoenix trader account.
+    ///
+    /// See `phoenix::phoenix_cancel_orders` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_cancel_orders<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixCancelOrders<'info>>,
+        mint_address: Pubkey
+    ) -> Result<()> {
+        phoenix::phoenix_cancel_orders(ctx, mint_address)
+    }
+
+    /// Queue a USDC withdrawal from the vault's Phoenix account back to the vault ATA.
+    ///
+    /// After calling this, the permissionless `consumeWithdrawQueue` crank on Phoenix
+    /// must process the queue. Once USDC arrives in the vault ATA, users call `transact`
+    /// with a deposit to re-mint private notes.
+    ///
+    /// See `phoenix::phoenix_queue_withdraw` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_queue_withdraw<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixQueueWithdraw<'info>>,
+        mint_address: Pubkey,
+        amount: u64
+    ) -> Result<()> {
+        phoenix::phoenix_queue_withdraw(ctx, mint_address, amount)
+    }
+
+    /// **Register the pool vault as a Phoenix Eternal trader (one-time setup).**
+    ///
+    /// Must be called once before `phoenix_deposit_from_pool` or
+    /// `phoenix_place_order` can be used for a USDC pool.
+    ///
+    /// See `phoenix::phoenix_register_pool_trader` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_register_pool_trader<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixRegisterTrader<'info>>,
+        mint_address: Pubkey
+    ) -> Result<()> {
+        phoenix::phoenix_register_pool_trader(ctx, mint_address)
+    }
 }
 
 // ---- Helper Functions ----
@@ -1973,4 +2260,13 @@ pub enum PrivacyError {
     MissingTransactSwapInstruction,
     #[msg("Transaction deadline has expired")]
     DeadlineExpired,
+    // ---- Phoenix Eternal errors ----
+    #[msg("Phoenix integration requires a USDC pool (only USDC is accepted as Phoenix collateral)")]
+    PhoenixInvalidPool,
+    #[msg("Phoenix deposit: ext_data.recipient must equal the vault PDA")]
+    PhoenixRecipientMustBeVault,
+    #[msg("Phoenix CPI: insufficient or incorrect remaining_accounts")]
+    PhoenixInvalidAccounts,
+    #[msg("Phoenix order data is invalid or uses an unsupported instruction discriminator")]
+    PhoenixInvalidOrderData,
 }
