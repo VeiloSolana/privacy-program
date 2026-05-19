@@ -546,6 +546,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
           vault,
           noteTree,
           nullifiers,
+          globalConfig,
           admin: payer.publicKey,
           systemProgram: SystemProgram.programId,
         })

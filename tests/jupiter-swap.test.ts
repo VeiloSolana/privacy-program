@@ -420,6 +420,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         vault: sourceVault,
         noteTree: sourceNoteTree,
         nullifiers: sourceNullifiers,
+        globalConfig,
         admin: payer.publicKey,
         systemProgram: SystemProgram.programId,
       })
@@ -460,6 +461,7 @@ describe("Privacy Pool Jupiter Swap", () => {
         vault: destVault,
         noteTree: destNoteTree,
         nullifiers: destNullifiers,
+        globalConfig,
         admin: payer.publicKey,
         systemProgram: SystemProgram.programId,
       })

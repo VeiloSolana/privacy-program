@@ -518,6 +518,19 @@ describe("Multi-tree: edge cases & scenarios", () => {
   it("1. initializes pool (tree 0 created implicitly)", async () => {
     try {
       await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+    } catch (e: any) {
+      if (!e.message?.includes("already in use")) throw e;
+    }
+
+    try {
+      await (program.methods as any)
         .initialize(
           50, // fee_bps 0.5%
           SOL_MINT,
@@ -531,25 +544,13 @@ describe("Multi-tree: edge cases & scenarios", () => {
           vault,
           noteTree: tree0,
           nullifiers,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-    } catch (e: any) {
-      // Already initialized from a previous test run — acceptable
-      if (!e.message?.includes("already in use")) throw e;
-    }
-
-    try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
           globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
     } catch (e: any) {
+      // Already initialized from a previous test run — acceptable
       if (!e.message?.includes("already in use")) throw e;
     }
 

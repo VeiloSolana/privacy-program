@@ -172,6 +172,20 @@ describe("Privacy Pool - SPL Token Support", () => {
 
   it("initializes the privacy pool with SPL token", async () => {
     try {
+      // Ensure global config exists first (required for pool initialization)
+      try {
+        await (program.account as any).globalConfig.fetch(globalConfig);
+      } catch {
+        await (program.methods as any)
+          .initializeGlobalConfig()
+          .accounts({
+            globalConfig,
+            admin: wallet.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+      }
+
       await (program.methods as any)
         .initialize(
           feeBps,
@@ -186,6 +200,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           vault: tokenVault,
           noteTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })

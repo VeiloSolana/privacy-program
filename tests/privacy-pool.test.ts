@@ -840,6 +840,35 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
   });
 
+  it("initializes global config", async () => {
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
+        globalConfig,
+      );
+      console.log("✅ Global config initialized");
+      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
+    } catch (e: any) {
+      if (e.message?.includes("already in use")) {
+        console.log("✅ Global config already initialized");
+        return;
+      }
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Global config init failed:", logs);
+      }
+      throw e;
+    }
+  });
+
   it("initializes the privacy pool (UTXO model)", async () => {
     try {
       console.log("Initializing privacy pool...");
@@ -858,6 +887,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           vault,
           noteTree,
           nullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -876,31 +906,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
         console.error("Initialize failed:", logs);
-      }
-      throw e;
-    }
-  });
-
-  it("initializes global config", async () => {
-    try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
-          globalConfig,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
-        globalConfig,
-      );
-      console.log("✅ Global config initialized");
-      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
-    } catch (e: any) {
-      if (e instanceof SendTransactionError) {
-        const logs = await e.getLogs(provider.connection);
-        console.error("Global config init failed:", logs);
       }
       throw e;
     }
