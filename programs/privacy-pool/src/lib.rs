@@ -1914,6 +1914,8 @@ pub enum PrivacyError {
     JupiterInvalidInstruction,
     #[msg("Swap params mints do not match instruction mints")]
     InvalidSwapParams,
+    #[msg("Swap program left tokens in source account; potential amount_in manipulation")]
+    SwapLeftoverTokens,
     #[msg(
         "fund_native_source must be immediately followed by transact_swap in the same transaction"
     )]

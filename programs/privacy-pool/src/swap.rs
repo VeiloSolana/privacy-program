@@ -177,6 +177,15 @@ pub fn fund_native_source(
         PrivacyError::MissingTransactSwapInstruction
     );
 
+    // Verify the paired transact_swap references this exact executor PDA. The PDA encodes
+    // source_mint, dest_mint, input_nullifier_0, and relayer, so this check transitively
+    // prevents a mismatched nullifier from orphaning vault funds in an unreachable executor.
+    let expected_executor = ctx.accounts.executor.key();
+    require!(
+        next_ix.accounts.iter().any(|m| m.pubkey == expected_executor),
+        PrivacyError::MissingTransactSwapInstruction
+    );
+
     let vault_ai = ctx.accounts.source_vault.to_account_info();
     let rent_exempt_min = anchor_lang::solana_program::rent::Rent
         ::get()?
@@ -490,8 +499,12 @@ pub fn transact_swap<'info>(
 
     if is_cpmm {
         require!(swap_data.len() >= 24, PrivacyError::InvalidPublicAmount);
-        // Enforce DEX-level minimum_amount_out matches ZK-committed value (defense-in-depth).
+        // Enforce amount_in == swap_amount (mirrors AMM V4 branch).
         // CPMM swap_base_input layout: [8-byte discriminator][8-byte amount_in][8-byte minimum_amount_out]
+        let dex_amount_in = u64::from_le_bytes(
+            swap_data[8..16].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
+        );
+        require!(dex_amount_in == swap_amount, PrivacyError::InvalidSwapParams);
         let dex_min_out = u64::from_le_bytes(
             swap_data[16..24].try_into().map_err(|_| error!(PrivacyError::InvalidPublicAmount))?
         );
@@ -934,6 +947,11 @@ pub fn transact_swap<'info>(
         encrypted_blob: note0_enc,
         view_tag: note0_vt,
     });
+
+    // Defense-in-depth: assert source token balance is zero before closing.
+    // For WSOL, close_account transfers token balance + rent; any surplus would go to the relayer.
+    ctx.accounts.executor_source_token.reload()?;
+    require!(ctx.accounts.executor_source_token.amount == 0, PrivacyError::SwapLeftoverTokens);
 
     // Close executor token accounts (CPIs — must come before any raw lamport edits)
     token::close_account(
