@@ -177,12 +177,15 @@ pub fn fund_native_source(
         PrivacyError::MissingTransactSwapInstruction
     );
 
-    // Verify the paired transact_swap references this exact executor PDA. The PDA encodes
-    // source_mint, dest_mint, input_nullifier_0, and relayer, so this check transitively
-    // prevents a mismatched nullifier from orphaning vault funds in an unreachable executor.
+    // Verify the paired transact_swap references this exact executor PDA at its declared
+    // position (index 14 in TransactSwap). An any() scan over the full account list is
+    // bypassable by appending the PDA as a remaining_account decoy; a positional check is not.
+    // Index 14 = executor in TransactSwap (see accounts struct declaration).
+    const TRANSACT_SWAP_EXECUTOR_IDX: usize = 14;
     let expected_executor = ctx.accounts.executor.key();
     require!(
-        next_ix.accounts.iter().any(|m| m.pubkey == expected_executor),
+        next_ix.accounts.len() > TRANSACT_SWAP_EXECUTOR_IDX &&
+            next_ix.accounts[TRANSACT_SWAP_EXECUTOR_IDX].pubkey == expected_executor,
         PrivacyError::MissingTransactSwapInstruction
     );
 
