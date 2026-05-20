@@ -107,8 +107,9 @@ address = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
 [[test.validator.clone]]
 address = "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"   # Phoenix Eternal program
 
-[[test.validator.clone]]
-address = "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"   # Phoenix global configuration PDA ["global"]
+[[test.validator.account]]
+address = "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"   # Phoenix global configuration PDA ["global"] (modified: riskAuthority = test wallet)
+filename = "tests/fixtures/phoenix-global-config.json"
 
 [[test.validator.clone]]
 address = "2nHGAaEw3D5dd4hVueaUNoygkQFmoeKqRQWnSPqSMFUC"   # Phoenix perpAssetMap (global)
@@ -248,6 +249,19 @@ address = "FaDoeere161VKUFqcrQEM8it6kSCHKrLyq7wWyPvBkPq"
 [[test.validator.clone]]
 address = "3U9HB8KNHXmAmiGMbDsj6fBxzM63dfX5JbaYs5oTHbtu"
 
+# ── EMBER Protocol + PhUSD ──────────────────────────────────────────────────────
+[[test.validator.clone]]
+address = "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy"   # EMBER program (USDC ↔ PhUSD 1:1 wrapper)
+
+[[test.validator.clone]]
+address = "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A"   # PhUSD mint (Phoenix Eternal canonical collateral)
+
+[[test.validator.clone]]
+address = "6ur7v6AXNpnHeEb6xuk7PyezvZ1i5GrgYyWZkNCpzbRz"   # PhUSD mint authority PDA (EMBER-controlled)
+
+[[test.validator.clone]]
+address = "FKcEb4TdPDTRuMnQDpSEPQBcrm15S73xiUD6Qf8ZLUkq"   # EMBER USDC reserve (backs PhUSD supply)
+
 [[test.validator.clone]]
 address = "GLx7TdT66CPKYJBn3Pzc9khrfXEx6mXtAiE8uskGBQJq"
 
@@ -308,52 +322,3 @@ address = "7ZLL8j9rBDkHBHoPHLW36y9vxQq4mj3sfAfYUHj9NP6q"
 [[test.validator.clone]]
 address = "AAhzuFZLgRWr8EytSC2Fehc7MrBuvqvugeuMq52Qd8VS"
 
-# ========== SOL-JUP Pool (Jupiter's preferred pool: EYErUp5muPYEEkeaUCY22JibeZX7E9UuMcJFZkmNAN7c) ==========
-
-# SOL-JUP AMM Pool ID (Jupiter uses this pool)
-[[test.validator.clone]]
-address = "EYErUp5muPYEEkeaUCY22JibeZX7E9UuMcJFZkmNAN7c"
-
-# Base Vault (JUP)
-[[test.validator.clone]]
-address = "4xmePoAm93k4KrMzkG7UuVqKnF5WUNUHpXdavXGECaN2"
-
-# Quote Vault (SOL)
-[[test.validator.clone]]
-address = "4nR7HAVv7TDh8mzg7XLbsBnVfgMEGyL7EBq7WuR6ZB16"
-
-# Open Orders
-[[test.validator.clone]]
-address = "AFkBbkhNyQ5XFWvhPVBRoMAmcP7YRFeefsTkWV3ngkpD"
-
-# Target Orders
-[[test.validator.clone]]
-address = "3JM7oYvz6Qcy13SUbjwULyz5JrVJCcyYayLaPVL9VSbw"
-
-# LP Mint
-[[test.validator.clone]]
-address = "CLu4wZ1JL8dhJhevMyQSwRm8v3Jo885Xm1GtfRz3Ethn"
-
-# Serum Market
-[[test.validator.clone]]
-address = "4fRzdEGufHyQ8TYvzfNwbTHrk8kqdjx6voQ8iuGj1APF"
-
-# Market Bids
-[[test.validator.clone]]
-address = "2TWAf1ZiX8ET3csLM5NqSDcYrY68wG4R2NHj5NdX1P9P"
-
-# Market Asks
-[[test.validator.clone]]
-address = "7RBhiWJbZBF3RxtXYUxoA2qCnntNc2UMVQsDQyz5jxPm"
-
-# Market Event Queue
-[[test.validator.clone]]
-address = "Djf6hokh37epPMi9b7sA1SRgvGeRCB9CR6vBYTxHAoFN"
-
-# Market Base Vault (JUP)
-[[test.validator.clone]]
-address = "FXfYwWGJVrQtRsDk1T3FVhWjoTvVNY1t2Tvdp9AeunaQ"
-
-# Market Quote Vault (SOL)
-[[test.validator.clone]]
-address = "CwAq3YQyARFfHfw1itTsBJHad6VU2HWopjd9CW3trMQa"
