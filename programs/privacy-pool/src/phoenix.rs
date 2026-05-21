@@ -1,0 +1,1909 @@
+/// Phoenix Eternal Integration for Veilo Privacy Pool
+///
+/// Phoenix Eternal (program: EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih) is a
+/// USDC-collateralised perpetual futures DEX on Solana. This module lets the pool
+/// vault PDA act as a Phoenix trader, enabling **private perps trading**:
+///
+/// 1. `phoenix_deposit_from_pool` — ZK-verified withdrawal of USDC private notes
+///    that routes funds directly into the vault's Phoenix trader account (atomic).
+///
+/// 2. `phoenix_place_order` — Relayer-submitted market or limit order placement
+///    signed by the vault PDA (no ZK proof needed).
+///
+/// 3. `phoenix_cancel_orders` — Cancel all open orders for the vault's trader.
+///
+/// 4. `phoenix_queue_withdraw` — Queue a Phoenix withdrawal back to the vault's
+///    USDC ATA. Once `consumeWithdrawQueue` is cranked (permissionless, on-chain),
+///    the USDC is returned. Users then call the standard `transact` deposit to
+///    re-mint private notes.
+///
+/// Architecture:
+/// - The pool vault PDA (`["privacy_vault_v3", mint]`) is registered as the
+///   Phoenix trader wallet. All Phoenix CPIs are signed with its PDA seeds.
+/// - Phoenix trader PDA = `["trader", vault_key, 0u8, 0u8]` on Phoenix program.
+/// - Only USDC pools are supported (Phoenix only accepts USDC collateral).
+/// - Phoenix-specific accounts are passed via `remaining_accounts` to keep
+///   named account counts within Anchor/Solana limits.
+
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
+use anchor_spl::associated_token::get_associated_token_address;
+use anchor_spl::token;
+
+use crate::{
+    PrivacyError,
+    MerkleTree,
+    PoseidonHasher,
+    ExtData,
+    TransactionPublicInputs,
+    NoteCiphers,
+    CommitmentEvent,
+    NullifierSpent,
+    mark_nullifier_spent,
+    deserialize_token_account,
+    zk::{ verify_transaction_groth16, TransactionProof },
+};
+
+// Phoenix Eternal constants
+/// Phoenix Eternal program ID (perpetual futures DEX)
+pub const PHOENIX_PROGRAM_ID: Pubkey = pubkey!("EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih");
+
+/// Phoenix PDA seed — log authority: `["log"]`
+pub const PHOENIX_LOG_SEED: &[u8] = b"log";
+
+/// Phoenix PDA seed — global configuration: `["global"]`
+pub const PHOENIX_GLOBAL_SEED: &[u8] = b"global";
+
+/// Phoenix PDA seed prefix — trader accounts: `["trader", wallet, pda_idx, sub_idx]`
+pub const PHOENIX_TRADER_SEED: &[u8] = b"trader";
+
+/// USDC mainnet mint — the only accepted collateral on Phoenix Eternal.
+#[cfg(not(any(feature = "devnet", feature = "localnet")))]
+pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
+/// USDC devnet/localnet mint
+#[cfg(any(feature = "devnet", feature = "localnet"))]
+pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+
+// EMBER Protocol constants
+/// EMBER protocol program — wraps USDC ↔ PhUSD (1:1 synthetic collateral for Phoenix Eternal)
+pub const EMBER_PROGRAM_ID: Pubkey = pubkey!("EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy");
+
+/// PhUSD mint — Phoenix Eternal's canonical collateral token (minted/burned by EMBER)
+pub const PHUSD_MINT: Pubkey = pubkey!("PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A");
+
+/// EMBER PDA that controls PhUSD mint/burn authority
+pub const PHUSD_MINT_AUTHORITY: Pubkey = pubkey!("6ur7v6AXNpnHeEb6xuk7PyezvZ1i5GrgYyWZkNCpzbRz");
+
+/// EMBER USDC reserve — holds the USDC backing the PhUSD supply
+pub const EMBER_USDC_RESERVE: Pubkey = pubkey!("FKcEb4TdPDTRuMnQDpSEPQBcrm15S73xiUD6Qf8ZLUkq");
+
+// Discriminator helper
+
+/// Compute an Anchor instruction discriminator: `sha256("global:<name>")[0..8]`
+///
+/// Both Phoenix Eternal and EMBER use the standard Anchor discriminator scheme.
+fn phoenix_disc(name: &str) -> [u8; 8] {
+    use sha2::{ Digest, Sha256 };
+    let preimage = format!("global:{}", name);
+    let hash = Sha256::digest(preimage.as_bytes());
+    hash[..8].try_into().expect("sha256 output is 32 bytes")
+}
+
+/// Compute an Anchor instruction discriminator for EMBER instructions.
+/// EMBER uses the same `sha256("global:<name>")[0..8]` scheme as Phoenix.
+#[inline(always)]
+fn ember_disc(name: &str) -> [u8; 8] {
+    phoenix_disc(name)
+}
+
+// ─── Instruction handlers ─────────────────────────────────────────────────────
+
+/// **ZK-verified USDC withdrawal → Phoenix `depositFunds` CPI** (atomic).
+///
+/// Consumes private USDC notes from the pool and deposits the exact amount
+/// into the vault's Phoenix Eternal trader account in the same transaction.
+///
+/// ZK constraints:
+/// - `public_amount` = `−deposit_amount` (withdrawal from pool)
+/// - `ext_data.recipient` **must** equal the vault PDA key (committed in proof)
+///   — this ensures the proof cannot be reused to withdraw to an arbitrary address.
+///
+/// `remaining_accounts` layout (13 accounts):
+/// ```
+/// [0]  phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1]  phoenixLogAuthority       — PDA ["log"] on Phoenix; readonly
+/// [2]  globalConfiguration       — PDA ["global"] on Phoenix; writable
+/// [3]  phoenixTraderAccount      — PDA ["trader", vault, 0, 0] on Phoenix; writable
+/// [4]  phoenixGlobalVault        — Phoenix's PhUSD token account; writable
+/// [5]  phoenixGlobalTraderIndex  — writable
+/// [6]  phoenixActiveTraderBuffer — writable
+/// [7]  emberProgram              — EMBER_PROGRAM_ID; readonly; validated
+/// [8]  phUsdMintAuthPda          — PHUSD_MINT_AUTHORITY; readonly
+/// [9]  phUsdMint                 — PHUSD_MINT; writable (supply increases on EMBER wrap)
+/// [10] vaultPhUsdAta             — vault's PhUSD ATA; writable (EMBER conduit → Phoenix)
+/// [11] emberUsdcReserve          — EMBER_USDC_RESERVE; writable (receives USDC)
+/// [12] usdcMint                  — PHOENIX_REQUIRED_MINT; readonly (AccountInfo for EMBER CPI)
+/// ```
+/// `vault_token_account` (named) = vault's USDC ATA (source of USDC sent to EMBER).
+#[allow(clippy::too_many_arguments)]
+pub fn phoenix_deposit_from_pool<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixDepositFromPool<'info>>,
+    root: [u8; 32],
+    input_tree_id: u16,
+    output_tree_id: u16,
+    deposit_amount: u64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+    withdrawal_id: [u8; 32],
+    claimant_pubkey: Pubkey,
+    deadline: i64,
+    ext_data: ExtData,
+    proof: TransactionProof,
+    note_ciphers: Option<NoteCiphers>
+) -> Result<()> {
+    let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
+        Some(c) =>
+            (
+                c.note0_ephemeral_key,
+                c.note0_encrypted,
+                c.note0_view_tag,
+                c.note1_ephemeral_key,
+                c.note1_encrypted,
+                c.note1_view_tag,
+            ),
+        None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
+    };
+
+    let cfg = &mut ctx.accounts.config;
+
+    // ── 1. Phoenix-specific validation ────────────────────────────────────────
+    // Only USDC pools can interface with Phoenix Eternal
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
+    require!(deposit_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    // ── 2. Tree ID bounds ─────────────────────────────────────────────────────
+    require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+    require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+
+    // ── 3. Relayer and deadline ───────────────────────────────────────────────
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
+    let clock = Clock::get()?;
+    require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
+
+    // ── 4. Recipient must be executor PDA (ZK proof binds destination) ───────
+    require_keys_eq!(
+        ext_data.recipient,
+        ctx.accounts.executor.key(),
+        PrivacyError::PhoenixRecipientMustBeVault
+    );
+
+    // ── 5. Nullifier sanity ───────────────────────────────────────────────────
+    let zero = [0u8; 32];
+    let input_nullifiers = [input_nullifier_0, input_nullifier_1];
+    let output_commitments = [output_commitment_0, output_commitment_1];
+
+    require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(output_commitments[0] != output_commitments[1], PrivacyError::DuplicateCommitments);
+    require!(
+        output_commitments[0] != zero && output_commitments[1] != zero,
+        PrivacyError::ZeroCommitment
+    );
+
+    // ── 6. ext_data hash ─────────────────────────────────────────────────────
+    let computed_ext_hash = ext_data.hash()?;
+    require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
+
+    // ── 7. Vault USDC ATA check ───────────────────────────────────────────────
+    let expected_ata = get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
+    require!(
+        ctx.accounts.vault_token_account.key() == expected_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+    let vault_token_data = deserialize_token_account(
+        &ctx.accounts.vault_token_account.to_account_info()
+    )?;
+    let total_outflow = deposit_amount
+        .checked_add(ext_data.fee)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+    require!(
+        vault_token_data.amount >= total_outflow,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
+
+    // ── 8. ZK proof verification ──────────────────────────────────────────────
+    // public_amount is NEGATIVE (pool is losing USDC): circuit: sumIns + pubAmt = sumOuts
+    let public_amount_signed = -(deposit_amount as i64);
+    let public_inputs = TransactionPublicInputs {
+        root,
+        public_amount: public_amount_signed,
+        ext_data_hash,
+        mint_address,
+        input_nullifiers,
+        output_commitments,
+    };
+    verify_transaction_groth16(proof, &public_inputs)?;
+
+    // ── 9. Known root check ───────────────────────────────────────────────────
+    {
+        let input_tree = ctx.accounts.input_tree.load()?;
+        require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
+    }
+
+    // ── 10. Nullifiers not already spent ─────────────────────────────────────
+    require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+
+    // ── 11. Mark nullifiers spent ─────────────────────────────────────────────
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_0,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[0],
+        ctx.bumps.nullifier_marker_0,
+        mint_address,
+        input_tree_id
+    )?;
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_1,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[1],
+        ctx.bumps.nullifier_marker_1,
+        mint_address,
+        input_tree_id
+    )?;
+
+    // ── 12. CPI: EMBER wrap (USDC → PhUSD) + Phoenix depositFunds ────────────
+    // Phoenix Eternal uses PhUSD as canonical collateral, not USDC. EMBER (EMBERpYNE6...)
+    // wraps USDC 1:1 into PhUSD before the Phoenix deposit in the same atomic transaction.
+    //
+    // EMBER deposit account layout:
+    //   [0] traderWallet (signer)       — vault PDA
+    //   [1] phUsdMintAuthPda (readonly) — remaining[8]
+    //   [2] usdcMint (readonly)         — remaining[12]
+    //   [3] phUsdMint (writable)        — remaining[9]  (supply increases via mint_to)
+    //   [4] traderUsdcAta (writable)    — vault_token_account (source)
+    //   [5] traderPhUsdAta (writable)   — remaining[10] (intermediate PhUSD ATA)
+    //   [6] emberUsdcReserve (writable) — remaining[11]
+    //   [7] tokenProgram (readonly)
+    //
+    // Phoenix depositFunds account layout (IDL):
+    //   [0] phoenixProgram (readonly)
+    //   [1] phoenixLogAuthority (readonly)
+    //   [2] globalConfiguration (writable)
+    //   [3] traderWallet (signer)          — vault PDA
+    //   [4] traderTokenAccount (writable)  — remaining[10] (vault PhUSD ATA, not USDC)
+    //   [5] traderAccount (writable)       — remaining[3]
+    //   [6] globalVault (writable)         — remaining[4] (Phoenix's PhUSD vault)
+    //   [7] tokenProgram (readonly)
+    //   [8] globalTraderIndex (writable)   — remaining[5]
+    //   [9] activeTraderBuffer (writable)  — remaining[6]
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 13, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+    require_keys_eq!(remaining[7].key(), EMBER_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let _vault_key = ctx.accounts.vault.key();
+    let vault_seeds: &[&[u8]] = &[b"privacy_vault_v3", mint_address.as_ref(), &[cfg.vault_bump]];
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Validate executor_token_account is the executor's canonical USDC ATA
+    let expected_executor_usdc_ata = get_associated_token_address(&executor_key, &mint_address);
+    require!(
+        ctx.accounts.executor_token_account.key() == expected_executor_usdc_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // Validate remaining[10] is the executor's canonical PhUSD ATA
+    let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
+    require_keys_eq!(
+        remaining[10].key(),
+        expected_phusd_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // ── 12a. Vault → Executor: transfer USDC ─────────────────────────────────
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::Transfer {
+                from: ctx.accounts.vault_token_account.to_account_info(),
+                to: ctx.accounts.executor_token_account.to_account_info(),
+                authority: ctx.accounts.vault.to_account_info(),
+            },
+            &[vault_seeds]
+        ),
+        deposit_amount
+    )?;
+
+    // ── 12b. EMBER deposit: executor USDC → executor PhUSD ───────────────────
+    let mut ember_wrap_data = ember_disc("deposit").to_vec();
+    ember_wrap_data.extend_from_slice(&deposit_amount.to_le_bytes());
+
+    let ember_wrap_metas = vec![
+        AccountMeta::new_readonly(executor_key, true), // [0] traderWallet (executor signs)
+        AccountMeta::new_readonly(remaining[8].key(), false), // [1] phUsdMintAuthPda
+        AccountMeta::new_readonly(remaining[12].key(), false), // [2] usdcMint
+        AccountMeta::new(remaining[9].key(), false), // [3] phUsdMint (writable)
+        AccountMeta::new(ctx.accounts.executor_token_account.key(), false), // [4] traderUsdcAta
+        AccountMeta::new(remaining[10].key(), false), // [5] traderPhUsdAta (executor PhUSD ATA)
+        AccountMeta::new(remaining[11].key(), false), // [6] emberUsdcReserve
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false) // [7] tokenProgram
+    ];
+
+    let ember_wrap_ix = Instruction {
+        program_id: EMBER_PROGRAM_ID,
+        accounts: ember_wrap_metas,
+        data: ember_wrap_data,
+    };
+
+    let ember_wrap_cpi_infos = vec![
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[8].to_account_info(), // phUsdMintAuthPda
+        remaining[12].to_account_info(), // usdcMint
+        remaining[9].to_account_info(), // phUsdMint
+        ctx.accounts.executor_token_account.to_account_info(), // traderUsdcAta
+        remaining[10].to_account_info(), // traderPhUsdAta (executor PhUSD ATA)
+        remaining[11].to_account_info(), // emberUsdcReserve
+        ctx.accounts.token_program.to_account_info(), // tokenProgram
+        remaining[7].to_account_info() // emberProgram (must be in list)
+    ];
+
+    invoke_signed(&ember_wrap_ix, &ember_wrap_cpi_infos, &[executor_seeds])?;
+
+    // ── 12c. Phoenix depositFunds: executor PhUSD ATA → globalVault ──────────
+    let mut ix_data = phoenix_disc("deposit_funds").to_vec();
+    ix_data.extend_from_slice(&deposit_amount.to_le_bytes());
+
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // phoenixLogAuthority
+        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[10].key(), false), // traderTokenAccount (executor PhUSD ATA)
+        AccountMeta::new(remaining[3].key(), false), // traderAccount
+        AccountMeta::new(remaining[4].key(), false), // globalVault (PhUSD)
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // tokenProgram
+        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false) // activeTraderBuffer
+    ];
+
+    let deposit_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // phoenixLogAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[10].to_account_info(), // traderTokenAccount (executor PhUSD ATA)
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // globalVault (PhUSD)
+        ctx.accounts.token_program.to_account_info(), // tokenProgram
+        remaining[5].to_account_info(), // globalTraderIndex
+        remaining[6].to_account_info(), // activeTraderBuffer
+        remaining[0].to_account_info() // phoenixProgram (must be in list)
+    ];
+
+    invoke_signed(&deposit_ix, &cpi_infos, &[executor_seeds])?;
+
+    // ── 13. Pay relayer fee from vault ATA ────────────────────────────────────
+    if ext_data.fee > 0 {
+        let relayer_token_data = deserialize_token_account(
+            &ctx.accounts.relayer_token_account.to_account_info()
+        )?;
+        require_keys_eq!(relayer_token_data.mint, mint_address, PrivacyError::InvalidMintAddress);
+        require_keys_eq!(
+            relayer_token_data.owner,
+            ext_data.relayer,
+            PrivacyError::RelayerTokenAccountMismatch
+        );
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.relayer_token_account.to_account_info(),
+                    authority: ctx.accounts.vault.to_account_info(),
+                },
+                &[vault_seeds]
+            ),
+            ext_data.fee
+        )?;
+    }
+
+    // ── 14. Update TVL (USDC left the vault) ──────────────────────────────────
+    cfg.total_tvl = cfg.total_tvl
+        .checked_sub(total_outflow)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    // ── 15. Insert output commitments (change notes) into Merkle tree ─────────
+    let (leaf_index_0, leaf_index_1, new_root) = {
+        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
+        let max_capacity = 1u64 << (output_tree.height as u64);
+        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
+
+        let idx0 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
+        let idx1 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
+        (idx0, idx1, output_tree.root)
+    };
+
+    // ── 16. Emit events ───────────────────────────────────────────────────────
+    let timestamp = clock.unix_timestamp;
+
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[0],
+        timestamp,
+        mint_address,
+        tree_id: input_tree_id,
+    });
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[1],
+        timestamp,
+        mint_address,
+        tree_id: input_tree_id,
+    });
+
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+    });
+    emit!(PhoenixDepositEvent {
+        deposit_amount,
+        relayer_fee: ext_data.fee,
+        mint_address,
+        nullifiers: input_nullifiers,
+        commitments: output_commitments,
+        timestamp,
+    });
+
+    // ── 17. Initialize the per-deposit slot ───────────────────────────────────
+    // Records the deposited amount and claim key so the exit flow can enforce
+    // per-user withdrawal caps and prevent relayer theft.
+    let slot = &mut ctx.accounts.phoenix_slot;
+    slot.bump = ctx.bumps.phoenix_slot;
+    slot.amount = deposit_amount;
+    slot.withdrawn = 0;
+    slot.claimant_pubkey = claimant_pubkey;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Place a market or limit order on Phoenix using the vault's trader account.**
+///
+/// The caller supplies `order_data` — the full Anchor-encoded instruction bytes
+/// (discriminator + borsh-serialised `OrderPacket`). Only `placeMarketOrder`
+/// and `placeLimitOrder` discriminators are accepted.
+///
+/// No ZK proof is required. The relayer is responsible for constructing the
+/// correct order packet off-chain and signing the transaction.
+///
+/// `remaining_accounts` layout (9 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — PDA ["log"] on Phoenix; readonly
+/// [2] globalConfiguration       — PDA ["global"] on Phoenix; writable
+/// [3] phoenixTraderAccount      — PDA ["trader", vault, 0, 0]; writable
+/// [4] perpAssetMap              — writable
+/// [5] phoenixGlobalTraderIndex  — writable
+/// [6] phoenixActiveTraderBuffer — writable
+/// [7] orderbook                 — writable
+/// [8] splines                   — writable
+/// ```
+pub fn phoenix_place_order<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceOrder<'info>>,
+    mint_address: Pubkey,
+    order_data: Vec<u8>
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    // Validate discriminator — only market or limit orders are accepted
+    require!(order_data.len() >= 8, PrivacyError::PhoenixInvalidOrderData);
+    let disc_bytes: [u8; 8] = order_data[..8].try_into().unwrap();
+    let market_disc = phoenix_disc("place_market_order");
+    let limit_disc = phoenix_disc("place_limit_order");
+    require!(
+        disc_bytes == market_disc || disc_bytes == limit_disc,
+        PrivacyError::PhoenixInvalidOrderData
+    );
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // placeMarketOrder / placeLimitOrder account layout (from Phoenix IDL):
+    //   0. phoenixProgram (readonly)
+    //   1. phoenixLogAuthority (readonly)
+    //   2. globalConfiguration (writable)
+    //   3. traderWallet (signer)
+    //   4. traderAccount (writable)
+    //   5. perpAssetMap (writable)
+    //   6. globalTraderIndex (writable)
+    //   7. activeTraderBuffer (writable)
+    //   8. orderbook (writable)
+    //   9. splines (writable)
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // phoenixLogAuthority
+        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false), // traderAccount
+        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
+        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false), // activeTraderBuffer
+        AccountMeta::new(remaining[7].key(), false), // orderbook
+        AccountMeta::new(remaining[8].key(), false) // splines
+    ];
+
+    let order_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: order_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(),
+        remaining[2].to_account_info(),
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(),
+        remaining[4].to_account_info(),
+        remaining[5].to_account_info(),
+        remaining[6].to_account_info(),
+        remaining[7].to_account_info(),
+        remaining[8].to_account_info(),
+        remaining[0].to_account_info() // phoenixProgram
+    ];
+
+    invoke_signed(&order_ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixOrderEvent {
+        mint_address,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Cancel all open orders for the vault's Phoenix trader account.**
+///
+/// `remaining_accounts` layout — same 9 accounts as `phoenix_place_order`.
+pub fn phoenix_cancel_orders<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelOrders<'info>>,
+    mint_address: Pubkey
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // cancelAll account layout (same as placeMarketOrder):
+    //   0..9: same as place_market_order
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false),
+        AccountMeta::new_readonly(remaining[1].key(), false),
+        AccountMeta::new(remaining[2].key(), false),
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false),
+        AccountMeta::new(remaining[4].key(), false),
+        AccountMeta::new(remaining[5].key(), false),
+        AccountMeta::new(remaining[6].key(), false),
+        AccountMeta::new(remaining[7].key(), false),
+        AccountMeta::new(remaining[8].key(), false)
+    ];
+
+    let cancel_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: phoenix_disc("cancel_all").to_vec(),
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(),
+        remaining[2].to_account_info(),
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(),
+        remaining[4].to_account_info(),
+        remaining[5].to_account_info(),
+        remaining[6].to_account_info(),
+        remaining[7].to_account_info(),
+        remaining[8].to_account_info(),
+        remaining[0].to_account_info()
+    ];
+
+    invoke_signed(&cancel_ix, &cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
+/// **Cancel specific resting orders by their FIFO order IDs.**
+///
+/// Each pair `(price_in_ticks[i], sequence_numbers[i])` identifies a resting
+/// order on the Phoenix orderbook. Both slices must have the same length and
+/// contain at least one entry (max 100 per call).
+///
+/// Encoding sent to Phoenix (per rise-public `rust/ix/src/cancel_orders.rs`):
+/// ```
+/// disc(8) + u32_le(num_orders) + N × [u32_le(nodePointer=0) + u64_le(priceInTicks) + u64_le(seqNum)]
+/// ```
+///
+/// `remaining_accounts` layout — identical to `phoenix_cancel_orders` (9 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — readonly
+/// [2] globalConfiguration       — PDA ["global"]; writable
+/// [3] phoenixTraderAccount      — PDA ["trader", executor, 0, 0]; writable
+/// [4] perpAssetMap              — writable
+/// [5] phoenixGlobalTraderIndex  — writable
+/// [6] phoenixActiveTraderBuffer — writable
+/// [7] orderbook                 — writable
+/// [8] splines                   — writable
+/// ```
+pub fn phoenix_cancel_orders_by_id<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelOrdersById<'info>>,
+    mint_address: Pubkey,
+    price_in_ticks: Vec<u64>,
+    sequence_numbers: Vec<u64>
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(!price_in_ticks.is_empty(), PrivacyError::PhoenixInvalidOrderData);
+    require!(price_in_ticks.len() == sequence_numbers.len(), PrivacyError::PhoenixInvalidOrderData);
+    require!(price_in_ticks.len() <= 100, PrivacyError::PhoenixInvalidOrderData);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Encode: disc(8) + u32_le(len) + N × [u32_le(nodePointer=0) + u64_le(priceInTicks) + u64_le(seqNum)]
+    let num = price_in_ticks.len() as u32;
+    let mut ix_data = phoenix_disc("cancel_orders_by_id").to_vec();
+    ix_data.extend_from_slice(&num.to_le_bytes());
+    for i in 0..price_in_ticks.len() {
+        ix_data.extend_from_slice(&(0u32).to_le_bytes()); // nodePointer = 0
+        ix_data.extend_from_slice(&price_in_ticks[i].to_le_bytes()); // priceInTicks
+        ix_data.extend_from_slice(&sequence_numbers[i].to_le_bytes()); // orderSequenceNumber
+    }
+
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false),
+        AccountMeta::new_readonly(remaining[1].key(), false),
+        AccountMeta::new(remaining[2].key(), false),
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false),
+        AccountMeta::new(remaining[4].key(), false),
+        AccountMeta::new(remaining[5].key(), false),
+        AccountMeta::new(remaining[6].key(), false),
+        AccountMeta::new(remaining[7].key(), false),
+        AccountMeta::new(remaining[8].key(), false)
+    ];
+
+    let cancel_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(),
+        remaining[2].to_account_info(),
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(),
+        remaining[4].to_account_info(),
+        remaining[5].to_account_info(),
+        remaining[6].to_account_info(),
+        remaining[7].to_account_info(),
+        remaining[8].to_account_info(),
+        remaining[0].to_account_info()
+    ];
+
+    invoke_signed(&cancel_ix, &cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Place a market close/reduce order — risk management before withdrawal.**
+///
+/// Must be called before `phoenix_queue_withdraw` whenever an open position
+/// consumes margin that exceeds the free `traderQuoteLotCollateral`. Without
+/// first reducing the position, `phoenix_queue_withdraw` will fail with an
+/// `InsufficientMargin` error from Phoenix.
+///
+/// Only `place_market_order` is accepted. Limit orders would not execute
+/// immediately, leaving margin tied up and not freeing collateral for the
+/// subsequent withdrawal.
+///
+/// `remaining_accounts` layout — identical to `phoenix_place_order` (9 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — readonly
+/// [2] globalConfiguration       — PDA ["global"]; writable
+/// [3] phoenixTraderAccount      — PDA ["trader", executor, 0, 0]; writable
+/// [4] perpAssetMap              — writable
+/// [5] phoenixGlobalTraderIndex  — writable
+/// [6] phoenixActiveTraderBuffer — writable
+/// [7] orderbook                 — writable
+/// [8] splines                   — writable
+/// ```
+pub fn phoenix_close_position<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixClosePosition<'info>>,
+    mint_address: Pubkey,
+    order_data: Vec<u8>
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    // Only market orders are accepted — they execute immediately, freeing margin.
+    // Limit orders would leave the position partially open and would not solve
+    // an InsufficientMargin failure at queue_withdraw time.
+    require!(order_data.len() >= 8, PrivacyError::PhoenixInvalidOrderData);
+    let disc_bytes: [u8; 8] = order_data[..8].try_into().unwrap();
+    require!(
+        disc_bytes == phoenix_disc("place_market_order"),
+        PrivacyError::PhoenixInvalidOrderData
+    );
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false),
+        AccountMeta::new_readonly(remaining[1].key(), false),
+        AccountMeta::new(remaining[2].key(), false),
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false),
+        AccountMeta::new(remaining[4].key(), false),
+        AccountMeta::new(remaining[5].key(), false),
+        AccountMeta::new(remaining[6].key(), false),
+        AccountMeta::new(remaining[7].key(), false),
+        AccountMeta::new(remaining[8].key(), false)
+    ];
+
+    let close_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: order_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(),
+        remaining[2].to_account_info(),
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(),
+        remaining[4].to_account_info(),
+        remaining[5].to_account_info(),
+        remaining[6].to_account_info(),
+        remaining[7].to_account_info(),
+        remaining[8].to_account_info(),
+        remaining[0].to_account_info()
+    ];
+
+    invoke_signed(&close_ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixClosePositionEvent {
+        mint_address,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Queue a Phoenix withdrawal to the vault's PhUSD ATA.**
+///
+/// Calls `withdrawFunds` on Phoenix, which enqueues the withdrawal. A permissionless
+/// on-chain crank (`consumeWithdrawQueue`) must be called afterward to transfer PhUSD
+/// from the Phoenix global vault to `remaining[9]` (vault's PhUSD ATA). Once the PhUSD
+/// arrives, call `phoenix_ember_unwrap` to convert it back to USDC.
+///
+/// `remaining_accounts` layout (10 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — PDA ["log"]; readonly
+/// [2] globalConfiguration       — PDA ["global"]; writable
+/// [3] phoenixTraderAccount      — PDA ["trader", vault, 0, 0]; writable
+/// [4] perpAssetMap              — writable
+/// [5] phoenixGlobalVault        — Phoenix's PhUSD token account; writable
+/// [6] withdrawQueue             — writable
+/// [7] phoenixGlobalTraderIndex  — writable
+/// [8] phoenixActiveTraderBuffer — writable
+/// [9] vaultPhUsdAta             — vault's PhUSD ATA; writable (receives PhUSD from Phoenix)
+/// ```
+/// `vault_token_account` (named) = vault's USDC ATA (validated; destination after `phoenix_ember_unwrap`).
+pub fn phoenix_queue_withdraw<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixQueueWithdraw<'info>>,
+    mint_address: Pubkey,
+    amount: u64,
+    _withdrawal_id: [u8; 32]
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 10, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Validate remaining[9] is the executor's canonical PhUSD ATA (Phoenix withdrawal destination)
+    let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
+    require_keys_eq!(remaining[9].key(), expected_phusd_ata, PrivacyError::VaultTokenAccountNotATA);
+
+    // ── Slot cap enforcement ──────────────────────────────────────────────────
+    // Prevents any single deposit slot from withdrawing more than it deposited.
+    // Placed after CPI pre-checks so unit tests (non-USDC pool, wrong ATA) still
+    // fail on their expected errors without requiring a real slot PDA.
+    {
+        let slot_info = ctx.accounts.phoenix_slot.to_account_info();
+        let mut slot_data = slot_info.data.borrow_mut();
+        let slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
+        let new_withdrawn = slot.withdrawn
+            .checked_add(amount)
+            .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+        require!(new_withdrawn <= slot.amount, PrivacyError::SlotOverdraft);
+        // Write updated slot back
+        let updated = crate::PhoenixSlot { withdrawn: new_withdrawn, ..slot };
+        let mut cursor = &mut slot_data[..];
+        updated.try_serialize(&mut cursor)?;
+    }
+
+    // withdrawFunds instruction data: discriminator (8 bytes) || amount (u64 LE = 8 bytes)
+    let mut ix_data = phoenix_disc("withdraw_funds").to_vec();
+    ix_data.extend_from_slice(&amount.to_le_bytes());
+
+    // withdrawFunds account layout (from Phoenix IDL):
+    //   0. phoenixProgram (readonly)
+    //   1. phoenixLogAuthority (readonly)
+    //   2. globalConfiguration (writable)
+    //   3. traderWallet (signer)
+    //   4. traderAccount (writable)
+    //   5. perpAssetMap (writable)
+    //   6. globalVault (writable)         — Phoenix's PhUSD token account
+    //   7. destinationTokenAccount (writable) — executor's PhUSD ATA (remaining[9])
+    //   8. tokenProgram (readonly)
+    //   9. globalTraderIndex (writable)
+    //  10. activeTraderBuffer (writable)
+    //  11. withdrawQueue (writable)
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // phoenixLogAuthority
+        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false), // traderAccount
+        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
+        AccountMeta::new(remaining[5].key(), false), // globalVault (PhUSD)
+        AccountMeta::new(remaining[9].key(), false), // destinationTokenAccount (executor PhUSD ATA)
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // tokenProgram
+        AccountMeta::new(remaining[7].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[8].key(), false), // activeTraderBuffer
+        AccountMeta::new(remaining[6].key(), false) // withdrawQueue
+    ];
+
+    let withdraw_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // phoenixLogAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // perpAssetMap
+        remaining[5].to_account_info(), // globalVault (PhUSD)
+        remaining[9].to_account_info(), // destinationTokenAccount (executor PhUSD ATA)
+        ctx.accounts.token_program.to_account_info(), // tokenProgram
+        remaining[7].to_account_info(), // globalTraderIndex
+        remaining[8].to_account_info(), // activeTraderBuffer
+        remaining[6].to_account_info(), // withdrawQueue
+        remaining[0].to_account_info() // phoenixProgram
+    ];
+
+    invoke_signed(&withdraw_ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixWithdrawQueuedEvent {
+        amount,
+        mint_address,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Register the pool vault as a Phoenix Eternal trader (one-time setup).**
+///
+/// Must be called once before `phoenix_deposit_from_pool` or
+/// `phoenix_place_order` can be used. Creates the vault's Phoenix trader
+/// account (PDA: `["trader", vault, 0, 0]` on Phoenix).
+///
+/// The vault PDA is the registered trader (signs via `invoke_signed`).
+/// The `payer` account (remaining[4]) pays the rent for the new trader account.
+///
+/// `remaining_accounts` layout (5 accounts):
+/// ```
+/// [0] phoenixProgram          — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority     — PDA ["log"] on Phoenix; readonly
+/// [2] globalConfiguration     — PDA ["global"] on Phoenix; writable
+/// [3] traderAccount           — PDA ["trader", vault, 0, 0] on Phoenix; writable (new)
+/// [4] payer                   — writable signer; pays trader account rent
+/// ```
+/// `system_program` comes from the named account (not remaining_accounts).
+pub fn phoenix_register_pool_trader<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixRegisterTrader<'info>>,
+    mint_address: Pubkey,
+    // 0 = Cross (max_positions=128, subaccount=0), 1 = Isolated (max_positions=1, subaccount=1)
+    margin_type: u8
+) -> Result<()> {
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(margin_type <= 1, PrivacyError::PhoenixInvalidOrderData);
+
+    let remaining = ctx.remaining_accounts;
+    // remaining: [phoenixProgram, logAuthority, globalConfiguration, traderAccount]
+    require!(remaining.len() >= 4, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    // Initialize executor fields (idempotent — safe to set on every call).
+    // On first call the account is freshly allocated; on re-runs the values are unchanged.
+    let executor_bump = ctx.bumps.executor;
+    {
+        let executor = &mut ctx.accounts.executor;
+        executor.mint_address = mint_address;
+        executor.bump = executor_bump;
+    }
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Cross: max_positions=128, subaccount_index=0
+    // Isolated: max_positions=1,  subaccount_index=1
+    let (max_positions, subaccount_index): (u64, u8) = if margin_type == 0 {
+        (128, 0)
+    } else {
+        (1, 1)
+    };
+
+    // RegisterTraderParams { max_positions: u64, trader_pda_index: u8, subaccount_index: u8 }
+    let mut ix_data = phoenix_disc("register_trader").to_vec();
+    ix_data.extend_from_slice(&max_positions.to_le_bytes());
+    ix_data.push(0u8); // trader_pda_index = 0
+    ix_data.push(subaccount_index);
+
+    // registerTrader account layout (Phoenix IDL order):
+    //   [0] phoenixProgram        (readonly)         — remaining[0]
+    //   [1] phoenixLogAuthority   (readonly)         — remaining[1]
+    //   [2] globalConfiguration   (writable)         — remaining[2]
+    //   [3] payer                 (writable, signer) — ctx.accounts.payer
+    //   [4] traderWallet          (signer, PDA)      — ctx.accounts.executor
+    //   [5] traderAccount         (writable, init)   — remaining[3]
+    //   [6] systemProgram         (readonly)         — ctx.accounts.system_program
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // [0] phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // [1] phoenixLogAuthority
+        AccountMeta::new(remaining[2].key(), false), // [2] globalConfiguration
+        AccountMeta::new(ctx.accounts.payer.key(), true), // [3] payer
+        AccountMeta::new_readonly(executor_key, true), // [4] traderWallet (executor, PDA signer)
+        AccountMeta::new(remaining[3].key(), false), // [5] traderAccount
+        AccountMeta::new_readonly(ctx.accounts.system_program.key(), false) // [6] systemProgram
+    ];
+
+    let register_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[0].to_account_info(), // phoenixProgram
+        remaining[1].to_account_info(), // phoenixLogAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.payer.to_account_info(), // payer
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(), // traderAccount
+        ctx.accounts.system_program.to_account_info() // systemProgram
+    ];
+
+    invoke_signed(&register_ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixRegisterTraderEvent {
+        mint_address,
+        vault: executor_key,
+        trader_account: remaining[3].key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Wrap vault USDC → PhUSD via EMBER deposit CPI.**
+///
+/// Calls EMBER's `deposit` instruction with the vault PDA as `traderWallet`.
+/// USDC is drawn from the vault's USDC ATA and PhUSD is minted 1:1 into the
+/// vault's PhUSD ATA. No TVL change — the value stays inside the vault.
+///
+/// `remaining_accounts` layout (5 accounts):
+/// ```
+/// [0] emberProgram       — EMBER_PROGRAM_ID; validated
+/// [1] phUsdMintAuthPda   — PHUSD_MINT_AUTHORITY; readonly
+/// [2] usdcMint           — PHOENIX_REQUIRED_MINT; readonly
+/// [3] phUsdMint          — PHUSD_MINT; writable (supply increases via mint_to)
+/// [4] emberUsdcReserve   — EMBER_USDC_RESERVE; writable (receives USDC)
+/// ```
+pub fn phoenix_ember_wrap<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixEmberWrap<'info>>,
+    mint_address: Pubkey,
+    amount: u64
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require!(amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 5, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), EMBER_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Validate executor PhUSD ATA
+    let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
+    require_keys_eq!(
+        ctx.accounts.executor_ph_usd_ata.key(),
+        expected_phusd_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // Validate executor USDC ATA
+    let expected_usdc_ata = get_associated_token_address(&executor_key, &mint_address);
+    require_keys_eq!(
+        ctx.accounts.executor_token_account.key(),
+        expected_usdc_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // EMBER deposit account layout:
+    //   [0] traderWallet (signer)       — executor PDA
+    //   [1] phUsdMintAuthPda (readonly) — remaining[1]
+    //   [2] usdcMint (readonly)         — remaining[2]
+    //   [3] phUsdMint (writable)        — remaining[3] (supply increases)
+    //   [4] traderUsdcAta (writable)    — executor_token_account (source)
+    //   [5] traderPhUsdAta (writable)   — executor_ph_usd_ata (destination)
+    //   [6] emberUsdcReserve (writable) — remaining[4] (receives USDC)
+    //   [7] tokenProgram (readonly)
+    let mut ember_wrap_data = ember_disc("deposit").to_vec();
+    ember_wrap_data.extend_from_slice(&amount.to_le_bytes());
+
+    let ember_wrap_metas = vec![
+        AccountMeta::new_readonly(executor_key, true), // [0] traderWallet (executor signs)
+        AccountMeta::new_readonly(remaining[1].key(), false), // [1] phUsdMintAuthPda
+        AccountMeta::new_readonly(remaining[2].key(), false), // [2] usdcMint
+        AccountMeta::new(remaining[3].key(), false), // [3] phUsdMint
+        AccountMeta::new(ctx.accounts.executor_token_account.key(), false), // [4] traderUsdcAta
+        AccountMeta::new(ctx.accounts.executor_ph_usd_ata.key(), false), // [5] traderPhUsdAta
+        AccountMeta::new(remaining[4].key(), false), // [6] emberUsdcReserve
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false) // [7] tokenProgram
+    ];
+
+    let ember_wrap_ix = Instruction {
+        program_id: EMBER_PROGRAM_ID,
+        accounts: ember_wrap_metas,
+        data: ember_wrap_data,
+    };
+
+    let ember_wrap_cpi_infos = vec![
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[1].to_account_info(), // phUsdMintAuthPda
+        remaining[2].to_account_info(), // usdcMint
+        remaining[3].to_account_info(), // phUsdMint
+        ctx.accounts.executor_token_account.to_account_info(), // traderUsdcAta
+        ctx.accounts.executor_ph_usd_ata.to_account_info(), // traderPhUsdAta
+        remaining[4].to_account_info(), // emberUsdcReserve
+        ctx.accounts.token_program.to_account_info(), // tokenProgram
+        remaining[0].to_account_info() // emberProgram (must be in list)
+    ];
+
+    invoke_signed(&ember_wrap_ix, &ember_wrap_cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Crank the Phoenix withdraw queue then convert PhUSD → USDC via EMBER (combined exit step).**
+///
+/// Atomically performs what was previously two separate instructions:
+///   1. Phoenix `consumeWithdrawQueue` — flushes any pending PhUSD from Phoenix
+///      globalVault → executor PhUSD ATA (permissionless, no executor signature).
+///   2. EMBER `withdraw` — burns PhUSD from executor PhUSD ATA, returns USDC 1:1
+///      to executor USDC ATA, which is then SPL-transferred to vault USDC ATA.
+///
+/// Phoenix processes withdrawals synchronously in `withdrawFunds`, so the consume
+/// CPI is effectively a no-op in normal conditions but is included as a safety net
+/// for edge cases (high-load cranking scenarios).
+///
+/// TVL is updated upward by `amount` to reflect USDC arriving in the vault.
+///
+/// `remaining_accounts` layout (14 accounts):
+/// ```
+/// ─── Phoenix consumeWithdrawQueue (9 accounts) ───
+/// [0]  phoenixProgram        — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1]  phoenixLogAuthority   — readonly
+/// [2]  globalConfiguration   — PDA ["global"]; writable
+/// [3]  perpAssetMap          — writable
+/// [4]  globalVault           — Phoenix PhUSD vault; writable
+/// [5]  globalTraderIndex     — writable
+/// [6]  activeTraderBuffer    — writable
+/// [7]  withdrawQueue         — writable
+/// [8]  traderAccount         — PDA ["trader", executor, 0, 0]; writable
+/// ─── EMBER withdraw (5 accounts) ────────────────
+/// [9]  emberProgram          — EMBER_PROGRAM_ID; validated
+/// [10] phUsdMintAuthPda      — PHUSD_MINT_AUTHORITY; readonly
+/// [11] usdcMint              — PHOENIX_REQUIRED_MINT; readonly
+/// [12] phUsdMint             — PHUSD_MINT; writable (supply decreases via burn)
+/// [13] emberUsdcReserve      — EMBER_USDC_RESERVE; writable (releases USDC)
+/// ```
+pub fn phoenix_ember_unwrap<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixEmberUnwrap<'info>>,
+    mint_address: Pubkey,
+    _withdrawal_id: [u8; 32],
+    amount: u64
+) -> Result<()> {
+    let cfg = &mut ctx.accounts.config;
+
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require!(amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 14, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+    require_keys_eq!(remaining[9].key(), EMBER_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let vault_key = ctx.accounts.vault.key();
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let _vault_seeds: &[&[u8]] = &[b"privacy_vault_v3", mint_address.as_ref(), &[cfg.vault_bump]];
+
+    // Validate executor PhUSD ATA (source of PhUSD to burn)
+    let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
+    require_keys_eq!(
+        ctx.accounts.executor_ph_usd_ata.key(),
+        expected_phusd_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // Validate executor USDC ATA (receives USDC from EMBER)
+    let expected_executor_usdc_ata = get_associated_token_address(&executor_key, &mint_address);
+    require_keys_eq!(
+        ctx.accounts.executor_token_account.key(),
+        expected_executor_usdc_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // Validate vault USDC ATA (final destination)
+    let expected_vault_usdc_ata = get_associated_token_address(&vault_key, &mint_address);
+    require_keys_eq!(
+        ctx.accounts.vault_token_account.key(),
+        expected_vault_usdc_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // ── Slot cap: pending_reissue cannot exceed the amount queued for withdrawal ──
+    // We check against slot.withdrawn (not slot.amount) to commit-bind ember_unwrap
+    // to phoenix_queue_withdraw. If queue_withdraw was never called for this slot
+    // (slot.withdrawn == 0), any positive amount fails this check automatically.
+    // This prevents cross-slot PhUSD contamination: a relayer cannot use PhUSD
+    // that arrived from slot B to inflate slot A's pending_reissue beyond
+    // what slot A actually queued via phoenix_queue_withdraw.
+    {
+        let slot_info = ctx.accounts.phoenix_slot.to_account_info();
+        let slot_data = slot_info.data.borrow();
+        let slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
+        let pending = &ctx.accounts.pending_reissue;
+        let new_pending = pending.amount
+            .checked_add(amount)
+            .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+        require!(new_pending <= slot.withdrawn, PrivacyError::SlotOverdraft);
+    }
+
+    // ── 0. Phoenix consumeWithdrawQueue: flush any pending PhUSD to executor PhUSD ATA ──
+    // This is permissionless — executor does NOT need to sign.
+    // Phoenix normally processes withdrawals synchronously in withdrawFunds, so
+    // this CPI is a no-op in typical conditions but acts as a safety net.
+    //
+    // consumeWithdrawQueue account layout (Phoenix IDL):
+    //   [0]  phoenixProgram (readonly)          — remaining[0]
+    //   [1]  phoenixLogAuthority (readonly)     — remaining[1]
+    //   [2]  globalConfiguration (writable)     — remaining[2]
+    //   [3]  perpAssetMap (writable)            — remaining[3]
+    //   [4]  globalVault (writable)             — remaining[4]
+    //   [5]  globalTraderIndex (writable)       — remaining[5]
+    //   [6]  activeTraderBuffer (writable)      — remaining[6]
+    //   [7]  withdrawQueue (writable)           — remaining[7]
+    //   [8]  tokenProgram (readonly)
+    //   [9]  traderWallet (readonly, no signer) — executor
+    //  [10]  destinationTokenAccount (writable) — executor PhUSD ATA
+    //  [11]  traderAccount (writable)           — remaining[8]
+    let consume_disc = phoenix_disc("consume_withdraw_queue");
+    let consume_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // [0] phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // [1] phoenixLogAuthority
+        AccountMeta::new(remaining[2].key(), false), // [2] globalConfiguration
+        AccountMeta::new(remaining[3].key(), false), // [3] perpAssetMap
+        AccountMeta::new(remaining[4].key(), false), // [4] globalVault
+        AccountMeta::new(remaining[5].key(), false), // [5] globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false), // [6] activeTraderBuffer
+        AccountMeta::new(remaining[7].key(), false), // [7] withdrawQueue
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false), // [8] tokenProgram
+        AccountMeta::new_readonly(executor_key, false), // [9] traderWallet (not a signer)
+        AccountMeta::new(ctx.accounts.executor_ph_usd_ata.key(), false), // [10] destination
+        AccountMeta::new(remaining[8].key(), false) // [11] traderAccount
+    ];
+    let consume_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: consume_metas,
+        data: consume_disc.to_vec(),
+    };
+    // Best-effort: Phoenix returns an error when the queue is already empty
+    // (which is the normal case — withdrawFunds is synchronous). Ignore the
+    // result so the EMBER unwrap below can proceed regardless.
+    let _ = anchor_lang::solana_program::program::invoke(
+        &consume_ix,
+        &[
+            remaining[1].to_account_info(), // phoenixLogAuthority
+            remaining[2].to_account_info(), // globalConfiguration
+            remaining[3].to_account_info(), // perpAssetMap
+            remaining[4].to_account_info(), // globalVault
+            remaining[5].to_account_info(), // globalTraderIndex
+            remaining[6].to_account_info(), // activeTraderBuffer
+            remaining[7].to_account_info(), // withdrawQueue
+            ctx.accounts.token_program.to_account_info(), // tokenProgram
+            ctx.accounts.executor.to_account_info(), // traderWallet (readonly)
+            ctx.accounts.executor_ph_usd_ata.to_account_info(), // destination
+            remaining[8].to_account_info(), // traderAccount
+            remaining[0].to_account_info(), // phoenixProgram
+        ]
+    );
+
+    // ── 1. EMBER withdraw: burn PhUSD → USDC ─────────────────────────────────
+    // EMBER withdraw account layout — identical slot ordering to deposit;
+    // only the instruction discriminator changes direction.
+    //   [0] traderWallet (signer)       — executor PDA
+    //   [1] phUsdMintAuthPda (readonly) — remaining[10]
+    //   [2] usdcMint (readonly)         — remaining[11]
+    //   [3] phUsdMint (writable)        — remaining[12] (supply decreases via burn)
+    //   [4] traderUsdcAta (writable)    — executor_token_account (receives USDC)
+    //   [5] traderPhUsdAta (writable)   — executor_ph_usd_ata (source, burned)
+    //   [6] emberUsdcReserve (writable) — remaining[13] (releases USDC)
+    //   [7] tokenProgram (readonly)
+    // EMBER withdraw takes Option<u64>; Borsh: Some(n) = [1_u8 || n_le_bytes]
+    let mut ember_unwrap_data = ember_disc("withdraw").to_vec();
+    ember_unwrap_data.push(1u8); // Some() discriminant
+    ember_unwrap_data.extend_from_slice(&amount.to_le_bytes());
+
+    let ember_unwrap_metas = vec![
+        AccountMeta::new_readonly(executor_key, true), // [0] traderWallet (executor signs)
+        AccountMeta::new_readonly(remaining[10].key(), false), // [1] phUsdMintAuthPda
+        AccountMeta::new_readonly(remaining[11].key(), false), // [2] usdcMint
+        AccountMeta::new(remaining[12].key(), false), // [3] phUsdMint
+        AccountMeta::new(ctx.accounts.executor_token_account.key(), false), // [4] traderUsdcAta
+        AccountMeta::new(ctx.accounts.executor_ph_usd_ata.key(), false), // [5] traderPhUsdAta
+        AccountMeta::new(remaining[13].key(), false), // [6] emberUsdcReserve
+        AccountMeta::new_readonly(ctx.accounts.token_program.key(), false) // [7] tokenProgram
+    ];
+
+    let ember_unwrap_ix = Instruction {
+        program_id: EMBER_PROGRAM_ID,
+        accounts: ember_unwrap_metas,
+        data: ember_unwrap_data,
+    };
+
+    let ember_unwrap_cpi_infos = vec![
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[10].to_account_info(), // phUsdMintAuthPda
+        remaining[11].to_account_info(), // usdcMint
+        remaining[12].to_account_info(), // phUsdMint
+        ctx.accounts.executor_token_account.to_account_info(), // traderUsdcAta
+        ctx.accounts.executor_ph_usd_ata.to_account_info(), // traderPhUsdAta
+        remaining[13].to_account_info(), // emberUsdcReserve
+        ctx.accounts.token_program.to_account_info(), // tokenProgram
+        remaining[9].to_account_info() // emberProgram (must be in list)
+    ];
+
+    invoke_signed(&ember_unwrap_ix, &ember_unwrap_cpi_infos, &[executor_seeds])?;
+
+    // Transfer USDC from executor_token_account to vault_token_account
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::Transfer {
+                from: ctx.accounts.executor_token_account.to_account_info(),
+                to: ctx.accounts.vault_token_account.to_account_info(),
+                authority: ctx.accounts.executor.to_account_info(),
+            },
+            &[executor_seeds]
+        ),
+        amount
+    )?;
+
+    // Update TVL: USDC has arrived back in the vault
+    cfg.total_tvl = cfg.total_tvl
+        .checked_add(amount)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    // Record proceeds so phoenix_reissue_notes can verify the exact amount
+    // and is blocked from minting more than Phoenix actually returned.
+    let pending = &mut ctx.accounts.pending_reissue;
+    pending.bump = ctx.bumps.pending_reissue;
+    pending.amount = pending.amount
+        .checked_add(amount)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    emit!(PhoenixEmberUnwrapEvent {
+        amount,
+        mint_address,
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Re-mint private USDC notes from funds returned to the vault by Phoenix.**
+///
+/// This is Step 4 of the Phoenix exit flow — the final step after:
+///   1. `phoenix_queue_withdraw`   — enqueue collateral
+///   2. `consumeWithdrawQueue`     — permissionless crank; PhUSD → vault PhUSD ATA
+///   3. `phoenix_ember_unwrap`     — burn PhUSD; USDC → vault USDC ATA; TVL updated
+///   4. **`phoenix_reissue_notes`** — ZK verify; insert commitments; **no token transfer**
+///
+/// TVL was already updated in `phoenix_ember_unwrap`. This instruction only verifies
+/// the ZK proof and inserts the output commitments into the Merkle tree.
+///
+/// The ZK proof format is identical to a standard deposit (public_amount = +amount,
+/// dummy zero-value input notes, two output notes that sum to `amount`).
+pub fn phoenix_reissue_notes(
+    ctx: Context<crate::PhoenixReissueNotes>,
+    root: [u8; 32],
+    input_tree_id: u16,
+    output_tree_id: u16,
+    amount: u64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+    _withdrawal_id: [u8; 32],
+    deadline: i64,
+    ext_data: ExtData,
+    proof: TransactionProof,
+    note_ciphers: Option<NoteCiphers>
+) -> Result<()> {
+    let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
+        Some(c) =>
+            (
+                c.note0_ephemeral_key,
+                c.note0_encrypted,
+                c.note0_view_tag,
+                c.note1_ephemeral_key,
+                c.note1_encrypted,
+                c.note1_view_tag,
+            ),
+        None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
+    };
+
+    let cfg = &ctx.accounts.config;
+
+    // ── 1. Phoenix USDC only ──────────────────────────────────────────────────
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
+
+    // ── 2. Tree ID bounds ─────────────────────────────────────────────────────
+    require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+    require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+
+    // ── 3. Amount must be positive ────────────────────────────────────────────
+    require!(amount > 0, PrivacyError::InvalidPublicAmount);
+
+    // ── 4. Relayer authorisation ──────────────────────────────────────────────
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
+
+    // ── 5. Deadline ───────────────────────────────────────────────────────────
+    let clock = Clock::get()?;
+    require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
+
+    // ── 6. Commitment / nullifier sanity ──────────────────────────────────────
+    let input_nullifiers = [input_nullifier_0, input_nullifier_1];
+    let output_commitments = [output_commitment_0, output_commitment_1];
+    let zero = [0u8; 32];
+    require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
+    require!(output_commitments[0] != output_commitments[1], PrivacyError::DuplicateCommitments);
+    require!(
+        output_commitments[0] != zero && output_commitments[1] != zero,
+        PrivacyError::ZeroCommitment
+    );
+
+    // ── 7. ext_data hash ──────────────────────────────────────────────────────
+    let computed_ext_hash = ext_data.hash()?;
+    require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
+
+    // ── 8. Phoenix pending reissue — only proceeds from phoenix_ember_unwrap can be minted ──
+    // This binds the reissued amount to the exact USDC that Phoenix returned.
+    // Prevents double-minting the same proceeds and blocks stale repeat calls.
+    let pending = &mut ctx.accounts.pending_reissue;
+    pending.bump = ctx.bumps.pending_reissue;
+    require!(pending.amount >= amount, PrivacyError::InsufficientFundsForWithdrawal);
+    pending.amount = pending.amount
+        .checked_sub(amount)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    // ── 8b. Claimant verification — prevents relayer theft ───────────────────
+    // The claimant_pubkey was set at deposit time as an ephemeral key held by the user.
+    // By requiring its signature on this transaction, we guarantee that only the original
+    // depositor can claim the exit proceeds — even if a malicious relayer controls the
+    // queue_withdraw and ember_unwrap steps.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.phoenix_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    // ── 9. ZK proof verification ──────────────────────────────────────────────
+    // public_amount is POSITIVE: circuit constraint is sumIns + pubAmt = sumOuts.
+    // With dummy zero-value input notes, the two output notes must sum to `amount`.
+    let public_inputs = TransactionPublicInputs {
+        root,
+        public_amount: amount as i64,
+        ext_data_hash,
+        mint_address,
+        input_nullifiers,
+        output_commitments,
+    };
+    verify_transaction_groth16(proof, &public_inputs)?;
+
+    // ── 10. Known root check ──────────────────────────────────────────────────
+    {
+        let input_tree = ctx.accounts.input_tree.load()?;
+        require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
+    }
+
+    // ── 11. Insert output commitments into output tree ────────────────────────
+    let (leaf_index_0, leaf_index_1, new_root) = {
+        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
+        let max_capacity = 1u64 << (output_tree.height as u64);
+        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
+
+        let idx0 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
+        let idx1 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
+        (idx0, idx1, output_tree.root)
+    };
+
+    // ── 12. Emit events ───────────────────────────────────────────────────────
+    // Dummy-input deposits do not mark nullifiers spent (same as transact deposits).
+    let timestamp = clock.unix_timestamp;
+
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+    });
+    emit!(PhoenixReissueEvent {
+        amount,
+        mint_address,
+        commitments: output_commitments,
+        timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Place a native Phoenix stop-loss / take-profit conditional order.**
+///
+/// Calls Phoenix's `place_stop_loss` instruction on behalf of the executor PDA.
+/// The relayer pays rent for the new `stopLossAccount`; the executor PDA signs only
+/// as `positionAuthority` (it carries Anchor data and cannot be used as a System
+/// Program transfer source).
+///
+/// Prices must be expressed in Phoenix ticks (not USD).
+///
+/// `remaining_accounts` layout (11 accounts, single-element arena arrays):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  phoenixLogAuthority     — readonly
+/// [2]  globalConfiguration     — writable
+/// [3]  traderAccount           — writable  (executor's Phoenix trader PDA)
+/// [4]  perpAssetMap            — writable
+/// [5]  globalTraderIndex       — writable
+/// [6]  activeTraderBuffer      — writable
+/// [7]  orderbook               — writable
+/// [8]  splineCollection        — writable
+/// [9]  stopLossAccount         — writable  (PDA: seeds=["stoploss", traderAccount, asset_id_le_u64])
+/// [10] systemProgram           — readonly
+/// ```
+pub fn phoenix_place_stop_loss<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceStopLoss<'info>>,
+    mint_address: Pubkey,
+    trigger_price_ticks: u64,
+    execution_price_ticks: u64,
+    trade_side: u8,
+    execution_direction: u8,
+    order_kind: u8
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 11, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Build instruction data:
+    //   disc (8) + trigger_price (8) + execution_price (8) + trade_size (8=0)
+    //   + trade_side (1) + execution_direction (1) + order_kind (1) = 35 bytes
+    let disc = phoenix_disc("place_stop_loss");
+    let mut data = Vec::with_capacity(35);
+    data.extend_from_slice(&disc);
+    data.extend_from_slice(&trigger_price_ticks.to_le_bytes());
+    data.extend_from_slice(&execution_price_ticks.to_le_bytes());
+    data.extend_from_slice(&(0u64).to_le_bytes()); // tradeSize — always 0 (full position)
+    data.push(trade_side);
+    data.push(execution_direction);
+    data.push(order_kind);
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer, writable signer — executor has data so cannot pay rent)
+        AccountMeta::new(remaining[3].key(), false), // traderAccount
+        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
+        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false), // activeTraderBuffer
+        AccountMeta::new(remaining[7].key(), false), // orderbook
+        AccountMeta::new(remaining[8].key(), false), // splineCollection
+        AccountMeta::new_readonly(executor_key, true), // positionAuthority (executor, readonly signer)
+        AccountMeta::new(remaining[9].key(), false), // stopLossAccount
+        AccountMeta::new_readonly(remaining[10].key(), false) // systemProgram
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.relayer.to_account_info(), // funder (relayer pays rent for stopLossAccount)
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // perpAssetMap
+        remaining[5].to_account_info(), // globalTraderIndex
+        remaining[6].to_account_info(), // activeTraderBuffer
+        remaining[7].to_account_info(), // orderbook
+        remaining[8].to_account_info(), // splineCollection
+        ctx.accounts.executor.to_account_info(), // positionAuthority (executor)
+        remaining[9].to_account_info(), // stopLossAccount
+        remaining[10].to_account_info(), // systemProgram
+        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixPlaceStopLossEvent {
+        mint_address,
+        trigger_price_ticks,
+        execution_price_ticks,
+        trade_side,
+        execution_direction,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Cancel a native Phoenix stop-loss / take-profit conditional order.**
+///
+/// Calls Phoenix's `cancel_stop_loss` instruction on behalf of the executor PDA.
+/// The executor PDA signs as both `funder` (writable) and `traderWallet` (readonly signer).
+///
+/// `remaining_accounts` layout (6 accounts):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  phoenixLogAuthority     — readonly
+/// [2]  globalConfiguration     — readonly  (note: readonly for cancel, unlike place)
+/// [3]  traderAccount           — readonly  (DynamicTrader PDA: seeds=["trader", executor, 0, 0])
+/// [4]  stopLossAccount         — writable  (PDA: seeds=["stoploss", traderAccount, asset_id_le_u64])
+/// [5]  systemProgram           — readonly
+/// ```
+pub fn phoenix_cancel_stop_loss<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelStopLoss<'info>>,
+    mint_address: Pubkey,
+    execution_direction: u8
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 6, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Build instruction data: disc (8) + execution_direction (1) = 9 bytes
+    let disc = phoenix_disc("cancel_stop_loss");
+    let mut data = Vec::with_capacity(9);
+    data.extend_from_slice(&disc);
+    data.push(execution_direction);
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration (readonly for cancel)
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer — must match who paid rent at place)
+        AccountMeta::new_readonly(remaining[3].key(), false), // traderAccount (DynamicTrader, readonly)
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor, readonly signer)
+        AccountMeta::new(remaining[4].key(), false), // stopLossAccount (writable)
+        AccountMeta::new_readonly(remaining[5].key(), false) // systemProgram
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.relayer.to_account_info(), // funder (relayer — receives returned rent)
+        remaining[3].to_account_info(), // traderAccount (DynamicTrader)
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor, position authority)
+        remaining[4].to_account_info(), // stopLossAccount
+        remaining[5].to_account_info(), // systemProgram
+        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixCancelStopLossEvent {
+        mint_address,
+        execution_direction,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+
+/// Emitted when private USDC notes are consumed and deposited into Phoenix.
+#[event]
+pub struct PhoenixDepositEvent {
+    /// Amount deposited into Phoenix (lamports / token base units)
+    pub deposit_amount: u64,
+    /// Relayer fee paid from vault ATA
+    pub relayer_fee: u64,
+    /// Token mint (always PHOENIX_REQUIRED_MINT)
+    pub mint_address: Pubkey,
+    /// Nullifiers consumed (notes burned)
+    pub nullifiers: [[u8; 32]; 2],
+    /// New commitments inserted (change notes)
+    pub commitments: [[u8; 32]; 2],
+    pub timestamp: i64,
+}
+
+/// Emitted when an order is placed or cancelled on Phoenix.
+#[event]
+pub struct PhoenixOrderEvent {
+    pub mint_address: Pubkey,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when a market close/reduce order is placed via `phoenix_close_position`.
+/// Distinct from `PhoenixOrderEvent` to allow indexers to track position-close events.
+#[event]
+pub struct PhoenixClosePositionEvent {
+    pub mint_address: Pubkey,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when a Phoenix withdrawal is queued for the vault.
+#[event]
+pub struct PhoenixWithdrawQueuedEvent {
+    /// Amount queued for withdrawal (will arrive at vault ATA after crank)
+    pub amount: u64,
+    pub mint_address: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when the vault is successfully registered as a Phoenix Eternal trader.
+#[event]
+pub struct PhoenixRegisterTraderEvent {
+    pub mint_address: Pubkey,
+    pub vault: Pubkey,
+    pub trader_account: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when vault PhUSD is unwrapped back to USDC via EMBER.
+#[event]
+pub struct PhoenixEmberUnwrapEvent {
+    /// Amount of PhUSD burned and USDC received (1:1, reflecting P&L)
+    pub amount: u64,
+    pub mint_address: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when the relayer calls the `consumeWithdrawQueue` Phoenix crank.
+#[event]
+pub struct PhoenixConsumeWithdrawQueueEvent {
+    /// Token mint (always PHOENIX_REQUIRED_MINT)
+    pub mint_address: Pubkey,
+    pub vault: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when private notes are re-issued from Phoenix-returned USDC.
+/// Step 4 (final) of the Phoenix exit flow.
+#[event]
+pub struct PhoenixReissueEvent {
+    /// USDC amount backed by the newly minted notes (no token transfer — already in vault)
+    pub amount: u64,
+    /// Token mint (always PHOENIX_REQUIRED_MINT)
+    pub mint_address: Pubkey,
+    /// Output commitments inserted into the Merkle tree
+    pub commitments: [[u8; 32]; 2],
+    pub timestamp: i64,
+}
+
+/// Emitted when a stop-loss / take-profit order is placed on Phoenix.
+#[event]
+pub struct PhoenixPlaceStopLossEvent {
+    pub mint_address: Pubkey,
+    /// Trigger price in Phoenix ticks
+    pub trigger_price_ticks: u64,
+    /// Execution price in Phoenix ticks
+    pub execution_price_ticks: u64,
+    /// Closing order side: 0 = Bid, 1 = Ask
+    pub trade_side: u8,
+    /// Direction: 0 = LessThan (long SL / short TP), 1 = GreaterThan (long TP / short SL)
+    pub execution_direction: u8,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when a stop-loss / take-profit order is cancelled on Phoenix.
+#[event]
+pub struct PhoenixCancelStopLossEvent {
+    pub mint_address: Pubkey,
+    /// Direction cancelled: 0 = LessThan, 1 = GreaterThan
+    pub execution_direction: u8,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}

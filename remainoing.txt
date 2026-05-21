@@ -1,0 +1,49 @@
+# ========== SOL-JUP Pool (Jupiter's preferred pool: EYErUp5muPYEEkeaUCY22JibeZX7E9UuMcJFZkmNAN7c) ==========
+
+# SOL-JUP AMM Pool ID (Jupiter uses this pool)
+[[test.validator.clone]]
+address = "EYErUp5muPYEEkeaUCY22JibeZX7E9UuMcJFZkmNAN7c"
+
+# Base Vault (JUP)
+[[test.validator.clone]]
+address = "4xmePoAm93k4KrMzkG7UuVqKnF5WUNUHpXdavXGECaN2"
+
+# Quote Vault (SOL)
+[[test.validator.clone]]
+address = "4nR7HAVv7TDh8mzg7XLbsBnVfgMEGyL7EBq7WuR6ZB16"
+
+# Open Orders
+[[test.validator.clone]]
+address = "AFkBbkhNyQ5XFWvhPVBRoMAmcP7YRFeefsTkWV3ngkpD"
+
+# Target Orders
+[[test.validator.clone]]
+address = "3JM7oYvz6Qcy13SUbjwULyz5JrVJCcyYayLaPVL9VSbw"
+
+# LP Mint
+[[test.validator.clone]]
+address = "CLu4wZ1JL8dhJhevMyQSwRm8v3Jo885Xm1GtfRz3Ethn"
+
+# Serum Market
+[[test.validator.clone]]
+address = "4fRzdEGufHyQ8TYvzfNwbTHrk8kqdjx6voQ8iuGj1APF"
+
+# Market Bids
+[[test.validator.clone]]
+address = "2TWAf1ZiX8ET3csLM5NqSDcYrY68wG4R2NHj5NdX1P9P"
+
+# Market Asks
+[[test.validator.clone]]
+address = "7RBhiWJbZBF3RxtXYUxoA2qCnntNc2UMVQsDQyz5jxPm"
+
+# Market Event Queue
+[[test.validator.clone]]
+address = "Djf6hokh37epPMi9b7sA1SRgvGeRCB9CR6vBYTxHAoFN"
+
+# Market Base Vault (JUP)
+[[test.validator.clone]]
+address = "FXfYwWGJVrQtRsDk1T3FVhWjoTvVNY1t2Tvdp9AeunaQ"
+
+# Market Quote Vault (SOL)
+[[test.validator.clone]]
+address = "CwAq3YQyARFfHfw1itTsBJHad6VU2HWopjd9CW3trMQa"
