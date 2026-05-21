@@ -1520,8 +1520,9 @@ pub fn phoenix_reissue_notes(
 /// **Place a native Phoenix stop-loss / take-profit conditional order.**
 ///
 /// Calls Phoenix's `place_stop_loss` instruction on behalf of the executor PDA.
-/// The executor PDA signs as both `funder` (pays rent for the stop loss account)
-/// and `positionAuthority` (owns the position being protected).
+/// The relayer pays rent for the new `stopLossAccount`; the executor PDA signs only
+/// as `positionAuthority` (it carries Anchor data and cannot be used as a System
+/// Program transfer source).
 ///
 /// Prices must be expressed in Phoenix ticks (not USD).
 ///
@@ -1578,7 +1579,7 @@ pub fn phoenix_place_stop_loss<'info>(
         AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
         AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
         AccountMeta::new(remaining[2].key(), false), // globalConfiguration
-        AccountMeta::new(executor_key, true), // funder (executor, writable signer)
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer, writable signer — executor has data so cannot pay rent)
         AccountMeta::new(remaining[3].key(), false), // traderAccount
         AccountMeta::new(remaining[4].key(), false), // perpAssetMap
         AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
@@ -1599,14 +1600,14 @@ pub fn phoenix_place_stop_loss<'info>(
     let cpi_infos = vec![
         remaining[1].to_account_info(), // logAuthority
         remaining[2].to_account_info(), // globalConfiguration
-        ctx.accounts.executor.to_account_info(), // funder (executor)
+        ctx.accounts.relayer.to_account_info(), // funder (relayer pays rent for stopLossAccount)
         remaining[3].to_account_info(), // traderAccount
         remaining[4].to_account_info(), // perpAssetMap
         remaining[5].to_account_info(), // globalTraderIndex
         remaining[6].to_account_info(), // activeTraderBuffer
         remaining[7].to_account_info(), // orderbook
         remaining[8].to_account_info(), // splineCollection
-        ctx.accounts.executor.to_account_info(), // positionAuthority (executor, again)
+        ctx.accounts.executor.to_account_info(), // positionAuthority (executor)
         remaining[9].to_account_info(), // stopLossAccount
         remaining[10].to_account_info(), // systemProgram
         remaining[0].to_account_info() // phoenixProgram (last = program invoked)
@@ -1639,7 +1640,7 @@ pub fn phoenix_place_stop_loss<'info>(
 /// [0]  phoenixProgram          — readonly
 /// [1]  phoenixLogAuthority     — readonly
 /// [2]  globalConfiguration     — readonly  (note: readonly for cancel, unlike place)
-/// [3]  traderAccount           — readonly
+/// [3]  traderAccount           — readonly  (DynamicTrader PDA: seeds=["trader", executor, 0, 0])
 /// [4]  stopLossAccount         — writable  (PDA: seeds=["stoploss", traderAccount, asset_id_le_u64])
 /// [5]  systemProgram           — readonly
 /// ```
@@ -1671,8 +1672,8 @@ pub fn phoenix_cancel_stop_loss<'info>(
         AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
         AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
         AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration (readonly for cancel)
-        AccountMeta::new(executor_key, true), // funder (executor, writable signer)
-        AccountMeta::new_readonly(remaining[3].key(), false), // traderAccount (readonly)
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer — must match who paid rent at place)
+        AccountMeta::new_readonly(remaining[3].key(), false), // traderAccount (DynamicTrader, readonly)
         AccountMeta::new_readonly(executor_key, true), // traderWallet (executor, readonly signer)
         AccountMeta::new(remaining[4].key(), false), // stopLossAccount (writable)
         AccountMeta::new_readonly(remaining[5].key(), false) // systemProgram
@@ -1687,9 +1688,9 @@ pub fn phoenix_cancel_stop_loss<'info>(
     let cpi_infos = vec![
         remaining[1].to_account_info(), // logAuthority
         remaining[2].to_account_info(), // globalConfiguration
-        ctx.accounts.executor.to_account_info(), // funder (executor)
-        remaining[3].to_account_info(), // traderAccount
-        ctx.accounts.executor.to_account_info(), // traderWallet (executor, again)
+        ctx.accounts.relayer.to_account_info(), // funder (relayer — receives returned rent)
+        remaining[3].to_account_info(), // traderAccount (DynamicTrader)
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor, position authority)
         remaining[4].to_account_info(), // stopLossAccount
         remaining[5].to_account_info(), // systemProgram
         remaining[0].to_account_info() // phoenixProgram (last = program invoked)

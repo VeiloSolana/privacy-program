@@ -1145,9 +1145,9 @@ pub struct PhoenixPlaceStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
-    /// Executor PDA — signs as funder and positionAuthority in the Phoenix CPI.
+    /// Executor PDA — signs as positionAuthority in the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1166,9 +1166,9 @@ pub struct PhoenixCancelStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
-    /// Executor PDA — signs as funder and traderWallet in the Phoenix CPI.
+    /// Executor PDA — signs as traderWallet (positionAuthority) in the Phoenix cancel CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]

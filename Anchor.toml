@@ -121,16 +121,34 @@ address = "HCrPXLByGqRh2szQi3gj7oRdRVBNi1gccAyn4CQCT3HK"   # Phoenix globalTrade
 address = "2U32rSzzrQS3eVmGHsnbw5kcqKF3wQXpHGd3hMq5YJok"   # Phoenix activeTraderBuffer
 
 [[test.validator.clone]]
-address = "AXFz1MuzMUBHi5UKJuK3FDCQ73o3rSzubGU2mPr4LLU7"   # Phoenix orderbook
+address = "71Si24E4uc3oCaPbPZTozC1ptSNNqygjjebxSmErSsC2"   # Phoenix SOL-PERP market orderbook
 
 [[test.validator.clone]]
-address = "Dh9NrYjzzdvcYgFSbrkATQ1rPkPjDovXWnFVhfWmD2ZF"   # Phoenix splines
+address = "EVhkquLbfm5rDRXtZu9FoyDSXX5mYq2EYU6yD8zfKEqM"   # Phoenix SOL-PERP splines
 
 [[test.validator.clone]]
 address = "csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu"    # Phoenix globalVault (PhUSD token account)
 
 [[test.validator.clone]]
 address = "3c3NTwpg7yW91FxijkHBXwVH1xUifun3Z8TC5eW5Si3K"   # Phoenix withdrawQueue
+
+[[test.validator.clone]]
+address = "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A"   # Phoenix canonicalMint (PhUSD token mint)
+
+[[test.validator.clone]]
+address = "GPgADQrhzGoUgLqxsZMKvSpwcLaJFVTq6gEixKhmcwpm"   # Phoenix rootAuthority
+
+[[test.validator.clone]]
+address = "8wTcJdg4Xw3wnvmBu7Sokn3c2UnnHUhuB5g9sfeCMidR"   # Phoenix riskAuthority / marketAuthority / oracleAuthority
+
+[[test.validator.clone]]
+address = "pDCif8ciTpF9KNUnLWq78i8cRpb9LVbNJqBUwefi4TC"   # Phoenix adlAuthority
+
+[[test.validator.clone]]
+address = "DKkunAPfdJAf7vuQrh6gvY5tF9JMXFJKev7CGtUffdkp"   # Phoenix cancelAuthority
+
+[[test.validator.clone]]
+address = "GF1sYSqqt2v7sKojPejdGrm4rWZBKCFpP4sFznu4yMF1"   # Phoenix backstopAuthority
 
 [[test.validator.clone]]
 address = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"

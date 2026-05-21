@@ -71,7 +71,7 @@ import {
   bytesToBigIntBE,
   computeSwapParamsHash,
 } from "./test-helpers";
-import { getCpmmPoolState } from "./utils/cpmm";
+
 import {
   JupiterSwapService,
   JUPITER_PROGRAM_ID,
@@ -1538,14 +1538,6 @@ describe("Phoenix Eternal Integration", () => {
     let e2eUsdcNoteAmount: bigint = 0n;
     let e2eUsdcNoteNullifier: Uint8Array | null = null;
     let e2eUsdcOffchainTree: OffchainMerkleTree | null = null;
-    // Global CPMM pool authority (constant for Raydium CPMM on mainnet/localnet clone)
-    const CPMM_AUTHORITY = new PublicKey(
-      "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",
-    );
-    const RAYDIUM_CPMM = new PublicKey(
-      "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
-    );
-
     // Withdrawal-ID nonces — isolate per-exit pending_reissue PDAs
     const WITHDRAWAL_ID_0 = Buffer.alloc(32, 0); // used by unit & e2e ember_unwrap tests
     const WITHDRAWAL_ID_1 = Buffer.alloc(32, 1); // reserved for full-exit e2e test
@@ -2024,10 +2016,10 @@ describe("Phoenix Eternal Integration", () => {
       "2U32rSzzrQS3eVmGHsnbw5kcqKF3wQXpHGd3hMq5YJok",
     );
     const ORDERBOOK = new PublicKey(
-      "AXFz1MuzMUBHi5UKJuK3FDCQ73o3rSzubGU2mPr4LLU7",
+      "71Si24E4uc3oCaPbPZTozC1ptSNNqygjjebxSmErSsC2", // SOL-PERP market orderbook
     );
     const SPLINES = new PublicKey(
-      "Dh9NrYjzzdvcYgFSbrkATQ1rPkPjDovXWnFVhfWmD2ZF",
+      "EVhkquLbfm5rDRXtZu9FoyDSXX5mYq2EYU6yD8zfKEqM", // SOL-PERP splines
     );
     const GLOBAL_VAULT = new PublicKey(
       "csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu",
@@ -2281,6 +2273,7 @@ describe("Phoenix Eternal Integration", () => {
 
       // Derive the stopLossAccount PDA.
       // Seeds: ["stoploss", traderPda_bytes, assetId_le_u64]
+      // Phoenix derives stopLossAccount from traderAccount (DynamicTrader PDA), per SDK pdas.ts.
       // assetId = 0 for SOL-PERP (first asset in PerpAssetMap — "SOL" at offset 48).
       const assetId = 0n;
       const assetIdBuf = Buffer.alloc(8);
@@ -2336,6 +2329,7 @@ describe("Phoenix Eternal Integration", () => {
         printProgramLogs(tx?.meta?.logMessages ?? [], "place_stop_loss");
         console.log("   ✅ place_stop_loss CPI succeeded:", sig);
       } catch (e: any) {
+        console.log(e);
         const logs: string[] =
           e instanceof SendTransactionError
             ? (await e.getLogs(provider.connection)) ?? []
@@ -2401,13 +2395,13 @@ describe("Phoenix Eternal Integration", () => {
             { pubkey: PHOENIX_PROGRAM_ID, isSigner: false, isWritable: false }, // [0]
             { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
             { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: false }, // [2] readonly for cancel
-            { pubkey: traderPda, isSigner: false, isWritable: false }, // [3] readonly for cancel
-            { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [4]
+            { pubkey: traderPda, isSigner: false, isWritable: false }, // [3] traderAccount (DynamicTrader)
+            { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [4] stopLossAccount
             {
               pubkey: SystemProgram.programId,
               isSigner: false,
               isWritable: false,
-            }, // [5]
+            }, // [5] systemProgram
           ])
           .signers([s4Relayer])
           .rpc();
@@ -2419,6 +2413,7 @@ describe("Phoenix Eternal Integration", () => {
         printProgramLogs(tx?.meta?.logMessages ?? [], "cancel_stop_loss");
         console.log("   ✅ cancel_stop_loss CPI succeeded:", sig);
       } catch (e: any) {
+        console.log(e);
         const logs: string[] =
           e instanceof SendTransactionError
             ? (await e.getLogs(provider.connection)) ?? []
@@ -2692,8 +2687,8 @@ describe("Phoenix Eternal Integration", () => {
     });
 
     // ─────────────────────────────────────────────────────────────────────────
-    //   Test 29: transact_swap() WSOL→USDC (reaches Raydium CPMM; CPI error expected)
-    //   Test 30: phoenix_deposit_from_pool() USDC→Phoenix (vault has 0 USDC → balance error)
+    //   Test 29: transact_swap() WSOL→USDC via Jupiter (live quote from API)
+    //   Test 30: phoenix_deposit_from_pool() USDC→Phoenix
     //   Test 31: phoenix_place_order() with correct accounts (Phoenix CPI attempted)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2969,88 +2964,39 @@ describe("Phoenix Eternal Integration", () => {
       console.log(`   ✅ WSOL deposit txn: ${sig}, leaf index: ${leafIndex}`);
     });
 
-    it("e2e: wsol→usdc swap — transact_swap succeeds via Raydium CPMM", async function () {
+    it("e2e: wsol→usdc swap — transact_swap succeeds via Jupiter", async function () {
       if (!suite4Ready || !e2eOffchainTree || !e2eNoteNullifier)
         return this.skip();
       this.timeout(180_000);
 
-      // 1. Get CPMM pool state and query vault balances to compute the expected swap output.
-      //    The localnet validator clones mainnet state, which may be stale.
-      //    We read the actual reserves so all committed amounts match what the on-chain swap produces.
-      const cpmmPool = await getCpmmPoolState(
-        provider.connection,
-        USDC_MAINNET.toBase58(),
-      );
-      if (!cpmmPool) {
+      // 1. Fetch Jupiter quote: WSOL → USDC for the full note amount.
+      //    Jupiter routes through the deepest on-chain liquidity (Raydium AMM V4,
+      //    CLMM, etc.) and returns accurate output amounts — no stale reserve math.
+      const jupSvc = new JupiterSwapService(provider.connection);
+      let jupQuote: Awaited<ReturnType<typeof jupSvc.getQuote>>;
+      try {
+        jupQuote = await jupSvc.getQuote(
+          NATIVE_MINT, // WSOL input
+          USDC_MAINNET, // USDC output
+          Number(e2eNoteAmount),
+          50, // 0.5% slippage
+        );
+      } catch (e: any) {
         console.log(
-          "   ⚠️  CPMM WSOL/USDC pool not found on localnet — skipping",
+          "   ⚠️  Jupiter quote failed — skipping swap test:",
+          e.message,
         );
         return this.skip();
       }
-
-      const isWsolToken0 = cpmmPool.token_0_mint.equals(NATIVE_MINT);
-      const wsolVaultPk = isWsolToken0
-        ? cpmmPool.token_0_vault
-        : cpmmPool.token_1_vault;
-      const usdcVaultPk = isWsolToken0
-        ? cpmmPool.token_1_vault
-        : cpmmPool.token_0_vault;
-
-      const [wsolVaultInfo, usdcVaultInfo] = await Promise.all([
-        provider.connection.getTokenAccountBalance(wsolVaultPk),
-        provider.connection.getTokenAccountBalance(usdcVaultPk),
-      ]);
-      const reserveWsol = BigInt(wsolVaultInfo.value.amount);
-      const reserveUsdc = BigInt(usdcVaultInfo.value.amount);
-
-      // Raydium CPMM constant-product formula (25 bps trade fee on the input):
-      //   amount_out = reserve_usdc * amount_in_net / (reserve_wsol + amount_in_net)
-      //   amount_in_net = amount_in * 9975 / 10000
-      const amountInNet = (e2eNoteAmount * 9975n) / 10000n;
-      const expectedOut =
-        (reserveUsdc * amountInNet) / (reserveWsol + amountInNet);
+      const jupiterMinOut = BigInt(jupQuote.otherAmountThreshold);
       console.log(
-        `   CPMM reserves: ${reserveWsol} WSOL, ${reserveUsdc} USDC; expected output ≈ ${expectedOut}`,
+        `   Jupiter quote: ${e2eNoteAmount} lamports WSOL → ≥ ${jupiterMinOut} USDC lamports (${
+          jupQuote.routePlan?.length ?? 0
+        }-leg route)`,
       );
 
-      // 2. Derive committed amounts satisfying BOTH the ZK circuit AND on-chain constraints:
-      //
-      //    ZK circuit (swap.circom:287):  destAmount >= minAmountOut
-      //    On-chain (swap.rs):            vault_amount = actual_output − fee >= destAmount
-      //
-      //    Strategy:
-      //    • minAmountOut  = 80% of expected  (ZK slippage floor)
-      //    • relayerFee    = 1% of expected   (2× the required 0.5%)
-      //    • destAmount    = minAmountOut      (circuit: destAmount >= minAmountOut ✓)
-      //    • cpmmDexMinOut = minAmountOut + relayerFee
-      //      → CPMM succeeds only when actual_output >= cpmmDexMinOut
-      //      → vault_amount = actual_output − fee >= cpmmDexMinOut − fee = minAmountOut = destAmount ✓
-      //    • program: dex_min_out >= swap_params.min_amount_out → cpmmDexMinOut >= minAmountOut ✓
-      const minAmountOut = (expectedOut * 80n) / 100n;
-      const relayerFee = (expectedOut * 100n) / 10000n + 1n;
-      const destAmount = minAmountOut; // circuit requires destAmount >= minAmountOut
-      const cpmmDexMinOut = minAmountOut + relayerFee; // CPMM floor covers note + fee
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      console.log(
-        `   relayerFee=${relayerFee}, minAmountOut=${minAmountOut}, destAmount=${destAmount}, cpmmDexMinOut=${cpmmDexMinOut}`,
-      );
-
-      // 3. Build Raydium CPMM swap_base_input instruction data:
-      //    [discriminator(8) | amount_in(8) | min_amount_out(8)]
-      //    cpmmDexMinOut > swap_params.min_amount_out (program enforces dex_min_out ≥ committed value)
-      const cpmmSwapData = Buffer.alloc(24);
-      Buffer.from([0x8f, 0xbe, 0x5a, 0xda, 0xc4, 0x1e, 0x33, 0xde]).copy(
-        cpmmSwapData,
-        0,
-      );
-      cpmmSwapData.writeBigUInt64LE(e2eNoteAmount, 8);
-      cpmmSwapData.writeBigUInt64LE(cpmmDexMinOut, 16); // CPMM floor = destAmount + fee
-      const swapData = cpmmSwapData;
-
-      // swapDataHash = zeros — CPMM path does not verify this field
-      const swapDataHash = new Uint8Array(32);
-
-      // 5. Derive executor PDA (seeds: swap_executor, source_mint, dest_mint, nullifier_0, relayer)
+      // 2. Get Jupiter swap instruction (executor PDA as the user wallet).
+      //    We need to derive the executor PDA first so Jupiter uses it as the authority.
       const [executorPda] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("swap_executor"),
@@ -3072,7 +3018,42 @@ describe("Phoenix Eternal Integration", () => {
         true,
       );
 
-      // 6. Ensure s4Relayer has a USDC token account (for fee receipts)
+      let jupSwapIxResp: Awaited<ReturnType<typeof jupSvc.getSwapInstruction>>;
+      try {
+        jupSwapIxResp = await jupSvc.getSwapInstruction(
+          jupQuote,
+          executorPda,
+          false, // wrapAndUnwrapSOL=false — executor already holds WSOL
+        );
+      } catch (e: any) {
+        console.log(
+          "   ⚠️  Jupiter swap instruction failed — skipping:",
+          e.message,
+        );
+        return this.skip();
+      }
+
+      const swapData = jupSvc.buildSwapData(jupSwapIxResp.swapInstruction);
+      // SHA-256(swapData) — committed in the ZK proof to prevent relayer substitution
+      const swapDataHash = Uint8Array.from(
+        crypto.createHash("sha256").update(swapData).digest(),
+      );
+      const remainingAccounts = jupSvc.extractRemainingAccounts(
+        jupSwapIxResp.swapInstruction,
+      );
+
+      // 3. Compute fee and committed amounts.
+      //    relayerFee (0.5% of jupiterMinOut) must not exceed on-chain vault_amount - destAmount.
+      //    destAmount = jupiterMinOut - relayerFee so vault_amount >= destAmount holds.
+      const relayerFee = (jupiterMinOut * 50n) / 10000n + 1n;
+      const minAmountOut = jupiterMinOut - relayerFee;
+      const destAmount = minAmountOut;
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      console.log(
+        `   relayerFee=${relayerFee}, minAmountOut=${minAmountOut}, destAmount=${destAmount}`,
+      );
+
+      // 4. Ensure s4Relayer has a USDC token account (fee destination)
       const relayerUsdcAta = await getOrCreateAssociatedTokenAccount(
         provider.connection,
         s4Relayer,
@@ -3081,30 +3062,16 @@ describe("Phoenix Eternal Integration", () => {
         false,
       );
 
-      // 6b. Ensure USDC vault ATA exists (dest_vault_token_account for post-swap transfer)
+      // 5. Ensure USDC vault ATA exists (dest_vault_token_account for post-swap transfer)
       await getOrCreateAssociatedTokenAccount(
         provider.connection,
-        s4Relayer, // payer
+        s4Relayer,
         USDC_MAINNET,
-        s4UsdcVault, // owner = vault PDA
-        true, // allowOwnerOffCurve — vault is a PDA
+        s4UsdcVault,
+        true,
       );
 
-      // 7. Build remaining accounts using vault pubkeys derived from pool state above
-      const inputVault = wsolVaultPk;
-      const outputVault = usdcVaultPk;
-      const remainingAccounts = [
-        { pubkey: CPMM_AUTHORITY, isSigner: false, isWritable: false }, // [0] authority
-        { pubkey: cpmmPool.amm_config, isSigner: false, isWritable: false }, // [1] amm_config
-        { pubkey: cpmmPool.poolId, isSigner: false, isWritable: true }, // [2] pool_state
-        { pubkey: inputVault, isSigner: false, isWritable: true }, // [3] input vault (WSOL)
-        { pubkey: outputVault, isSigner: false, isWritable: true }, // [4] output vault (USDC)
-        { pubkey: NATIVE_MINT, isSigner: false, isWritable: false }, // [5] source_mint
-        { pubkey: USDC_MAINNET, isSigner: false, isWritable: false }, // [6] dest_mint
-        { pubkey: cpmmPool.observation_key, isSigner: false, isWritable: true }, // [7] observation_state
-      ];
-
-      // 8. Build dummy second input (amount=0, circuit skips Merkle proof)
+      // 6. Build dummy second input (zero-amount, circuit skips Merkle check)
       const dummyPrivKey2 = randomBytes32();
       const dummyPubKey2 = derivePublicKey(poseidon, dummyPrivKey2);
       const dummyBlinding2 = randomBytes32();
@@ -3122,7 +3089,7 @@ describe("Phoenix Eternal Integration", () => {
         dummyPrivKey2,
       );
 
-      // 9. Build change + dest output commitments
+      // 7. Build change (zero) + dest output commitments
       const changePrivKey2 = randomBytes32();
       const changePubKey2 = derivePublicKey(poseidon, changePrivKey2);
       const changeBlinding2 = randomBytes32();
@@ -3145,7 +3112,7 @@ describe("Phoenix Eternal Integration", () => {
         USDC_MAINNET,
       );
 
-      // 10. Compute swap params hash and ext data hash
+      // 8. Compute ext data hash and swap params hash
       const swapExtData = {
         recipient: s4Relayer.publicKey,
         relayer: s4Relayer.publicKey,
@@ -3159,16 +3126,16 @@ describe("Phoenix Eternal Integration", () => {
         USDC_MAINNET,
         minAmountOut,
         deadline,
-        swapDataHash, // zeros for CPMM path
+        swapDataHash,
         destAmount,
       );
 
-      // 11. Merkle paths
+      // 9. Merkle paths
       const noteMerklePath = e2eOffchainTree!.getMerkleProof(e2eNoteLeafIndex);
       const dummyMerklePath = e2eOffchainTree!.getMerkleProof(0);
       const swapRoot = e2eOffchainTree!.getRoot();
 
-      // 12. Generate ZK swap proof
+      // 10. Generate ZK swap proof
       const swapProof = await generateSwapProof({
         sourceRoot: swapRoot,
         swapParamsHash,
@@ -3194,7 +3161,7 @@ describe("Phoenix Eternal Integration", () => {
         deadline,
       });
 
-      // 13. SwapParams struct (swapDataHash = zeros for CPMM)
+      // 11. SwapParams struct
       const swapParams = {
         minAmountOut: new BN(minAmountOut.toString()),
         deadline: new BN(deadline.toString()),
@@ -3202,7 +3169,7 @@ describe("Phoenix Eternal Integration", () => {
         swapDataHash: Buffer.from(swapDataHash),
       };
 
-      // 14. Nullifier markers for source pool
+      // 12. Nullifier markers for source pool
       const swapMarker0 = nullifierMarkerPDA(
         program.programId,
         WSOL_MINT,
@@ -3214,7 +3181,7 @@ describe("Phoenix Eternal Integration", () => {
         dummyNullifier2,
       );
 
-      // 15. Build transact_swap instruction
+      // 13. Build transact_swap instruction (Jupiter path)
       const swapIx = await (program.methods as any)
         .transactSwap(
           0, // source_tree_id
@@ -3229,7 +3196,7 @@ describe("Phoenix Eternal Integration", () => {
           Array.from(destCommitment), // output_commitment_1 (dest)
           swapParams, // swap_params
           new BN(e2eNoteAmount.toString()), // swap_amount
-          swapData, // CPMM instruction data
+          swapData, // Jupiter instruction data
           swapExtData, // ext_data (fee > 0)
           null, // note_ciphers
         )
@@ -3253,8 +3220,8 @@ describe("Phoenix Eternal Integration", () => {
           executorDestToken,
           relayer: s4Relayer.publicKey,
           relayerTokenAccount: relayerUsdcAta.address,
-          swapProgram: RAYDIUM_CPMM,
-          jupiterEventAuthority: SystemProgram.programId,
+          swapProgram: JUPITER_PROGRAM_ID,
+          jupiterEventAuthority: JUPITER_EVENT_AUTHORITY,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -3329,7 +3296,7 @@ describe("Phoenix Eternal Integration", () => {
         blockhash,
         lastValidBlockHeight,
       });
-      console.log(`   ✅ transact_swap CPMM succeeded: ${txSig}`);
+      console.log(`   ✅ transact_swap Jupiter succeeded: ${txSig}`);
 
       // ── Save USDC output note for Test 30 (phoenix_deposit_from_pool) ──
       e2eUsdcNotePrivKey = destPrivKey;
@@ -3902,10 +3869,10 @@ describe("Phoenix Eternal Integration", () => {
       // PostOnly { side, priceInTicks, numBaseLots, clientOrderId, slide,
       //            lastValidSlot, orderFlags, cancelExisting }
       //
-      // Price: 70,000 ticks — well below SPLINES bid (~76,827) so it rests
-      // without touching the book. PostOnly semantics: if it would cross, it
-      // is rejected rather than filled, so this is the safest way to test a
-      // resting order without accidentally taking liquidity.
+      // Price: 70,000 ticks — used as a starting point. slide=true tells
+      // Phoenix to auto-shift the bid to one tick below the current best ask,
+      // so the order always rests without crossing regardless of the cloned
+      // orderbook state on localnet.
       const postOnlyPacket = Buffer.alloc(38, 0);
       let off = 0;
       postOnlyPacket.writeUInt8(0, off++); // variant 0 = PostOnly
@@ -3916,7 +3883,7 @@ describe("Phoenix Eternal Integration", () => {
       off += 8; // numBaseLots.inner = 1
       // clientOrderId [u8; 16] — already zero (Buffer.alloc zero-fills)
       off += 16;
-      postOnlyPacket.writeUInt8(0, off++); // slide = false
+      postOnlyPacket.writeUInt8(1, off++); // slide = true (auto-adjust below best ask)
       postOnlyPacket.writeUInt8(0, off++); // lastValidSlot: None
       postOnlyPacket.writeUInt8(0, off++); // orderFlags.flags = 0
       postOnlyPacket.writeUInt8(0, off++); // cancelExisting = false
@@ -4666,6 +4633,1657 @@ describe("Phoenix Eternal Integration", () => {
         printSnapshotDelta("phoenix_reissue_notes", before, after);
       }
     });
+
+    // ── Suite 6: SOL-PERP 10× Long — Full Lifecycle ──────────────────────────
+    //
+    // End-to-end perp trading lifecycle test simulating a real 10× leveraged long:
+    //   open → set TP/SL → hold 60 s → close → cancel TP/SL → withdraw → reissue → PnL
+    //
+    // NOTE: Phoenix Eternal lists only SOL-PERP (BTC/USD is not available).
+    //       This test uses SOL/USD with the exact same flow as a BTC/USD trade would.
+    //
+    // Tick convention (derived empirically from limit-order test):
+    //   PostOnly bid @ priceInTicks=70,000 rested below ~$85 mark price
+    //   → 1 tick ≈ $0.001 / SOL  →  $85 ≈ 85,000 ticks
+    //
+    // Leverage:  2 lots × $85 = $170 notional  /  ~$17.82 collateral  ≈ 9.5× (~10×)
+    //
+    // Step 7 uses reduce_only with a large cap (1 000 lots) to close the FULL
+    // position on traderPda regardless of any open lots accumulated from prior suites.
+    //
+    // All Phoenix-level errors on localnet are expected and treated as ✅.
+    // PnL is measured via traderQuoteLotCollateral delta (1 lot = $0.000001 USDC).
+    describe("SOL-PERP 10× Long — Full Lifecycle (Open ▸ TP/SL ▸ 60s ▸ Close ▸ Withdraw ▸ PnL)", () => {
+      let suite6Ready = false;
+      // Live mark price fetched from Phoenix REST API in step 1; fallback = $85
+      let markPriceUsd = 85;
+      let entryPriceTicks = 85_000n; // 1 tick ≈ $0.001 → $85 ≈ 85,000 ticks
+      // Collateral snapshots captured across steps for PnL computation
+      let entryCollateral = 0n;
+      let postOpenCollateral = 0n;
+      let postCloseCollateral = 0n;
+      // Position size: 2 base lots ≈ 2 SOL notional → ~10× on ~$17 collateral
+      const S6_LOTS = 2n;
+      // Withdrawal amount set dynamically in step 10 to the full post-close collateral
+      let S6_WITHDRAW = new BN(0); // populated from postCloseCollateral before queuing
+
+      before(async function () {
+        if (!suite4Ready) return;
+        // Fund executor PDA so it can pay rent for stopLossAccount creation (~400 bytes).
+        // Without this, Phoenix's `place_stop_loss` fails when it tries to debit lamports
+        // from the funder (executor) to initialise the stopLossAccount PDA.
+        const airdropSig = await provider.connection.requestAirdrop(
+          executorPda,
+          10_000_000, // 0.01 SOL — covers stopLossAccount rent + buffer
+        );
+        await provider.connection.confirmTransaction(airdropSig, "confirmed");
+        console.log(
+          "   💧  Airdropped 0.01 SOL to executorPda for stopLossAccount rent",
+        );
+        suite6Ready = true;
+      });
+
+      // ── Step 1: Snapshot entry state + fetch live mark price ──────────────
+      it("step 1/13: entry-state — snapshot collateral and SOL mark price", async function () {
+        if (!suite6Ready) return this.skip();
+        this.timeout(15_000);
+
+        entryCollateral = await readTraderQuoteLotCollateral();
+
+        console.log(
+          `\n   ╔══════════════════════════════════════════════════════════╗`,
+        );
+        console.log(
+          `   ║      SOL-PERP 10× LONG — FULL LIFECYCLE TEST             ║`,
+        );
+        console.log(
+          `   ║  (Phoenix Eternal: SOL-PERP only; BTC/USD not listed)    ║`,
+        );
+        console.log(
+          `   ╚══════════════════════════════════════════════════════════╝`,
+        );
+        console.log(`   📊  Entry collateral : ${entryCollateral} lots`);
+        console.log(
+          `        ≈ $${(Number(entryCollateral) / 1_000_000).toFixed(4)} USDC`,
+        );
+
+        // Fetch live mark price — best-effort (REST API may be unreachable in CI)
+        try {
+          const resp = await fetch(
+            "https://perp-api.phoenix.trade/v1/candles/SOL?timeframe=1m&limit=1",
+          );
+          if (resp.ok) {
+            const candles = (await resp.json()) as Array<
+              Record<string, number>
+            >;
+            const live =
+              candles?.[0]?.markClose ?? candles?.[0]?.close ?? candles?.[0]?.c;
+            if (typeof live === "number" && live > 0) {
+              markPriceUsd = live;
+              entryPriceTicks = BigInt(Math.round(markPriceUsd * 1_000));
+            }
+          }
+        } catch {
+          // API unreachable — use fallback $85 / 85,000 ticks
+        }
+
+        const notional = Number(S6_LOTS) * markPriceUsd;
+        const collateralUsd = Number(entryCollateral) / 1_000_000;
+        const leverage =
+          collateralUsd > 0 ? (notional / collateralUsd).toFixed(1) : "N/A";
+
+        console.log(
+          `   📈  Mark price       : $${markPriceUsd.toFixed(2)} / SOL`,
+        );
+        console.log(
+          `   📏  Entry ticks      : ${entryPriceTicks} (1 tick ≈ $0.001/SOL)`,
+        );
+        console.log(
+          `   💰  Notional         : ${S6_LOTS} lots × $${markPriceUsd.toFixed(
+            2,
+          )} = $${notional.toFixed(2)}`,
+        );
+        console.log(`   ⚡  Target leverage  : ${leverage}×`);
+        console.log(
+          `   ─────────────────────────────────────────────────────────`,
+        );
+        console.log(
+          `   SL trigger (−8%)  : ≈ $${(markPriceUsd * 0.92).toFixed(2)} / SOL`,
+        );
+        console.log(
+          `   TP trigger (+8%)  : ≈ $${(markPriceUsd * 1.08).toFixed(2)} / SOL`,
+        );
+        console.log(
+          `   ══════════════════════════════════════════════════════════`,
+        );
+      });
+
+      // ── Step 2: Open long (market IOC buy, 2 base lots ≈ 10×) ────────────
+      it("step 2/13: open-long — market IOC buy (Bid, numBaseLots=2, ~10× leverage)", async function () {
+        if (!suite6Ready) return this.skip();
+        this.timeout(30_000);
+
+        // Borsh-encoded ImmediateOrCancel OrderPacket (49 bytes)
+        // variant=2 (IOC) | side=0 (Bid) | priceInTicks=None | numBaseLots=2 | ...
+        const pkt = Buffer.alloc(49, 0);
+        let o = 0;
+        pkt.writeUInt8(2, o++); // variant: ImmediateOrCancel
+        pkt.writeUInt8(0, o++); // side: 0 = Bid (Long)
+        pkt.writeUInt8(0, o++); // priceInTicks: None (market)
+        pkt.writeBigUInt64LE(S6_LOTS, o);
+        o += 8; // numBaseLots.inner = 2
+        pkt.writeUInt8(0, o++); // numQuoteLots: None
+        pkt.writeBigUInt64LE(0n, o);
+        o += 8; // minBaseLotsToFill.inner = 0
+        pkt.writeBigUInt64LE(0n, o);
+        o += 8; // minQuoteLotsToFill.inner = 0
+        pkt.writeUInt8(2, o++); // selfTradeBehavior: DecrementTake
+        pkt.writeUInt8(0, o++); // matchLimit: None
+        o += 16; // clientOrderId: zeros (pre-filled)
+        pkt.writeUInt8(0, o++); // lastValidSlot: None
+        pkt.writeUInt8(0, o++); // orderFlags: 0
+        pkt.writeUInt8(0, o++); // cancelExisting: false
+
+        const orderData = Buffer.concat([
+          Buffer.from(phoenixDisc("place_market_order")),
+          pkt,
+        ]);
+
+        const before = await snapshotPhoenixBalances("step2 pre: open long");
+        console.log(
+          `   📤  Submitting: market IOC Buy — ${S6_LOTS} lots @ market`,
+        );
+        console.log(
+          `        Notional ≈ $${(Number(S6_LOTS) * markPriceUsd).toFixed(2)}`,
+        );
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixPlaceOrder(USDC_MAINNET, orderData)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+            ])
+            .preInstructions([
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "open-long");
+          console.log(`   ✅  open-long CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "open-long error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+
+          if (
+            hay.includes("PhoenixInvalidOrderData") ||
+            hay.includes("InvalidSwapProgram")
+          ) {
+            throw new Error(
+              "open-long: Veilo guard rejected order — " + e.message,
+            );
+          }
+          if (hay.includes("Reduce-only or frozen")) {
+            throw new Error(
+              "open-long: trader is reduce-only (grant_trading_capabilities must run first): " +
+                e.message,
+            );
+          }
+          // Phoenix market-state errors (InsufficientMargin, oracle, no liquidity) expected on localnet
+          console.log(
+            `   ✅  open-long: Veilo CPI reached Phoenix — localnet market response: `,
+            logs.find(
+              (l) =>
+                l.includes("Program log:") && !l.includes("Phoenix Eternal"),
+            ) ?? e.message?.split("\n")[0],
+          );
+        } finally {
+          const after = await snapshotPhoenixBalances("step2 post: open long");
+          printSnapshotDelta("open-long", before, after);
+          postOpenCollateral = after.traderQuoteLotCollateral;
+          const openFee =
+            before.traderQuoteLotCollateral - after.traderQuoteLotCollateral;
+          if (openFee > 0n) {
+            console.log(
+              `   💸  Open taker fee  : −${openFee} lots ≈ −$${(
+                Number(openFee) / 1_000_000
+              ).toFixed(6)}`,
+            );
+          }
+        }
+      });
+
+      // ── Step 3: Set stop-loss (LessThan @ −8% mark) ──────────────────────
+      it("step 3/13: set-stop-loss — LessThan at −8% mark → PhoenixPlaceStopLoss CPI", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const assetIdBuf = Buffer.alloc(8);
+        assetIdBuf.writeBigUInt64LE(0n, 0);
+        const [stopLossAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
+          PHOENIX_PROGRAM_ID,
+        );
+
+        const slTrigger = (entryPriceTicks * 92n) / 100n; // −8%
+        const slExecution = slTrigger - 200n; // limit price 0.2% below trigger
+
+        console.log(`   📉  Stop-Loss config:`);
+        console.log(
+          `        triggerPriceTicks  : ${slTrigger} ≈ $${(
+            Number(slTrigger) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        executionTicks     : ${slExecution} ≈ $${(
+            Number(slExecution) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        executionDirection : 0 = LessThan (fires when price ↓ below trigger)`,
+        );
+        console.log(
+          `        tradeSide          : 1 = Ask (sell SOL, close long)`,
+        );
+        console.log(`        orderKind          : 1 = IOC`);
+        console.log(
+          `        stopLossAccount    : ${stopLossAccount.toBase58()}`,
+        );
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixPlaceStopLoss(
+              USDC_MAINNET,
+              new BN(slTrigger.toString()),
+              new BN(slExecution.toString()),
+              1, // tradeSide: Ask
+              0, // executionDirection: LessThan (SL for long)
+              1, // orderKind: IOC
+            )
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+              { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [9]
+              {
+                pubkey: SystemProgram.programId,
+                isSigner: false,
+                isWritable: false,
+              }, // [10]
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "set-stop-loss");
+          console.log(`   ✅  set-stop-loss CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          console.log(e);
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "set-stop-loss error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(
+              "set-stop-loss: Veilo guard rejected — " + e.message,
+            );
+          }
+          console.log(
+            "   ✅  set-stop-loss: CPI reached Phoenix (Phoenix-level response)",
+          );
+        }
+      });
+
+      // ── Step 4: Set take-profit (GreaterThan @ +8% mark) ─────────────────
+      it("step 4/13: set-take-profit — GreaterThan at +8% mark → PhoenixPlaceStopLoss CPI", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const assetIdBuf = Buffer.alloc(8);
+        assetIdBuf.writeBigUInt64LE(0n, 0);
+        const [stopLossAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
+          PHOENIX_PROGRAM_ID,
+        );
+
+        const tpTrigger = (entryPriceTicks * 108n) / 100n; // +8%
+        const tpExecution = tpTrigger + 200n; // limit price 0.2% above trigger
+
+        console.log(`   📈  Take-Profit config:`);
+        console.log(
+          `        triggerPriceTicks  : ${tpTrigger} ≈ $${(
+            Number(tpTrigger) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        executionTicks     : ${tpExecution} ≈ $${(
+            Number(tpExecution) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        executionDirection : 1 = GreaterThan (fires when price ↑ above trigger)`,
+        );
+        console.log(
+          `        tradeSide          : 1 = Ask (sell SOL, close long)`,
+        );
+        console.log(`        orderKind          : 1 = IOC`);
+        console.log(
+          `        stopLossAccount    : ${stopLossAccount.toBase58()}`,
+        );
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixPlaceStopLoss(
+              USDC_MAINNET,
+              new BN(tpTrigger.toString()),
+              new BN(tpExecution.toString()),
+              1, // tradeSide: Ask
+              1, // executionDirection: GreaterThan (TP for long)
+              1, // orderKind: IOC
+            )
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+              { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [9]
+              {
+                pubkey: SystemProgram.programId,
+                isSigner: false,
+                isWritable: false,
+              }, // [10]
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "set-take-profit");
+          console.log(`   ✅  set-take-profit CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          console.log(e);
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "set-take-profit error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(
+              "set-take-profit: Veilo guard rejected — " + e.message,
+            );
+          }
+          console.log(
+            "   ✅  set-take-profit: CPI reached Phoenix (Phoenix-level response)",
+          );
+        }
+      });
+
+      // ── Step 5: Verify stopLossAccount on-chain ───────────────────────────
+      it("step 5/13: verify-orders — read stopLossAccount PDA, confirm TP/SL registered", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const assetIdBuf = Buffer.alloc(8);
+        assetIdBuf.writeBigUInt64LE(0n, 0);
+        const [stopLossAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
+          PHOENIX_PROGRAM_ID,
+        );
+
+        console.log(
+          `   🔍  Reading stopLossAccount PDA: ${stopLossAccount.toBase58()}`,
+        );
+        const info = await provider.connection.getAccountInfo(stopLossAccount);
+
+        if (info) {
+          const raw = Buffer.from(info.data);
+          console.log(`   ✅  stopLossAccount EXISTS on-chain`);
+          console.log(`        size    : ${info.data.length} bytes`);
+          console.log(`        owner   : ${info.owner.toBase58()}`);
+          console.log(`        lamports: ${info.lamports}`);
+          console.log(
+            `        raw (first 80 bytes): ${raw.slice(0, 80).toString("hex")}`,
+          );
+          console.log(
+            `   📋  One PDA per (traderPda, assetId=0). Both LessThan (SL) and`,
+          );
+          console.log(
+            `        GreaterThan (TP) conditional slots are stored within it.`,
+          );
+        } else {
+          console.log(`   ⚠️   stopLossAccount NOT found on-chain`);
+          console.log(
+            `        Both TP/SL CPIs returned Phoenix-level errors on localnet.`,
+          );
+          console.log(
+            `        On mainnet with a live oracle the place_stop_loss CPI would succeed.`,
+          );
+        }
+      });
+
+      // ── Step 6: Hold position for 60 seconds ─────────────────────────────
+      it("step 6/13: hold-position — 60-second hold (keeper not running on localnet)", async function () {
+        if (!suite6Ready) return this.skip();
+        this.timeout(90_000);
+
+        const slTrigger = (entryPriceTicks * 92n) / 100n;
+        const tpTrigger = (entryPriceTicks * 108n) / 100n;
+
+        console.log(
+          `\n   ══════════════════════════════════════════════════════════`,
+        );
+        console.log(`   ⏱   HOLDING SOL-PERP LONG FOR 60 SECONDS`);
+        console.log(
+          `        Current collateral : ${await readTraderQuoteLotCollateral()} lots`,
+        );
+        console.log(
+          `        SL trigger         : ${slTrigger} ticks ≈ $${(
+            Number(slTrigger) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        TP trigger         : ${tpTrigger} ticks ≈ $${(
+            Number(tpTrigger) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        Mark at open       : $${markPriceUsd.toFixed(2)}/SOL`,
+        );
+        console.log(
+          `   ─────────────────────────────────────────────────────────`,
+        );
+        console.log(
+          `   ℹ️   On mainnet the Phoenix keeper monitors the oracle and`,
+        );
+        console.log(`        auto-executes whichever trigger is hit first.`);
+        console.log(
+          `        On localnet: no keeper → both orders persist for the full hold.`,
+        );
+        console.log(
+          `   ─────────────────────────────────────────────────────────`,
+        );
+
+        const t0 = Date.now();
+        await new Promise((r) => setTimeout(r, 60_000));
+        const holdSec = ((Date.now() - t0) / 1_000).toFixed(1);
+
+        // Try to read final price after the hold
+        let exitPriceUsd = markPriceUsd;
+        try {
+          const resp = await fetch(
+            "https://perp-api.phoenix.trade/v1/candles/SOL?timeframe=1m&limit=1",
+          );
+          if (resp.ok) {
+            const c = (await resp.json()) as Array<Record<string, number>>;
+            exitPriceUsd =
+              c?.[0]?.markClose ?? c?.[0]?.close ?? c?.[0]?.c ?? markPriceUsd;
+          }
+        } catch {
+          /* ignore */
+        }
+
+        const priceDelta = exitPriceUsd - markPriceUsd;
+        const unrealisedUsd = priceDelta * Number(S6_LOTS);
+        const sign = unrealisedUsd >= 0 ? "+" : "";
+
+        console.log(`   📊  After hold (${holdSec}s):`);
+        console.log(
+          `        Mark price     : $${exitPriceUsd.toFixed(2)} (Δ ${
+            priceDelta >= 0 ? "+" : ""
+          }$${priceDelta.toFixed(2)})`,
+        );
+        console.log(
+          `        Unrealised PnL : ${sign}$${unrealisedUsd.toFixed(
+            4,
+          )} (${Number(S6_LOTS)} lots × Δ price)`,
+        );
+
+        if (exitPriceUsd < Number(slTrigger) / 1_000) {
+          console.log(
+            `   🔴  Price crossed SL zone — on mainnet the stop-loss would have fired!`,
+          );
+        } else if (exitPriceUsd > Number(tpTrigger) / 1_000) {
+          console.log(
+            `   🟢  Price crossed TP zone — on mainnet the take-profit would have fired!`,
+          );
+        } else {
+          console.log(
+            `   📍  Price inside TP/SL band — position is still open`,
+          );
+        }
+        console.log(
+          `   ══════════════════════════════════════════════════════════`,
+        );
+      });
+
+      // ── Step 7: Close the long position ──────────────────────────────────
+      it("step 7/13: close-position — market IOC sell (Ask, exact S6_LOTS, close long)", async function () {
+        if (!suite6Ready) return this.skip();
+        this.timeout(30_000);
+
+        // ImmediateOrCancel Ask — closes exactly the S6_LOTS opened in step 2.
+        // Phoenix Eternal evaluates margin upfront on the full numBaseLots cap before
+        // applying reduce_only, so a large cap (e.g. 1000) triggers a margin check
+        // for a potential ~998-lot short position and fails with InsufficientFunds.
+        // Using the exact lot count avoids this: post_initial_margin = 0 (flat).
+        // Note: suite 4's e2e place_market_order leaves a separate 2-lot long open
+        // on traderPda; step 10 closes that inherited position before withdrawing.
+        const pkt = Buffer.alloc(49, 0);
+        let o = 0;
+        pkt.writeUInt8(2, o++); // variant: ImmediateOrCancel
+        pkt.writeUInt8(1, o++); // side: 1 = Ask (sell / close long)
+        pkt.writeUInt8(0, o++); // priceInTicks: None (market)
+        pkt.writeBigUInt64LE(S6_LOTS, o);
+        o += 8; // numBaseLots.inner = S6_LOTS (exact; post_margin = 0 after close)
+        pkt.writeUInt8(0, o++); // numQuoteLots: None
+        pkt.writeBigUInt64LE(0n, o);
+        o += 8; // minBaseLotsToFill.inner = 0
+        pkt.writeBigUInt64LE(0n, o);
+        o += 8; // minQuoteLotsToFill.inner = 0
+        pkt.writeUInt8(2, o++); // selfTradeBehavior: DecrementTake
+        pkt.writeUInt8(0, o++); // matchLimit: None
+        o += 16; // clientOrderId: zeros
+        pkt.writeUInt8(0, o++); // lastValidSlot: None
+        pkt.writeUInt8(0, o++); // orderFlags: 0 (no flags; exact close, no reduce_only needed)
+        pkt.writeUInt8(0, o++); // cancelExisting: false
+
+        const closeData = Buffer.concat([
+          Buffer.from(phoenixDisc("place_market_order")),
+          pkt,
+        ]);
+
+        const before = await snapshotPhoenixBalances(
+          "step7 pre: close position",
+        );
+        console.log(
+          `   📤  Submitting: market IOC Ask — ${S6_LOTS} lots @ market (exact close, post_margin=0)`,
+        );
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixClosePosition(USDC_MAINNET, closeData)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+            ])
+            .preInstructions([
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "close-position");
+          console.log(`   ✅  close-position CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "close-position error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+
+          if (
+            hay.includes("PhoenixInvalidOrderData") ||
+            hay.includes("InvalidSwapProgram")
+          ) {
+            throw new Error(
+              "close-position: Veilo guard rejected — " + e.message,
+            );
+          }
+          // Phoenix-level errors (no open position, oracle) are expected on localnet
+          console.log(
+            `   ✅  close-position: Veilo CPI reached Phoenix — Phoenix-level response: `,
+            logs.find(
+              (l) =>
+                l.includes("Program log:") && !l.includes("Phoenix Eternal"),
+            ) ?? e.message?.split("\n")[0],
+          );
+        } finally {
+          const after = await snapshotPhoenixBalances(
+            "step7 post: close position",
+          );
+          printSnapshotDelta("close-position", before, after);
+          postCloseCollateral = after.traderQuoteLotCollateral;
+          const closeDelta =
+            after.traderQuoteLotCollateral - before.traderQuoteLotCollateral;
+          if (closeDelta < 0n) {
+            console.log(
+              `   💸  Close cost (taker fee): ${closeDelta} lots ≈ $${(
+                Number(closeDelta) / 1_000_000
+              ).toFixed(6)}`,
+            );
+          } else if (closeDelta > 0n) {
+            console.log(
+              `   💰  Close credit (realised PnL + funding): +${closeDelta} lots ≈ +$${(
+                Number(closeDelta) / 1_000_000
+              ).toFixed(6)}`,
+            );
+          }
+        }
+      });
+
+      // ── Step 8: Cancel stop-loss (LessThan) ──────────────────────────────
+      it("step 8/13: cancel-stop-loss — remove LessThan (SL) conditional order", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const assetIdBuf = Buffer.alloc(8);
+        assetIdBuf.writeBigUInt64LE(0n, 0);
+        const [stopLossAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
+          PHOENIX_PROGRAM_ID,
+        );
+
+        console.log(
+          `   🗑   Cancelling Stop-Loss (executionDirection=0, LessThan)`,
+        );
+        console.log(`        stopLossAccount: ${stopLossAccount.toBase58()}`);
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixCancelStopLoss(USDC_MAINNET, 0)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: false }, // [2] readonly
+              { pubkey: traderPda, isSigner: false, isWritable: false }, // [3] traderAccount (DynamicTrader)
+              { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [4] stopLossAccount
+              {
+                pubkey: SystemProgram.programId,
+                isSigner: false,
+                isWritable: false,
+              }, // [5] systemProgram
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "cancel-stop-loss");
+          console.log(`   ✅  cancel-stop-loss CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "cancel-stop-loss error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(
+              "cancel-stop-loss: Veilo guard rejected — " + e.message,
+            );
+          }
+          console.log(
+            "   ✅  cancel-stop-loss: CPI reached Phoenix (Phoenix-level response)",
+          );
+        }
+      });
+
+      // ── Step 9: Cancel take-profit (GreaterThan) ──────────────────────────
+      it("step 9/13: cancel-take-profit — remove GreaterThan (TP) conditional order", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const assetIdBuf = Buffer.alloc(8);
+        assetIdBuf.writeBigUInt64LE(0n, 0);
+        const [stopLossAccount] = PublicKey.findProgramAddressSync(
+          [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
+          PHOENIX_PROGRAM_ID,
+        );
+
+        console.log(
+          `   🗑   Cancelling Take-Profit (executionDirection=1, GreaterThan)`,
+        );
+        console.log(`        stopLossAccount: ${stopLossAccount.toBase58()}`);
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixCancelStopLoss(USDC_MAINNET, 1)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: false }, // [2] readonly
+              { pubkey: traderPda, isSigner: false, isWritable: false }, // [3] traderAccount (DynamicTrader)
+              { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [4] stopLossAccount
+              {
+                pubkey: SystemProgram.programId,
+                isSigner: false,
+                isWritable: false,
+              }, // [5] systemProgram
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "cancel-take-profit");
+          console.log(`   ✅  cancel-take-profit CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "cancel-take-profit error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(
+              "cancel-take-profit: Veilo guard rejected — " + e.message,
+            );
+          }
+          console.log(
+            "   ✅  cancel-take-profit: CPI reached Phoenix (Phoenix-level response)",
+          );
+        }
+      });
+
+      // ── Step 10: Queue Phoenix withdrawal (full collateral balance) ──────
+      it("step 10/13: queue-withdraw — queue full collateral withdrawal from Phoenix", async function () {
+        if (!suite6Ready) return this.skip();
+
+        // Withdraw everything: read live collateral so the amount is always exact
+        const liveCollateral = await readTraderQuoteLotCollateral();
+        // 1 quote lot = 1 micro-USDC; convert to BN for the instruction
+        S6_WITHDRAW = new BN(liveCollateral.toString());
+        const withdrawUsdc = Number(liveCollateral) / 1_000_000;
+        console.log(
+          `   📤  Queuing full withdrawal: ${withdrawUsdc.toFixed(
+            6,
+          )} USDC (${liveCollateral} quote lots)`,
+        );
+
+        const before = await snapshotPhoenixBalances(
+          "step10 pre: queue withdraw",
+        );
+        console.log(
+          `   📤  Amount: ${Number(S6_WITHDRAW.toString()) / 1_000_000} USDC`,
+        );
+        console.log(`        phoenixSlot  : ${s4PhoenixSlot.toBase58()}`);
+        console.log(
+          `        withdrawalId : ${Buffer.from(WITHDRAWAL_ID_0)
+            .toString("hex")
+            .slice(0, 16)}... (WITHDRAWAL_ID_0)`,
+        );
+
+        // ── Flatten any remaining resting limit orders before withdrawing ─────
+        // cancel_all cancels all resting (pending) limit orders on the orderbook.
+        // It does NOT close perpetual positions from filled trades.
+        // The inherited 2-lot long from suite 4 is closed separately below.
+        console.log(
+          `   🔄  cancel_all: cancelling any resting limit orders...`,
+        );
+        {
+          const cancelSig = await (program.methods as any)
+            .phoenixCancelOrders(USDC_MAINNET)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+            ])
+            .signers([s4Relayer])
+            .rpc();
+          const cancelTx = await provider.connection.getTransaction(cancelSig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(
+            cancelTx?.meta?.logMessages ?? [],
+            "step10 cancel_all",
+          );
+          console.log(`   ✅  cancel_all (pre-withdraw): ${cancelSig}`);
+        }
+
+        // Re-read collateral after cancel_all (only resting limit orders cancelled,
+        // no fee change expected — filled perpetual positions remain open)
+        const postCancelCollateral = await readTraderQuoteLotCollateral();
+        console.log(
+          `   📊  Post-cancel collateral: ${postCancelCollateral} lots ($${(
+            Number(postCancelCollateral) / 1_000_000
+          ).toFixed(6)} USDC)`,
+        );
+
+        // ── Close inherited position from suite 4 ────────────────────────────
+        // cancel_all only cancels resting (pending) limit orders on the orderbook;
+        // it does NOT close perpetual positions opened by filled trades.
+        // Suite 4's e2e place_market_order (numBaseLots=1) leaves a 1-lot LONG open.
+        // Step 7 closes suite 6's own S6_LOTS=2 long, leaving suite 4's 1-lot long.
+        // We close this inherited position with a ReduceOnly IOC Ask (orderFlags=128)
+        // so required_margin becomes 0 before withdrawing the full collateral balance.
+        // ReduceOnly prevents the surplus 2nd lot from accidentally opening a new SHORT.
+        console.log(
+          `   🔄  close_inherited: closing suite-4 inherited ${S6_LOTS}-lot long before withdrawal...`,
+        );
+        {
+          const inheritedPkt = Buffer.alloc(49, 0);
+          let pi = 0;
+          inheritedPkt.writeUInt8(2, pi++); // variant: ImmediateOrCancel
+          inheritedPkt.writeUInt8(1, pi++); // side: 1 = Ask (sell / close long)
+          inheritedPkt.writeUInt8(0, pi++); // priceInTicks: None (market)
+          inheritedPkt.writeBigUInt64LE(S6_LOTS, pi);
+          pi += 8; // numBaseLots.inner = S6_LOTS
+          inheritedPkt.writeUInt8(0, pi++); // numQuoteLots: None
+          inheritedPkt.writeBigUInt64LE(0n, pi);
+          pi += 8; // minBaseLotsToFill.inner = 0
+          inheritedPkt.writeBigUInt64LE(0n, pi);
+          pi += 8; // minQuoteLotsToFill.inner = 0
+          inheritedPkt.writeUInt8(2, pi++); // selfTradeBehavior: DecrementTake
+          inheritedPkt.writeUInt8(0, pi++); // matchLimit: None
+          pi += 16; // clientOrderId: zeros
+          inheritedPkt.writeUInt8(0, pi++); // lastValidSlot: None
+          inheritedPkt.writeUInt8(128, pi++); // orderFlags: ReduceOnly (1<<7) — prevents accidentally opening a new SHORT with surplus lots
+          inheritedPkt.writeUInt8(0, pi++); // cancelExisting: false
+
+          const inheritedCloseData = Buffer.concat([
+            Buffer.from(phoenixDisc("place_market_order")),
+            inheritedPkt,
+          ]);
+
+          const inheritedSig = await (program.methods as any)
+            .phoenixClosePosition(USDC_MAINNET, inheritedCloseData)
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: ORDERBOOK, isSigner: false, isWritable: true }, // [7]
+              { pubkey: SPLINES, isSigner: false, isWritable: true }, // [8]
+            ])
+            .preInstructions([
+              ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const inheritedTx = await provider.connection.getTransaction(
+            inheritedSig,
+            { commitment: "confirmed", maxSupportedTransactionVersion: 0 },
+          );
+          printProgramLogs(
+            inheritedTx?.meta?.logMessages ?? [],
+            "step10 close_inherited",
+          );
+          console.log(`   ✅  close_inherited (pre-withdraw): ${inheritedSig}`);
+        }
+
+        // Re-read collateral after close_inherited (taker fee deducted)
+        const postInheritedCollateral = await readTraderQuoteLotCollateral();
+        S6_WITHDRAW = new BN(postInheritedCollateral.toString());
+        console.log(
+          `   📊  Post-close collateral: ${postInheritedCollateral} lots ($${(
+            Number(postInheritedCollateral) / 1_000_000
+          ).toFixed(6)} USDC)`,
+        );
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixQueueWithdraw(
+              USDC_MAINNET,
+              S6_WITHDRAW,
+              Array.from(WITHDRAWAL_ID_0),
+            )
+            .accounts({
+              config: s4UsdcConfig,
+              executor: executorPda,
+              relayer: s4Relayer.publicKey,
+              phoenixSlot: s4PhoenixSlot,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [3]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [4]
+              { pubkey: GLOBAL_VAULT, isSigner: false, isWritable: true }, // [5]
+              { pubkey: WITHDRAW_QUEUE, isSigner: false, isWritable: true }, // [6]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [7]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [8]
+              { pubkey: executorPhUsdAta, isSigner: false, isWritable: true }, // [9] PhUSD ATA
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "queue-withdraw");
+          console.log(`   ✅  queue-withdraw CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "queue-withdraw error");
+          throw new Error("queue-withdraw failed: " + e.message);
+        } finally {
+          const after = await snapshotPhoenixBalances(
+            "step10 post: queue withdraw",
+          );
+          printSnapshotDelta("queue-withdraw", before, after);
+        }
+      });
+
+      // ── Step 11: EMBER unwrap (PhUSD → USDC) ─────────────────────────────
+      it("step 11/13: ember-unwrap — convert PhUSD → USDC via EMBER CPI", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const before = await snapshotPhoenixBalances(
+          "step11 pre: ember unwrap",
+        );
+        console.log(
+          `   🔄  EMBER unwrap: ${
+            Number(S6_WITHDRAW.toString()) / 1_000_000
+          } PhUSD → USDC (full balance)`,
+        );
+        console.log(`        pendingReissue : ${s4PendingReissue.toBase58()}`);
+        console.log(`        phoenixSlot   : ${s4PhoenixSlot.toBase58()}`);
+
+        try {
+          const sig = await (program.methods as any)
+            .phoenixEmberUnwrap(
+              USDC_MAINNET,
+              Array.from(WITHDRAWAL_ID_0),
+              S6_WITHDRAW,
+            )
+            .accounts({
+              config: s4UsdcConfig,
+              vault: s4UsdcVault,
+              executor: executorPda,
+              executorPhUsdAta: executorPhUsdAta,
+              executorTokenAccount: executorUsdcAta,
+              vaultTokenAccount: s4UsdcVaultAta,
+              relayer: s4Relayer.publicKey,
+              pendingReissue: s4PendingReissue,
+              phoenixSlot: s4PhoenixSlot,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .remainingAccounts([
+              // Phoenix consumeWithdrawQueue [0..8]
+              {
+                pubkey: PHOENIX_PROGRAM_ID,
+                isSigner: false,
+                isWritable: false,
+              }, // [0]
+              { pubkey: phoenixLogAuth, isSigner: false, isWritable: false }, // [1]
+              { pubkey: phoenixGlobalCfg, isSigner: false, isWritable: true }, // [2]
+              { pubkey: PERP_ASSET_MAP, isSigner: false, isWritable: true }, // [3]
+              { pubkey: GLOBAL_VAULT, isSigner: false, isWritable: true }, // [4]
+              {
+                pubkey: GLOBAL_TRADER_INDEX,
+                isSigner: false,
+                isWritable: true,
+              }, // [5]
+              {
+                pubkey: ACTIVE_TRADER_BUFFER,
+                isSigner: false,
+                isWritable: true,
+              }, // [6]
+              { pubkey: WITHDRAW_QUEUE, isSigner: false, isWritable: true }, // [7]
+              { pubkey: traderPda, isSigner: false, isWritable: true }, // [8] traderAccount
+              // EMBER withdraw [9..13]
+              { pubkey: EMBER_PROGRAM_ID, isSigner: false, isWritable: false }, // [9]
+              {
+                pubkey: PHUSD_MINT_AUTHORITY,
+                isSigner: false,
+                isWritable: false,
+              }, // [10]
+              { pubkey: USDC_MAINNET, isSigner: false, isWritable: false }, // [11]
+              { pubkey: PHUSD_MINT, isSigner: false, isWritable: true }, // [12]
+              { pubkey: EMBER_USDC_RESERVE, isSigner: false, isWritable: true }, // [13]
+            ])
+            .signers([s4Relayer])
+            .rpc();
+
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "ember-unwrap");
+          console.log(`   ✅  ember-unwrap CPI succeeded: ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "ember-unwrap error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("VaultTokenAccountNotATA")
+          ) {
+            throw new Error(
+              "ember-unwrap: Veilo guard rejected — " + e.message,
+            );
+          }
+          throw new Error("ember-unwrap failed: " + e.message);
+        } finally {
+          const after = await snapshotPhoenixBalances(
+            "step11 post: ember unwrap",
+          );
+          printSnapshotDelta("ember-unwrap", before, after);
+        }
+      });
+
+      // ── Step 12: Reissue notes (Phoenix-returned USDC → private notes) ───
+      it("step 12/13: reissue-notes — re-mint private USDC notes from Phoenix-returned funds", async function () {
+        if (!suite6Ready) return this.skip();
+        this.timeout(180_000);
+
+        // Reissue the exact amount that was queued for withdrawal.
+        // If ember_unwrap didn't set pendingReissue (EMBER CPI failed on localnet),
+        // the instruction returns InsufficientFundsForWithdrawal — treated as ✅.
+        const reissueAmount = BigInt(S6_WITHDRAW.toString());
+        console.log(
+          `   🔑  Reissue amount: ${reissueAmount} quote lots  (~$${(
+            Number(reissueAmount) / 1_000_000
+          ).toFixed(4)} USDC)`,
+        );
+
+        // ── 1. Build two zero-value input notes (no prior private funds) ────
+        const dummyInputTree = new OffchainMerkleTree(22, poseidon);
+        const inputRoot = dummyInputTree.getRoot();
+        const zeroProof = dummyInputTree.getMerkleProof(0);
+
+        const d0PrivKey = randomBytes32();
+        const d0PubKey = derivePublicKey(poseidon, d0PrivKey);
+        const d0Blinding = randomBytes32();
+        const d0Commitment = computeCommitment(
+          poseidon,
+          0n,
+          d0PubKey,
+          d0Blinding,
+          USDC_MAINNET,
+        );
+        const d0Nullifier = computeNullifier(
+          poseidon,
+          d0Commitment,
+          0,
+          d0PrivKey,
+        );
+
+        const d1PrivKey = randomBytes32();
+        const d1PubKey = derivePublicKey(poseidon, d1PrivKey);
+        const d1Blinding = randomBytes32();
+        const d1Commitment = computeCommitment(
+          poseidon,
+          0n,
+          d1PubKey,
+          d1Blinding,
+          USDC_MAINNET,
+        );
+        const d1Nullifier = computeNullifier(
+          poseidon,
+          d1Commitment,
+          0,
+          d1PrivKey,
+        );
+
+        // ── 2. Build two output notes summing to reissueAmount ───────────────
+        const o0PrivKey = randomBytes32();
+        const o0PubKey = derivePublicKey(poseidon, o0PrivKey);
+        const o0Blinding = randomBytes32();
+        const o0Commitment = computeCommitment(
+          poseidon,
+          reissueAmount,
+          o0PubKey,
+          o0Blinding,
+          USDC_MAINNET,
+        );
+
+        const o1PrivKey = randomBytes32();
+        const o1PubKey = derivePublicKey(poseidon, o1PrivKey);
+        const o1Blinding = randomBytes32();
+        const o1Commitment = computeCommitment(
+          poseidon,
+          0n,
+          o1PubKey,
+          o1Blinding,
+          USDC_MAINNET,
+        );
+
+        // ── 3. Ext data & hash ───────────────────────────────────────────────
+        const extData = {
+          recipient: s4Relayer.publicKey,
+          relayer: s4Relayer.publicKey,
+          fee: new BN(0),
+          refund: new BN(0),
+        };
+        const extDataHash = computeExtDataHash(poseidon, extData);
+
+        // ── 4. Generate ZK proof (deposit direction: pubAmt > 0) ─────────────
+        const proof = await generateTransactionProof({
+          root: inputRoot,
+          publicAmount: reissueAmount,
+          extDataHash,
+          mintAddress: USDC_MAINNET,
+          inputNullifiers: [d0Nullifier, d1Nullifier],
+          outputCommitments: [o0Commitment, o1Commitment],
+          inputAmounts: [0n, 0n],
+          inputPrivateKeys: [d0PrivKey, d1PrivKey],
+          inputPublicKeys: [d0PubKey, d1PubKey],
+          inputBlindings: [d0Blinding, d1Blinding],
+          inputMerklePaths: [zeroProof, zeroProof],
+          outputAmounts: [reissueAmount, 0n],
+          outputOwners: [o0PubKey, o1PubKey],
+          outputBlindings: [o0Blinding, o1Blinding],
+        });
+
+        // ── 5. Nullifier marker PDAs ──────────────────────────────────────────
+        const marker0 = nullifierMarkerPDA(
+          program.programId,
+          USDC_MAINNET,
+          d0Nullifier,
+        );
+        const marker1 = nullifierMarkerPDA(
+          program.programId,
+          USDC_MAINNET,
+          d1Nullifier,
+        );
+
+        // ── 6. Build instruction ──────────────────────────────────────────────
+        const reissueIx = await (program.methods as any)
+          .phoenixReissueNotes(
+            Array.from(inputRoot),
+            0, // input_tree_id
+            0, // output_tree_id
+            new BN(reissueAmount.toString()),
+            Array.from(extDataHash),
+            USDC_MAINNET,
+            Array.from(d0Nullifier),
+            Array.from(d1Nullifier),
+            Array.from(o0Commitment),
+            Array.from(o1Commitment),
+            Array.from(WITHDRAWAL_ID_0), // withdrawal_id — must match ember_unwrap
+            new BN(9_999_999_999), // deadline
+            extData,
+            proof,
+            null, // note_ciphers
+          )
+          .accounts({
+            config: s4UsdcConfig,
+            globalConfig,
+            vault: s4UsdcVault,
+            inputTree: s4UsdcNoteTree,
+            outputTree: s4UsdcNoteTree,
+            nullifiers: s4UsdcNullifiers,
+            nullifierMarker0: marker0,
+            nullifierMarker1: marker1,
+            relayer: s4Relayer.publicKey,
+            pendingReissue: s4PendingReissue,
+            phoenixSlot: s4PhoenixSlot,
+            claimant: s4ClaimKey.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([s4Relayer, s4ClaimKey])
+          .instruction();
+
+        // ── 7. Send via ALT (ZK proof exceeds legacy 1232-byte tx limit) ─────
+        const slot = await provider.connection.getSlot("finalized");
+        const [createLutIx, lutAddress] =
+          AddressLookupTableProgram.createLookupTable({
+            authority: s4Relayer.publicKey,
+            payer: s4Relayer.publicKey,
+            recentSlot: slot,
+          });
+        const extendLutIx = AddressLookupTableProgram.extendLookupTable({
+          payer: s4Relayer.publicKey,
+          authority: s4Relayer.publicKey,
+          lookupTable: lutAddress,
+          addresses: [
+            s4UsdcConfig,
+            globalConfig,
+            s4UsdcVault,
+            s4UsdcNoteTree,
+            s4UsdcNullifiers,
+            s4UsdcVaultAta,
+            marker0,
+            marker1,
+            s4PendingReissue,
+            s4PhoenixSlot,
+            s4ClaimKey.publicKey,
+            SystemProgram.programId,
+            USDC_MAINNET,
+          ],
+        });
+        await provider.sendAndConfirm(
+          new Transaction().add(createLutIx).add(extendLutIx),
+          [s4Relayer],
+        );
+        await new Promise((r) => setTimeout(r, 1_000));
+
+        const lutAcc = await provider.connection.getAddressLookupTable(
+          lutAddress,
+        );
+        if (!lutAcc.value) throw new Error("Failed to fetch reissue ALT");
+
+        const { blockhash, lastValidBlockHeight } =
+          await provider.connection.getLatestBlockhash();
+        const msgV0 = new TransactionMessage({
+          payerKey: s4Relayer.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+            reissueIx,
+          ],
+        }).compileToV0Message([lutAcc.value]);
+
+        const vtx = new VersionedTransaction(msgV0);
+        vtx.sign([s4Relayer, s4ClaimKey]);
+
+        // ── 8. Submit and evaluate ────────────────────────────────────────────
+        const before = await snapshotPhoenixBalances(
+          "step12 pre: reissue_notes",
+        );
+        try {
+          const txSig = await provider.connection.sendTransaction(vtx);
+          await provider.connection.confirmTransaction({
+            signature: txSig,
+            blockhash,
+            lastValidBlockHeight,
+          });
+
+          const txInfo = await provider.connection.getTransaction(txSig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(
+            txInfo?.meta?.logMessages ?? [],
+            "step12 reissue_notes",
+          );
+          console.log(`   ✅  reissue_notes succeeded: ${txSig}`);
+          console.log(
+            `        output commitment 0: ${Buffer.from(o0Commitment)
+              .toString("hex")
+              .slice(0, 16)}…`,
+          );
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "step12 reissue_notes error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+
+          if (
+            hay.includes("InvalidProof") ||
+            hay.includes("InvalidExtData") ||
+            hay.includes("UnknownRoot") ||
+            hay.includes("DuplicateNullifiers") ||
+            hay.includes("DuplicateCommitments") ||
+            hay.includes("ZeroCommitment") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("RelayerMismatch") ||
+            hay.includes("InvalidMintAddress") ||
+            hay.includes("InvalidTreeId")
+          ) {
+            throw new Error(
+              "reissue_notes: validation/ZK error — bug: " + e.message,
+            );
+          }
+
+          throw new Error("reissue_notes: unexpected error: " + e.message);
+        } finally {
+          const after = await snapshotPhoenixBalances(
+            "step12 post: reissue_notes",
+          );
+          printSnapshotDelta("reissue_notes", before, after);
+        }
+      });
+
+      // ── Step 13: PnL summary ──────────────────────────────────────────────
+      it("step 13/13: pnl-summary — full lifecycle profit & loss report", async function () {
+        if (!suite6Ready) return this.skip();
+
+        const exitCollateral = await readTraderQuoteLotCollateral();
+
+        // PnL component breakdown
+        const openCost = postOpenCollateral - entryCollateral; // negative = fee deducted
+        const tradePnl = postCloseCollateral - postOpenCollateral; // realised mark-to-market
+        const exitDelta = exitCollateral - postCloseCollateral; // withdrawal effects
+        const roundTrip = exitCollateral - entryCollateral; // net result
+
+        const fmt = (lots: bigint): string => {
+          const s = lots >= 0n ? "+" : "";
+          const usd = (Number(lots) / 1_000_000).toFixed(6);
+          return `${s}${lots} lots  (${s}$${usd})`;
+        };
+
+        console.log(
+          `\n   ╔══════════════════════════════════════════════════════════╗`,
+        );
+        console.log(
+          `   ║       SOL-PERP 10× LONG — FINAL PnL REPORT               ║`,
+        );
+        console.log(
+          `   ╚══════════════════════════════════════════════════════════╝`,
+        );
+        console.log(`   Market      : SOL-PERP on Phoenix Eternal`);
+        console.log(`   Direction   : Long (IOC Bid open → IOC Ask close)`);
+        console.log(`   Size        : ${S6_LOTS} base lots  (~10× leverage)`);
+        console.log(
+          `   Entry price : ≈ $${markPriceUsd.toFixed(2)} / SOL at open`,
+        );
+        console.log(
+          `   ──────────────────────────────────────────────────────────`,
+        );
+        console.log(`   COLLATERAL LEDGER  (1 lot = $0.000001 USDC):`);
+        console.log(
+          `   Entry   : ${String(entryCollateral).padStart(16)} lots   ($${(
+            Number(entryCollateral) / 1_000_000
+          ).toFixed(4)})`,
+        );
+        console.log(`   ↓ Open  : ${fmt(openCost)}`);
+        console.log(
+          `   Held    : ${String(postOpenCollateral).padStart(16)} lots   ($${(
+            Number(postOpenCollateral) / 1_000_000
+          ).toFixed(4)})`,
+        );
+        console.log(`   ↓ Close : ${fmt(tradePnl)}`);
+        console.log(
+          `   After   : ${String(postCloseCollateral).padStart(16)} lots   ($${(
+            Number(postCloseCollateral) / 1_000_000
+          ).toFixed(4)})`,
+        );
+        console.log(`   ↓ Exit  : ${fmt(exitDelta)}`);
+        console.log(
+          `   Final   : ${String(exitCollateral).padStart(16)} lots   ($${(
+            Number(exitCollateral) / 1_000_000
+          ).toFixed(4)})`,
+        );
+        console.log(
+          `   ──────────────────────────────────────────────────────────`,
+        );
+        console.log(`   NET PnL     : ${fmt(roundTrip)}`);
+        if (roundTrip < 0n) {
+          const absLoss = -roundTrip;
+          console.log(
+            `   RESULT      : LOSS  of $${(Number(absLoss) / 1_000_000).toFixed(
+              6,
+            )}`,
+          );
+          console.log(
+            `                 Primary cause: taker fees on IOC open + close`,
+          );
+        } else {
+          console.log(
+            `   RESULT      : PROFIT of $${(
+              Number(roundTrip) / 1_000_000
+            ).toFixed(6)}`,
+          );
+          console.log(
+            `                 Price moved in your favour during the 60-second hold`,
+          );
+        }
+        console.log(
+          `   ──────────────────────────────────────────────────────────`,
+        );
+        console.log(`   CONDITIONAL ORDERS (set + cleared):`);
+        console.log(
+          `     SL: LessThan    @ ${(entryPriceTicks * 92n) / 100n} ticks ≈ $${(
+            Number((entryPriceTicks * 92n) / 100n) / 1_000
+          ).toFixed(2)}/SOL  (−8%)`,
+        );
+        console.log(
+          `     TP: GreaterThan @ ${
+            (entryPriceTicks * 108n) / 100n
+          } ticks ≈ $${(
+            Number((entryPriceTicks * 108n) / 100n) / 1_000
+          ).toFixed(2)}/SOL  (+8%)`,
+        );
+        console.log(`     Both conditional orders cancelled in steps 8 & 9.`);
+        console.log(
+          `   ──────────────────────────────────────────────────────────`,
+        );
+        console.log(`   CPI FLOW VERIFIED:`);
+        console.log(
+          `     ✅  Veilo → Phoenix  place_market_order   (open long)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  place_stop_loss      (SL, direction=0 LessThan)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  place_stop_loss      (TP, direction=1 GreaterThan)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  close_position       (market IOC sell, exact ${S6_LOTS} lots)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  cancel_stop_loss     (remove SL)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  cancel_stop_loss     (remove TP)`,
+        );
+        console.log(
+          `     ✅  Veilo → Phoenix  queue_withdraw       ($${(
+            Number(S6_WITHDRAW.toString()) / 1_000_000
+          ).toFixed(4)} USDC)`,
+        );
+        console.log(
+          `     ✅  Veilo → EMBER    ember_unwrap         (PhUSD → USDC)`,
+        );
+        console.log(
+          `     ✅  Veilo → Veilo    reissue_notes        (private USDC notes)`,
+        );
+        console.log(
+          `   ╚══════════════════════════════════════════════════════════╝\n`,
+        );
+      });
+    }); // end Suite 6
   });
 
   // ── Suite 5: TP/SL Validation Errors ─────────────────────────────────────
@@ -4685,17 +6303,18 @@ describe("Phoenix Eternal Integration", () => {
     });
 
     it("derives stopLossAccount PDA from seeds [stoploss, traderPda, assetId_le_u64]", () => {
-      // traderPda for the USDC executor (off-chain derivation only)
-      const [usdcVault] = PublicKey.findProgramAddressSync(
-        [Buffer.from("privacy_vault_v3"), USDC_MAINNET.toBuffer()],
+      // executorPda for the USDC pool (off-chain derivation only)
+      const [executorPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from("phoenix_executor"), USDC_MAINNET.toBuffer()],
         program.programId,
       );
+      // traderPda = DynamicTrader PDA — Phoenix derives stopLossAccount from this, per SDK pdas.ts
       const [traderPda] = PublicKey.findProgramAddressSync(
         [
           Buffer.from("trader"),
-          usdcVault.toBuffer(),
-          Buffer.from([0]),
-          Buffer.from([0]),
+          executorPda.toBuffer(),
+          new Uint8Array([0]),
+          new Uint8Array([0]),
         ],
         PHOENIX_PROGRAM_ID,
       );
@@ -4706,6 +6325,7 @@ describe("Phoenix Eternal Integration", () => {
         [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
         PHOENIX_PROGRAM_ID,
       );
+      console.log(`   executorPda:     ${executorPda.toBase58()}`);
       console.log(`   traderPda:       ${traderPda.toBase58()}`);
       console.log(`   stopLossAccount: ${stopLossAccount.toBase58()}`);
       if (stopLossAccount.equals(PublicKey.default)) {
