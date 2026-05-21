@@ -1136,6 +1136,27 @@ pub struct PhoenixCancelOrders<'info> {
     // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_orders
 }
 
+/// Cancel specific resting Phoenix orders by FIFO order IDs.
+/// Identical account layout to `PhoenixCancelOrders`; only the instruction data differs.
+/// Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey)]
+pub struct PhoenixCancelOrdersById<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Account<'info, PrivacyConfig>,
+
+    /// Executor PDA — signs the Phoenix CPI.
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_orders_by_id
+}
+
 /// Place a Phoenix native stop-loss / take-profit conditional order.
 /// The executor PDA signs as both funder and positionAuthority.
 /// Phoenix accounts supplied via remaining_accounts.
@@ -2190,6 +2211,22 @@ pub mod privacy_pool {
         mint_address: Pubkey
     ) -> Result<()> {
         phoenix::phoenix_cancel_orders(ctx, mint_address)
+    }
+
+    /// **Cancel specific resting Phoenix orders by their FIFO order IDs.**
+    ///
+    /// `price_in_ticks` and `sequence_numbers` must have the same length (1..=100).
+    /// Each pair `(price_in_ticks[i], sequence_numbers[i])` identifies a resting order.
+    ///
+    /// See `phoenix::phoenix_cancel_orders_by_id` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_cancel_orders_by_id<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixCancelOrdersById<'info>>,
+        mint_address: Pubkey,
+        price_in_ticks: Vec<u64>,
+        sequence_numbers: Vec<u64>
+    ) -> Result<()> {
+        phoenix::phoenix_cancel_orders_by_id(ctx, mint_address, price_in_ticks, sequence_numbers)
     }
 
     /// **Place a Phoenix native stop-loss / take-profit conditional order.**

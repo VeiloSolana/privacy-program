@@ -672,6 +672,98 @@ pub fn phoenix_cancel_orders<'info>(
     Ok(())
 }
 
+/// **Cancel specific resting orders by their FIFO order IDs.**
+///
+/// Each pair `(price_in_ticks[i], sequence_numbers[i])` identifies a resting
+/// order on the Phoenix orderbook. Both slices must have the same length and
+/// contain at least one entry (max 100 per call).
+///
+/// Encoding sent to Phoenix (per rise-public `rust/ix/src/cancel_orders.rs`):
+/// ```
+/// disc(8) + u32_le(num_orders) + N × [u32_le(nodePointer=0) + u64_le(priceInTicks) + u64_le(seqNum)]
+/// ```
+///
+/// `remaining_accounts` layout — identical to `phoenix_cancel_orders` (9 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — readonly
+/// [2] globalConfiguration       — PDA ["global"]; writable
+/// [3] phoenixTraderAccount      — PDA ["trader", executor, 0, 0]; writable
+/// [4] perpAssetMap              — writable
+/// [5] phoenixGlobalTraderIndex  — writable
+/// [6] phoenixActiveTraderBuffer — writable
+/// [7] orderbook                 — writable
+/// [8] splines                   — writable
+/// ```
+pub fn phoenix_cancel_orders_by_id<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelOrdersById<'info>>,
+    mint_address: Pubkey,
+    price_in_ticks: Vec<u64>,
+    sequence_numbers: Vec<u64>
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(!price_in_ticks.is_empty(), PrivacyError::PhoenixInvalidOrderData);
+    require!(price_in_ticks.len() == sequence_numbers.len(), PrivacyError::PhoenixInvalidOrderData);
+    require!(price_in_ticks.len() <= 100, PrivacyError::PhoenixInvalidOrderData);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+
+    // Encode: disc(8) + u32_le(len) + N × [u32_le(nodePointer=0) + u64_le(priceInTicks) + u64_le(seqNum)]
+    let num = price_in_ticks.len() as u32;
+    let mut ix_data = phoenix_disc("cancel_orders_by_id").to_vec();
+    ix_data.extend_from_slice(&num.to_le_bytes());
+    for i in 0..price_in_ticks.len() {
+        ix_data.extend_from_slice(&(0u32).to_le_bytes()); // nodePointer = 0
+        ix_data.extend_from_slice(&price_in_ticks[i].to_le_bytes()); // priceInTicks
+        ix_data.extend_from_slice(&sequence_numbers[i].to_le_bytes()); // orderSequenceNumber
+    }
+
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false),
+        AccountMeta::new_readonly(remaining[1].key(), false),
+        AccountMeta::new(remaining[2].key(), false),
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false),
+        AccountMeta::new(remaining[4].key(), false),
+        AccountMeta::new(remaining[5].key(), false),
+        AccountMeta::new(remaining[6].key(), false),
+        AccountMeta::new(remaining[7].key(), false),
+        AccountMeta::new(remaining[8].key(), false)
+    ];
+
+    let cancel_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: phoenix_account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(),
+        remaining[2].to_account_info(),
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(),
+        remaining[4].to_account_info(),
+        remaining[5].to_account_info(),
+        remaining[6].to_account_info(),
+        remaining[7].to_account_info(),
+        remaining[8].to_account_info(),
+        remaining[0].to_account_info()
+    ];
+
+    invoke_signed(&cancel_ix, &cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// **Place a market close/reduce order — risk management before withdrawal.**
