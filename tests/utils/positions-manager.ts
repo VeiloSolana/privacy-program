@@ -458,13 +458,14 @@ export async function enrichPositions(
       const direction: "Long" | "Short" | "Flat" =
         pos.baseLots > 0n ? "Long" : pos.baseLots < 0n ? "Short" : "Flat";
 
-      // Entry price = |virtualQuoteLots| / |baseLots| / 1_000_000
-      // virtualQuoteLots is the negative cost basis for longs, positive received for shorts.
+      // Entry price = |virtualQuoteLots| / |baseLots| / 10_000
+      // virtualQuoteLots is stored in units of $0.0001 USDC (Phoenix quote-lot denomination).
+      // Dividing by 10_000 converts to USD per full coin.
       const entryPriceUsd: number | null =
         direction !== "Flat" && pos.baseLots !== 0n
           ? Math.abs(Number(pos.virtualQuoteLots)) /
             Math.abs(Number(pos.baseLots)) /
-            1_000_000
+            10_000
           : null;
 
       // accumulatedFunding: positive = received by trader, negative = paid
@@ -478,11 +479,11 @@ export async function enrichPositions(
       if (fetchPrices && direction !== "Flat") {
         markPriceUsd = await fetchMarkPrice(symbol);
         if (markPriceUsd > 0) {
-          // baseLots × markPriceUsd + virtualQuoteLots / 1_000_000
-          // virtualQuoteLots is the negative cost basis in micro-USDC
+          // baseLots × markPriceUsd + virtualQuoteLots / 10_000
+          // virtualQuoteLots is in $0.0001 USDC units; / 10_000 converts to USD.
           unrealizedPnlUsd =
             Number(pos.baseLots) * markPriceUsd +
-            Number(pos.virtualQuoteLots) / 1_000_000;
+            Number(pos.virtualQuoteLots) / 10_000;
           totalPnlUsd = unrealizedPnlUsd + fundingUsd;
           notionalUsd = Math.abs(Number(pos.baseLots)) * markPriceUsd;
         }
@@ -650,7 +651,7 @@ export function encodePostOnlyLimitOrder(
 ): Buffer {
   const pkt = Buffer.alloc(57, 0);
   let p = 0;
-  pkt.writeUInt8(3, p++); // variant: PostOnly
+  pkt.writeUInt8(0, p++); // variant: PostOnly
   pkt.writeUInt8(side, p++); // side
   pkt.writeUInt8(1, p++); // priceInTicks: Some
   pkt.writeBigUInt64LE(priceInTicks, p);
@@ -687,6 +688,12 @@ export interface PositionsManagerConfig {
   poolConfig: PublicKey;
   /** Compute unit budget per transaction (default 400 000). */
   computeUnitLimit?: number;
+  /**
+   * Override the Phoenix trader PDA used for all order/withdrawal CPIs.
+   * By default this is the cross-margin subaccount (subaccount_index=0).
+   * Pass `deriveIsolatedTraderPda(executorPda)` to target the isolated subaccount.
+   */
+  traderPdaOverride?: PublicKey;
 }
 
 /**
@@ -720,7 +727,7 @@ export class PositionsManager {
     this.poolConfig = cfg.poolConfig;
     this.cu = cfg.computeUnitLimit ?? 400_000;
     this.executorPda = deriveExecutorPda(cfg.program.programId, cfg.mint);
-    this.traderPda = deriveTraderPda(this.executorPda);
+    this.traderPda = cfg.traderPdaOverride ?? deriveTraderPda(this.executorPda);
   }
 
   private get connection(): Connection {
@@ -887,6 +894,46 @@ export class PositionsManager {
   }
 
   /**
+   * Place a resting PostOnly (limit) order on Phoenix.
+   * The order will sit on the orderbook at `priceInTicks` until filled or cancelled.
+   *
+   * @param symbol        Market symbol (e.g. "SOL", "BTC", "ETH")
+   * @param side          "Long" = Bid (limit buy); "Short" = Ask (limit sell)
+   * @param priceInTicks  Limit price in Phoenix ticks (1 tick ≈ $0.001)
+   * @param numBaseLots   Size in base lots
+   */
+  async placeLimitOrder(opts: {
+    symbol: string;
+    side: OrderSide;
+    priceInTicks: bigint;
+    numBaseLots: bigint;
+  }): Promise<string> {
+    const market = getMarket(opts.symbol);
+    const side: 0 | 1 = opts.side === "Long" ? 0 : 1;
+    const pkt = encodePostOnlyLimitOrder(
+      side,
+      opts.priceInTicks,
+      opts.numBaseLots,
+    );
+    return this.program.methods
+      .phoenixPlaceOrder(this.mint, pkt)
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda),
+      )
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
+      ])
+      .signers([this.relayer])
+      .rpc();
+  }
+
+  /**
    * Close an open position using a ReduceOnly IOC Ask order.
    * The `phoenixClosePosition` instruction enforces reduce-only semantics on-chain.
    *
@@ -901,7 +948,8 @@ export class PositionsManager {
     positionSide?: "Long" | "Short";
   }): Promise<string> {
     const market = getMarket(opts.symbol);
-    const closeSide = (opts.positionSide ?? "Long") === "Long" ? 1 /* Ask */ : 0 /* Bid */;
+    const closeSide =
+      (opts.positionSide ?? "Long") === "Long" ? 1 /* Ask */ : 0; /* Bid */
     const pkt = encodeIocMarketOrder(closeSide, opts.numBaseLots, true);
     return this.program.methods
       .phoenixClosePosition(this.mint, pkt)

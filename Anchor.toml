@@ -127,6 +127,30 @@ address = "71Si24E4uc3oCaPbPZTozC1ptSNNqygjjebxSmErSsC2"   # Phoenix SOL-PERP ma
 address = "EVhkquLbfm5rDRXtZu9FoyDSXX5mYq2EYU6yD8zfKEqM"   # Phoenix SOL-PERP splines
 
 [[test.validator.clone]]
+address = "AXFz1MuzMUBHi5UKJuK3FDCQ73o3rSzubGU2mPr4LLU7"   # Phoenix BTC-PERP market orderbook (kept for Suite 6)
+
+[[test.validator.clone]]
+address = "Dh9NrYjzzdvcYgFSbrkATQ1rPkPjDovXWnFVhfWmD2ZF"   # Phoenix BTC-PERP splines (kept for Suite 6)
+
+[[test.validator.clone]]
+address = "9u7aqptdRFbsnnoHtjK13E5JkeM14EW5fAKTRPidVF88"   # Phoenix ETH-PERP market orderbook (kept for Suite 6)
+
+[[test.validator.clone]]
+address = "DN7uE4FBSs9Uy6V3GNvAbTdUMufY1hBkdy3JV1UfYdg"   # Phoenix ETH-PERP splines (kept for Suite 6)
+
+[[test.validator.clone]]
+address = "CwaHtR69D287PLnoX8zzzk1zqwNQKVJiJQTNs6JrVyna"   # Phoenix XRP-PERP market orderbook (Suite 7)
+
+[[test.validator.clone]]
+address = "DTX3dsRdJfx2bUWWKgGAKv3UGfRFHB2NGX7a5DmG81Em"   # Phoenix XRP-PERP splines (Suite 7)
+
+[[test.validator.clone]]
+address = "GQS3qn9EjKYpqoLwpvPVbeW9o1bjFYhc1SRMZYw4iNru"   # Phoenix SUI-PERP market orderbook (Suite 7)
+
+[[test.validator.clone]]
+address = "7PNzQtPd1EjVEs9ixAqPb9ynRcNiK27tJ8qpTwjJYYme"   # Phoenix SUI-PERP splines (Suite 7)
+
+[[test.validator.clone]]
 address = "csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu"    # Phoenix globalVault (PhUSD token account)
 
 [[test.validator.clone]]
@@ -327,16 +351,4 @@ address = "3DWa6Sz5frfSh5SedgWonf9qFjLL7xyyi9CsewoQNF2Q"
 
 [[test.validator.clone]]
 address = "7GGRdCvomRyFBVFmm5MF5efDom2uFPJMnXrx1pZruxTQ"
-
-[[test.validator.clone]]
-address = "CAryFCnzgxtQyBoTTcDKDsCRXmqkDkjcc49cB8w95hNz"
-
-[[test.validator.clone]]
-address = "EjJdRRZTkwMC1F4Hh4nKvnVfsE81Bv6rnegbuTs5N9kK"
-
-[[test.validator.clone]]
-address = "7ZLL8j9rBDkHBHoPHLW36y9vxQq4mj3sfAfYUHj9NP6q"
-
-[[test.validator.clone]]
-address = "AAhzuFZLgRWr8EytSC2Fehc7MrBuvqvugeuMq52Qd8VS"
 
