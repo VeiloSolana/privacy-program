@@ -479,6 +479,20 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
   it("initializes source privacy pool (WSOL)", async () => {
     try {
+      // Ensure global config exists first (required for pool initialization)
+      try {
+        await (program.account as any).globalConfig.fetch(globalConfig);
+      } catch {
+        await (program.methods as any)
+          .initializeGlobalConfig()
+          .accounts({
+            globalConfig,
+            admin: payer.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+      }
+
       await (program.methods as any)
         .initialize(
           feeBps,
@@ -493,6 +507,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           vault: sourceVault,
           noteTree: sourceNoteTree,
           nullifiers: sourceNullifiers,
+          globalConfig,
           admin: payer.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -524,6 +539,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           vault: destVault,
           noteTree: destNoteTree,
           nullifiers: destNullifiers,
+          globalConfig,
           admin: payer.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -1407,9 +1423,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Fetch the lookup table account
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value) {
       throw new Error("Failed to fetch lookup table");
     }
@@ -1817,9 +1832,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     expect(wsolAccount).to.be.instanceOf(PublicKey);
 
     // Check balance
-    const balance = await provider.connection.getTokenAccountBalance(
-      wsolAccount,
-    );
+    const balance =
+      await provider.connection.getTokenAccountBalance(wsolAccount);
     expect(parseInt(balance.value.amount)).to.equal(wrapAmount);
 
     // Unwrap back to SOL
@@ -2716,9 +2730,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         destTokenMint,
         usdcHolder.publicKey,
       );
-      const balance = await provider.connection.getTokenAccountBalance(
-        holderTokenAccount,
-      );
+      const balance =
+        await provider.connection.getTokenAccountBalance(holderTokenAccount);
       console.log(`   Holder USDC Balance: ${balance.value.uiAmount}`);
 
       if (BigInt(balance.value.amount) < amount) {
@@ -3110,6 +3123,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             vault: usdtVault,
             noteTree: usdtNoteTree,
             nullifiers: usdtNullifiers,
+            globalConfig,
             admin: payer.publicKey,
             systemProgram: SystemProgram.programId,
           })

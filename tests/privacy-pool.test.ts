@@ -840,6 +840,35 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
   });
 
+  it("initializes global config", async () => {
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
+        globalConfig,
+      );
+      console.log("✅ Global config initialized");
+      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
+    } catch (e: any) {
+      if (e.message?.includes("already in use")) {
+        console.log("✅ Global config already initialized");
+        return;
+      }
+      if (e instanceof SendTransactionError) {
+        const logs = await e.getLogs(provider.connection);
+        console.error("Global config init failed:", logs);
+      }
+      throw e;
+    }
+  });
+
   it("initializes the privacy pool (UTXO model)", async () => {
     try {
       console.log("Initializing privacy pool...");
@@ -858,6 +887,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           vault,
           noteTree,
           nullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -876,31 +906,6 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       if (e instanceof SendTransactionError) {
         const logs = await e.getLogs(provider.connection);
         console.error("Initialize failed:", logs);
-      }
-      throw e;
-    }
-  });
-
-  it("initializes global config", async () => {
-    try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
-          globalConfig,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      const globalConfigAcc = await (program.account as any).globalConfig.fetch(
-        globalConfig,
-      );
-      console.log("✅ Global config initialized");
-      console.log(`   Relayer enabled: ${globalConfigAcc.relayerEnabled}`);
-    } catch (e: any) {
-      if (e instanceof SendTransactionError) {
-        const logs = await e.getLogs(provider.connection);
-        console.error("Global config init failed:", logs);
       }
       throw e;
     }
@@ -1118,7 +1123,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config,
@@ -1497,7 +1502,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config,
@@ -2447,7 +2452,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config,
@@ -2719,7 +2724,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             new BN(9999999999), // deadline (far future for tests)
             data.extData,
             data.proof,
-        null,
+            null,
           )
           .accounts({
             config,
@@ -3819,9 +3824,8 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Create the tree using admin (admin always has authorization)
     try {
       // Check if account exists and is already initialized
-      const treeAccountInfo = await provider.connection.getAccountInfo(
-        noteTreeDestination,
-      );
+      const treeAccountInfo =
+        await provider.connection.getAccountInfo(noteTreeDestination);
 
       if (treeAccountInfo && treeAccountInfo.owner.equals(program.programId)) {
         console.log(

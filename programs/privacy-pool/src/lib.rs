@@ -37,31 +37,6 @@ pub const MAX_FEE_BPS: u16 = 100;
 /// Maximum swap fee basis points: 1000 = 10%
 pub const MAX_SWAP_FEE_BPS: u16 = 1000;
 
-/// SPL token whitelist enforcement — MUST remain false in production.
-/// SOL (native) is always permitted and is not routed through this check.
-pub const ALLOW_ALL_SPL_TOKENS: bool = false;
-
-/// Devnet/Localnet allowed tokens (test networks)
-#[cfg(any(feature = "devnet", feature = "localnet"))]
-pub const ALLOWED_TOKENS: &[Pubkey] = &[
-    pubkey!("So11111111111111111111111111111111111111112"), // WSOL
-    pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"), // USDC (devnet)
-    pubkey!("EcFc2cMyZxaKBkFK1XooxiyDyCPneLXiMwSJiVY6eTad"), // USDT (devnet)
-    pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1 (devnet)
-    pubkey!("JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"), // JUP (devnet)
-];
-
-/// Mainnet allowed tokens (production)
-/// SOL (native) is always permitted — these are SPL mints only.
-#[cfg(not(any(feature = "devnet", feature = "localnet")))]
-pub const ALLOWED_TOKENS: &[Pubkey] = &[
-    pubkey!("So11111111111111111111111111111111111111112"), // WSOL
-    pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"), // USDC
-    pubkey!("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"), // USDT
-    pubkey!("USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"), // USD1
-    pubkey!("JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"), // JUP
-];
-
 /// Raydium CPMM program ID (mainnet)
 pub const RAYDIUM_CPMM_PROGRAM_ID: Pubkey = pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
 
@@ -465,9 +440,19 @@ pub struct Initialize<'info> {
     )]
     pub nullifiers: Account<'info, NullifierSet>,
 
-    /// CHECK: Squads vault PDA that becomes the admin.
-    /// When using Squads multisig, this should be the vault PDA.
-    /// Squads will sign this account after multisig approval.
+    /// Global protocol config — constrains pool creation to the protocol authority.
+    /// The `admin` signer must match `global_config.admin`, ensuring only the
+    /// protocol authority (or its Squads delegate) can initialize new pools.
+    /// Authority can be rotated on-chain via `update_global_config` without a redeploy.
+    #[account(
+        seeds = [b"global_config_v1"],
+        bump = global_config.bump,
+        constraint = admin.key() == global_config.admin @ PrivacyError::Unauthorized
+    )]
+    pub global_config: Account<'info, GlobalConfig>,
+
+    /// CHECK: Squads vault PDA that becomes the pool admin.
+    /// Must equal global_config.admin — enforced by the constraint above.
     pub admin: Signer<'info>,
 
     /// Transaction fee payer (can be anyone, separate from admin authority)
@@ -1557,14 +1542,6 @@ pub mod privacy_pool {
         cfg.total_tvl = 0;
         cfg.mint_address = mint_address;
 
-        // Enforce token whitelist to prevent fund-trapping via unwhitelisted pools.
-        if is_token_mint(&mint_address) {
-            require!(
-                ALLOW_ALL_SPL_TOKENS || ALLOWED_TOKENS.contains(&mint_address),
-                PrivacyError::InvalidMintAddress
-            );
-        }
-
         // Set deposit/withdraw limits with sensible defaults
         cfg.min_deposit_amount = min_deposit_amount.unwrap_or(1_000_000); // Default: 0.001 SOL
         cfg.max_deposit_amount = max_deposit_amount.unwrap_or(1_000_000_000_000); // Default: 1000 SOL
@@ -1845,17 +1822,8 @@ pub mod privacy_pool {
         msg!("DEBUG: cfg.mint_address   = {}", cfg.mint_address);
         require_keys_eq!(mint_address, cfg.mint_address, PrivacyError::InvalidMintAddress);
 
-        // 4a. Validate SPL token is allowed (if not SOL)
-        // Note: mint_address has already been verified to equal cfg.mint_address above,
-        // so if this pool was initialized with this mint, it is implicitly allowed.
-        if is_token_mint(&mint_address) {
-            require!(
-                ALLOW_ALL_SPL_TOKENS ||
-                    ALLOWED_TOKENS.contains(&mint_address) ||
-                    mint_address == cfg.mint_address,
-                PrivacyError::InvalidMintAddress
-            );
-        }
+        // 4a. mint_address has been verified to equal cfg.mint_address above (require_keys_eq),
+        // and pool creation is gated by GlobalConfig authority, so the mint is implicitly trusted.
 
         // 4b. Validate token accounts if using SPL tokens
         if is_token_mint(&mint_address) {
@@ -1903,32 +1871,13 @@ pub mod privacy_pool {
                     PrivacyError::InvalidMintAddress
                 );
 
-                // Two deposit patterns for SPL tokens:
-                // 1. Relayer-owned: user_token.owner == relayer (user transferred tokens to relayer first)
-                // 2. Delegated: user_token.delegate == relayer with sufficient delegated_amount
-                //
-                // Pattern 2 allows trustless deposits without requiring users to send tokens to relayer first.
-                // The user pre-approves the exact deposit amount, relayer submits the transaction.
-                let is_relayer_owned = user_token.owner == ctx.accounts.relayer.key();
-                let is_delegated_to_relayer = user_token.delegate
-                    .map(|d| d == ctx.accounts.relayer.key())
-                    .unwrap_or(false);
-
-                if is_relayer_owned {
-                    // Pattern 1: Relayer owns the token account - no delegation allowed
-                    require!(user_token.delegate.is_none(), PrivacyError::InvalidTokenAuthority);
-                } else if is_delegated_to_relayer {
-                    // Pattern 2: Token account is delegated to relayer
-                    // Verify sufficient delegation for the deposit amount
-                    let deposit_amount = public_amount as u64;
-                    require!(
-                        user_token.delegated_amount >= deposit_amount,
-                        PrivacyError::InsufficientDelegation
-                    );
-                } else {
-                    // Neither pattern matches - invalid
-                    return Err(error!(PrivacyError::DepositorTokenAccountMismatch));
-                }
+                // The relayer must own the source token account outright (user pre-transferred
+                // tokens before calling transact).
+                require!(
+                    user_token.owner == ctx.accounts.relayer.key(),
+                    PrivacyError::DepositorTokenAccountMismatch
+                );
+                require!(user_token.delegate.is_none(), PrivacyError::InvalidTokenAuthority);
             }
 
             // For withdrawals (public_amount < 0), recipient/relayer token accounts required
@@ -2841,6 +2790,8 @@ pub enum PrivacyError {
     JupiterInvalidInstruction,
     #[msg("Swap params mints do not match instruction mints")]
     InvalidSwapParams,
+    #[msg("Swap program left tokens in source account; potential amount_in manipulation")]
+    SwapLeftoverTokens,
     #[msg(
         "fund_native_source must be immediately followed by transact_swap in the same transaction"
     )]

@@ -343,6 +343,20 @@ describe("Privacy Pool AMM V4 Swap", () => {
 
   it("initializes source privacy pool (SOL)", async () => {
     try {
+      // Ensure global config exists first (required for pool initialization)
+      try {
+        await (program.account as any).globalConfig.fetch(globalConfig);
+      } catch {
+        await (program.methods as any)
+          .initializeGlobalConfig()
+          .accounts({
+            globalConfig,
+            admin: payer.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+      }
+
       await (program.methods as any)
         .initialize(
           feeBps,
@@ -357,6 +371,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           vault: sourceVault,
           noteTree: sourceNoteTree,
           nullifiers: sourceNullifiers,
+          globalConfig,
           admin: payer.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -388,6 +403,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           vault: destVault,
           noteTree: destNoteTree,
           nullifiers: destNullifiers,
+          globalConfig,
           admin: payer.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -966,9 +982,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value)
       throw new Error("Failed to fetch lookup table");
 
@@ -995,7 +1010,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           new BN(SWAP_AMOUNT.toString()),
           swapData,
           extData,
-        null,
+          null,
         )
         .accounts({
           sourceConfig,
@@ -1775,9 +1790,8 @@ describe("Privacy Pool AMM V4 Swap", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    const lookupTableAccount = await provider.connection.getAddressLookupTable(
-      lookupTableAddress,
-    );
+    const lookupTableAccount =
+      await provider.connection.getAddressLookupTable(lookupTableAddress);
     if (!lookupTableAccount.value)
       throw new Error("Failed to fetch lookup table");
 
@@ -1803,7 +1817,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           new BN(swapAmount.toString()),
           swapData,
           extData,
-        null,
+          null,
         )
         .accounts({
           sourceConfig: destConfig, // USDC pool config

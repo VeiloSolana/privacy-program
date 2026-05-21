@@ -172,6 +172,20 @@ describe("Privacy Pool - SPL Token Support", () => {
 
   it("initializes the privacy pool with SPL token", async () => {
     try {
+      // Ensure global config exists first (required for pool initialization)
+      try {
+        await (program.account as any).globalConfig.fetch(globalConfig);
+      } catch {
+        await (program.methods as any)
+          .initializeGlobalConfig()
+          .accounts({
+            globalConfig,
+            admin: wallet.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+      }
+
       await (program.methods as any)
         .initialize(
           feeBps,
@@ -186,6 +200,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           vault: tokenVault,
           noteTree: tokenNoteTree,
           nullifiers: tokenNullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -514,7 +529,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: tokenConfig,
@@ -765,7 +780,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: tokenConfig,
@@ -1031,9 +1046,8 @@ describe("Privacy Pool - SPL Token Support", () => {
     await provider.connection.confirmTransaction({
       signature: depositSig,
       blockhash: blockhash,
-      lastValidBlockHeight: (
-        await provider.connection.getLatestBlockhash()
-      ).lastValidBlockHeight,
+      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
+        .lastValidBlockHeight,
     });
 
     offchainTokenTree.insert(aliceCommitment);
@@ -1204,15 +1218,13 @@ describe("Privacy Pool - SPL Token Support", () => {
     const transferVersionedTx = new VersionedTransaction(transferMessageV0);
     transferVersionedTx.sign([alice]);
 
-    const transferSig = await provider.connection.sendTransaction(
-      transferVersionedTx,
-    );
+    const transferSig =
+      await provider.connection.sendTransaction(transferVersionedTx);
     await provider.connection.confirmTransaction({
       signature: transferSig,
       blockhash: transferBlockhash,
-      lastValidBlockHeight: (
-        await provider.connection.getLatestBlockhash()
-      ).lastValidBlockHeight,
+      lastValidBlockHeight: (await provider.connection.getLatestBlockhash())
+        .lastValidBlockHeight,
     });
 
     const bobLeafIndex = offchainTokenTree.insert(bobCommitment);
@@ -1255,9 +1267,8 @@ describe("Privacy Pool - SPL Token Support", () => {
     );
 
     // Step 1: Fetch current config to get next sequential tree ID
-    const currentConfig = await program.account.privacyConfig.fetch(
-      tokenConfig,
-    );
+    const currentConfig =
+      await program.account.privacyConfig.fetch(tokenConfig);
     const destinationTreeId = currentConfig.numTrees;
     console.log(
       `\n📥 Step 1: Adding fresh SPL output tree (tree_id = ${destinationTreeId})...`,
@@ -2010,7 +2021,7 @@ describe("Privacy Pool - SPL Token Support", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: tokenConfig,

@@ -769,6 +769,19 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
     // ---- Pool + global config init (idempotent) ----------------------------
     try {
       await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: wallet.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+      console.log("✅ Global config initialized");
+    } catch (_) {
+      console.log("ℹ️  Global config already initialized — continuing");
+    }
+    try {
+      await (program.methods as any)
         .initialize(
           50,
           SOL_MINT,
@@ -782,6 +795,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
           vault,
           noteTree,
           nullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -789,19 +803,6 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       console.log("✅ Pool initialized");
     } catch (_) {
       console.log("ℹ️  Pool already initialized — continuing");
-    }
-    try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
-          globalConfig,
-          admin: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-      console.log("✅ Global config initialized");
-    } catch (_) {
-      console.log("ℹ️  Global config already initialized — continuing");
     }
 
     // ---- Shared relayer (registered once, reused across all tests) ---------
@@ -903,6 +904,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
           vault: destVault,
           noteTree: destNoteTree,
           nullifiers: destNullifiers,
+          globalConfig,
           admin: wallet.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -2088,12 +2090,10 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
     // ---- Generate ZK swap proof --------------------------------------------
     console.log(`\n🔧 Generating ZK swap proof...`);
     const sourceRoot = new Uint8Array(
-      (
-        await (program.account as any).merkleTreeAccount.fetch(noteTree)
-      ).rootHistory[
-        (
-          await (program.account as any).merkleTreeAccount.fetch(noteTree)
-        ).rootIndex
+      (await (program.account as any).merkleTreeAccount.fetch(noteTree))
+        .rootHistory[
+        (await (program.account as any).merkleTreeAccount.fetch(noteTree))
+          .rootIndex
       ],
     );
 

@@ -219,6 +219,25 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
     // Airdrop SOL
     await airdropAndConfirm(provider, payer.publicKey, 20 * LAMPORTS_PER_SOL);
 
+    // Initialize Global Config first (required for pool initialization)
+    [globalConfig] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global_config_v1")],
+      program.programId,
+    );
+    try {
+      await (program.methods as any)
+        .initializeGlobalConfig()
+        .accounts({
+          globalConfig,
+          admin: payer.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+      console.log("\n✅ Global config initialized");
+    } catch (e: any) {
+      console.log("\n✅ Global config already exists");
+    }
+
     // Initialize all pools
     for (const def of POOL_DEFS) {
       console.log(`\n📦 Initializing ${def.name} pool...`);
@@ -283,6 +302,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             vault,
             noteTree,
             nullifiers,
+            globalConfig,
             admin: payer.publicKey,
             systemProgram: SystemProgram.programId,
           })
@@ -339,25 +359,6 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           console.log(`   ✅ Relayer already registered for ${def.name}`);
         }
       }
-    }
-
-    // Initialize Global Config
-    [globalConfig] = PublicKey.findProgramAddressSync(
-      [Buffer.from("global_config_v1")],
-      program.programId,
-    );
-    try {
-      await (program.methods as any)
-        .initializeGlobalConfig()
-        .accounts({
-          globalConfig,
-          admin: payer.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-      console.log("\n✅ Global config initialized");
-    } catch (e: any) {
-      console.log("\n✅ Global config already exists");
     }
   });
 
@@ -607,7 +608,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: sol.config,
@@ -941,7 +942,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -1361,7 +1362,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: usdc.config,
@@ -1647,7 +1648,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: sol.config,
@@ -1977,7 +1978,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -2394,7 +2395,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: usdt.config,
@@ -2682,7 +2683,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: sol.config,
@@ -3012,7 +3013,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -3427,7 +3428,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: jup.config,
@@ -3710,7 +3711,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: sol.config,
@@ -4040,7 +4041,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -4457,7 +4458,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(swapAmount.toString()),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: usd1.config,
@@ -4777,7 +4778,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-        null,
+          null,
         )
         .accounts({
           config: sol.config,
@@ -5106,7 +5107,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(SOL_SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: sol.config,
@@ -5527,7 +5528,7 @@ describe("Privacy Pool AMM V4 Swaps - Various Pairs", () => {
             new BN(USDC_SWAP_AMOUNT),
             swapData,
             extData,
-        null,
+            null,
           )
           .accounts({
             sourceConfig: usdc.config,
