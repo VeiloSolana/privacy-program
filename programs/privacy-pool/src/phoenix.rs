@@ -44,8 +44,7 @@ use crate::{
     zk::{ verify_transaction_groth16, TransactionProof },
 };
 
-// ─── Phoenix Eternal constants ───────────────────────────────────────────────
-
+// Phoenix Eternal constants
 /// Phoenix Eternal program ID (perpetual futures DEX)
 pub const PHOENIX_PROGRAM_ID: Pubkey = pubkey!("EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih");
 
@@ -66,8 +65,7 @@ pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8
 #[cfg(any(feature = "devnet", feature = "localnet"))]
 pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
-// ─── EMBER Protocol constants ─────────────────────────────────────────────────
-
+// EMBER Protocol constants
 /// EMBER protocol program — wraps USDC ↔ PhUSD (1:1 synthetic collateral for Phoenix Eternal)
 pub const EMBER_PROGRAM_ID: Pubkey = pubkey!("EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy");
 
@@ -80,7 +78,7 @@ pub const PHUSD_MINT_AUTHORITY: Pubkey = pubkey!("6ur7v6AXNpnHeEb6xuk7PyezvZ1i5G
 /// EMBER USDC reserve — holds the USDC backing the PhUSD supply
 pub const EMBER_USDC_RESERVE: Pubkey = pubkey!("FKcEb4TdPDTRuMnQDpSEPQBcrm15S73xiUD6Qf8ZLUkq");
 
-// ─── Discriminator helper ─────────────────────────────────────────────────────
+// Discriminator helper
 
 /// Compute an Anchor instruction discriminator: `sha256("global:<name>")[0..8]`
 ///
