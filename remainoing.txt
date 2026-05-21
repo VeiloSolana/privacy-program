@@ -1,3 +1,17 @@
+[[test.validator.clone]]
+address = "CAryFCnzgxtQyBoTTcDKDsCRXmqkDkjcc49cB8w95hNz"
+
+[[test.validator.clone]]
+address = "EjJdRRZTkwMC1F4Hh4nKvnVfsE81Bv6rnegbuTs5N9kK"
+
+[[test.validator.clone]]
+address = "7ZLL8j9rBDkHBHoPHLW36y9vxQq4mj3sfAfYUHj9NP6q"
+
+[[test.validator.clone]]
+address = "AAhzuFZLgRWr8EytSC2Fehc7MrBuvqvugeuMq52Qd8VS"
+
+
+
 # ========== SOL-JUP Pool (Jupiter's preferred pool: EYErUp5muPYEEkeaUCY22JibeZX7E9UuMcJFZkmNAN7c) ==========
 
 # SOL-JUP AMM Pool ID (Jupiter uses this pool)
