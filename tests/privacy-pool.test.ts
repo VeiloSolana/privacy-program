@@ -35,6 +35,10 @@ import {
   Connection,
   ComputeBudgetProgram,
   Transaction,
+  AddressLookupTableProgram,
+  AddressLookupTableAccount,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -228,7 +232,9 @@ function derivePublicKey(poseidon: any, privateKey: Uint8Array): bigint {
   return poseidon.F.toObject(publicKeyHash);
 }
 
-// Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
+// Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund), claimant)
+// AUDIT-005 fix: claimant is committed into the hash so a relayer cannot substitute a different key.
+// For non-Phoenix flows claimant defaults to SystemProgram.programId (32 zero bytes).
 function computeExtDataHash(
   poseidon: any,
   extData: {
@@ -236,18 +242,21 @@ function computeExtDataHash(
     relayer: PublicKey;
     fee: BN;
     refund: BN;
+    claimant?: PublicKey;
   },
 ): Uint8Array {
+  const claimant = extData.claimant ?? SystemProgram.programId;
   const recipientField = poseidon.F.e(
     reduceToField(extData.recipient.toBytes()),
   );
   const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
   const feeField = poseidon.F.e(extData.fee.toString());
   const refundField = poseidon.F.e(extData.refund.toString());
+  const claimantField = poseidon.F.e(reduceToField(claimant.toBytes()));
 
   const hash1 = poseidon([recipientField, relayerField]);
   const hash2 = poseidon([feeField, refundField]);
-  const finalHash = poseidon([hash1, hash2]);
+  const finalHash = poseidon([hash1, hash2, claimantField]);
 
   const hashBytes = poseidon.F.toString(finalHash, 16).padStart(64, "0");
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));
@@ -766,6 +775,39 @@ async function generateTransactionProof(inputs: {
 }
 
 // =============================================================================
+// ALT helper — build an Address Lookup Table with the given addresses and wait
+// for it to become active.  Used to keep versioned transactions under the
+// 1232-byte Solana message limit after adding the claimant field to ExtData.
+// =============================================================================
+
+async function buildAlt(
+  provider: AnchorProvider,
+  payer: Keypair,
+  addresses: PublicKey[],
+): Promise<AddressLookupTableAccount> {
+  const slot = await provider.connection.getSlot("finalized");
+  const [createIx, lutAddress] = AddressLookupTableProgram.createLookupTable({
+    authority: payer.publicKey,
+    payer: payer.publicKey,
+    recentSlot: slot,
+  });
+  const extendIx = AddressLookupTableProgram.extendLookupTable({
+    payer: payer.publicKey,
+    authority: payer.publicKey,
+    lookupTable: lutAddress,
+    addresses,
+  });
+  await provider.sendAndConfirm(new Transaction().add(createIx).add(extendIx), [
+    payer,
+  ]);
+  await new Promise((r) => setTimeout(r, 1000));
+  const { value } = await provider.connection.getAddressLookupTable(lutAddress);
+  if (!value)
+    throw new Error(`ALT ${lutAddress.toBase58()} not found after creation`);
+  return value;
+}
+
+// =============================================================================
 // Main Test Suite
 // =============================================================================
 
@@ -788,6 +830,10 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
   // Off-chain tree
   let offchainTree: OffchainMerkleTree;
+
+  // Shared Address Lookup Table — created once in before() so all 6 transact
+  // call sites can use versioned transactions without exceeding 1232 bytes.
+  let sharedLut: AddressLookupTableAccount;
 
   // ⚠️ SECURITY WARNING: In production, NEVER store notes in plain variables!
   // Use encrypted storage (see tests/note-manager.example.ts for AES-256 encryption)
@@ -838,6 +884,21 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
 
     // Airdrop to admin
     // await airdropAndConfirm(provider, wallet.publicKey, 10 * LAMPORTS_PER_SOL);
+
+    // Build shared ALT with the 6 stable accounts used in every transact call.
+    // Removing these from the static-keys section saves ~140 bytes per transaction,
+    // which keeps the versioned tx well under Solana's 1232-byte legacy limit even
+    // after adding the claimant field to ExtData (+32 bytes on the wire).
+    const lutPayer = (wallet as any).payer as Keypair;
+    sharedLut = await buildAlt(provider, lutPayer, [
+      SystemProgram.programId,
+      globalConfig,
+      config,
+      vault,
+      noteTree,
+      nullifiers,
+    ]);
+    console.log("   Shared ALT:", sharedLut.key.toBase58());
   });
 
   it("initializes global config", async () => {
@@ -1047,6 +1108,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: sender.publicKey, // Sender is their own relayer for deposit
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1359,6 +1421,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: relayer.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1523,24 +1586,30 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
           systemProgram: SystemProgram.programId,
         })
         .signers([relayer])
-        .transaction();
+        .instruction();
 
-      // Add compute budget instructions
-      const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-        units: 1_400_000,
+      const { blockhash: s1Blockhash, lastValidBlockHeight: s1LastValid } =
+        await provider.connection.getLatestBlockhash();
+      const s1MsgV0 = new TransactionMessage({
+        // Use wallet as fee payer to match provider.sendAndConfirm() semantics:
+        // the provider wallet pays the Solana tx fee, not the relayer.
+        // This preserves the exact fee accounting the assertion below expects.
+        payerKey: wallet.publicKey,
+        recentBlockhash: s1Blockhash,
+        instructions: [
+          ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+          tx,
+        ],
+      }).compileToV0Message([sharedLut]);
+      const s1Vtx = new VersionedTransaction(s1MsgV0);
+      s1Vtx.sign([(wallet as any).payer, relayer]);
+      const withdrawTxSig = await provider.connection.sendTransaction(s1Vtx);
+      await provider.connection.confirmTransaction({
+        signature: withdrawTxSig,
+        blockhash: s1Blockhash,
+        lastValidBlockHeight: s1LastValid,
       });
-      const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: 1,
-      });
-
-      const transaction = new Transaction();
-      transaction.add(modifyComputeUnits);
-      transaction.add(addPriorityFee);
-      transaction.add(tx);
-
-      const withdrawTxSig = await provider.sendAndConfirm(transaction, [
-        relayer,
-      ]);
 
       // Capture on-chain tx fee so we can assert exact relayer fee receipt below
       const withdrawTxInfo = await provider.connection.getTransaction(
@@ -1777,6 +1846,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit1 = computeExtDataHash(poseidon, extDataDeposit1);
 
@@ -1951,6 +2021,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit2 = computeExtDataHash(poseidon, extDataDeposit2);
 
@@ -2135,6 +2206,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: withdrawRelayer.publicKey,
       fee: new BN(withdrawFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
@@ -2225,21 +2297,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([withdrawRelayer])
-      .transaction();
+      .instruction();
 
-    const withdrawComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
+    const { blockhash: s2Blockhash, lastValidBlockHeight: s2LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s2MsgV0 = new TransactionMessage({
+      payerKey: withdrawRelayer.publicKey,
+      recentBlockhash: s2Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        withdrawTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s2Vtx = new VersionedTransaction(s2MsgV0);
+    s2Vtx.sign([withdrawRelayer]);
+    const s2Sig = await provider.connection.sendTransaction(s2Vtx);
+    await provider.connection.confirmTransaction({
+      signature: s2Sig,
+      blockhash: s2Blockhash,
+      lastValidBlockHeight: s2LastValid,
     });
-    const withdrawPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: 1,
-    });
-
-    const withdrawTransaction = new Transaction();
-    withdrawTransaction.add(withdrawComputeUnits);
-    withdrawTransaction.add(withdrawPriorityFee);
-    withdrawTransaction.add(withdrawTx);
-
-    await provider.sendAndConfirm(withdrawTransaction, [withdrawRelayer]);
 
     // Insert change commitment into tree
     const changeLeafIndex = offchainTree.insert(changeCommitment);
@@ -2384,6 +2462,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         relayer: user.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2606,6 +2685,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
             relayer: relayer.publicKey,
             fee: new BN(0),
             refund: new BN(0),
+            claimant: SystemProgram.programId,
           };
           const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2919,6 +2999,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: withdrawRelayer.publicKey,
       fee: new BN(withdrawFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
@@ -3004,22 +3085,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([withdrawRelayer])
-      .transaction();
+      .instruction();
 
-    const withdrawComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
+    const { blockhash: s3Blockhash, lastValidBlockHeight: s3LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s3MsgV0 = new TransactionMessage({
+      payerKey: withdrawRelayer.publicKey,
+      recentBlockhash: s3Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        withdrawTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s3Vtx = new VersionedTransaction(s3MsgV0);
+    s3Vtx.sign([withdrawRelayer]);
+    const s3Sig = await provider.connection.sendTransaction(s3Vtx);
+    await provider.connection.confirmTransaction({
+      signature: s3Sig,
+      blockhash: s3Blockhash,
+      lastValidBlockHeight: s3LastValid,
     });
-    const withdrawPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: 1,
-    });
-
-    const withdrawTransaction = new Transaction();
-    withdrawTransaction.add(
-      withdrawComputeUnits,
-      withdrawPriorityFee,
-      withdrawTx,
-    );
-    await provider.sendAndConfirm(withdrawTransaction, [withdrawRelayer]);
 
     offchainTree.insert(changeCommitment);
     offchainTree.insert(dummyOutCommitment);
@@ -3253,6 +3339,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: relayerWallet.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit1 = computeExtDataHash(poseidon, extDataDeposit1);
 
@@ -3261,6 +3348,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: relayerWallet.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit2 = computeExtDataHash(poseidon, extDataDeposit2);
 
@@ -3364,6 +3452,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: relayerWallet.publicKey,
       fee: new BN(withdrawFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
@@ -3707,18 +3796,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([relayerWallet])
-      .transaction();
+      .instruction();
 
-    const computeUnits3 = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
+    const { blockhash: s4Blockhash, lastValidBlockHeight: s4LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s4MsgV0 = new TransactionMessage({
+      payerKey: relayerWallet.publicKey,
+      recentBlockhash: s4Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        withdrawTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s4Vtx = new VersionedTransaction(s4MsgV0);
+    s4Vtx.sign([relayerWallet]);
+    const s4Sig = await provider.connection.sendTransaction(s4Vtx);
+    await provider.connection.confirmTransaction({
+      signature: s4Sig,
+      blockhash: s4Blockhash,
+      lastValidBlockHeight: s4LastValid,
     });
-    const priorityFee3 = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: 1,
-    });
-
-    const transaction3 = new Transaction();
-    transaction3.add(computeUnits3, priorityFee3, withdrawTx);
-    await provider.sendAndConfirm(transaction3, [relayerWallet]);
 
     offchainTree.insert(changeCommitment);
     offchainTree.insert(dummyOutCommitment);
@@ -3824,8 +3922,9 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
     // Create the tree using admin (admin always has authorization)
     try {
       // Check if account exists and is already initialized
-      const treeAccountInfo =
-        await provider.connection.getAccountInfo(noteTreeDestination);
+      const treeAccountInfo = await provider.connection.getAccountInfo(
+        noteTreeDestination,
+      );
 
       if (treeAccountInfo && treeAccountInfo.owner.equals(program.programId)) {
         console.log(
@@ -4005,6 +4104,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit = computeExtDataHash(poseidon, extDataDeposit);
 
@@ -4193,6 +4293,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
 
@@ -4268,13 +4369,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([user])
-      .transaction();
+      .instruction();
 
-    const crossTransaction = new Transaction();
-    crossTransaction.add(modifyComputeUnits, addPriorityFee, crossTreeTx);
-    const crossTreeSignature = await provider.sendAndConfirm(crossTransaction, [
-      user,
-    ]);
+    const { blockhash: s5Blockhash, lastValidBlockHeight: s5LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s5MsgV0 = new TransactionMessage({
+      payerKey: user.publicKey,
+      recentBlockhash: s5Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        crossTreeTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s5Vtx = new VersionedTransaction(s5MsgV0);
+    s5Vtx.sign([user]);
+    const crossTreeSignature = await provider.connection.sendTransaction(s5Vtx);
+    await provider.connection.confirmTransaction({
+      signature: crossTreeSignature,
+      blockhash: s5Blockhash,
+      lastValidBlockHeight: s5LastValid,
+    });
 
     // Track output in offchainTreeDestination just for checking
     offchainTreeDestination.insert(outputCommitment);
@@ -4351,6 +4466,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: user.publicKey,
       fee: new BN(5000000),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
@@ -4887,6 +5003,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: alice.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit = computeExtDataHash(poseidon, extDataDeposit);
 
@@ -5098,6 +5215,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: transferRelayer.publicKey, // Separate relayer signs the transaction
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
 
@@ -5193,20 +5311,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([transferRelayer]) // RELAYER SIGNS!
-      .transaction();
-
-    // Add compute budget instructions
-    const transferComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
-    });
-    const transferPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: 1,
-    });
-
-    const transferTransaction = new Transaction();
-    transferTransaction.add(transferComputeUnits);
-    transferTransaction.add(transferPriorityFee);
-    transferTransaction.add(transferTx);
+      .instruction();
 
     console.log("📡 Relayer submits transaction on-chain:");
     console.log(`   Signer: ${transferRelayer.publicKey.toBase58()} (relayer)`);
@@ -5215,7 +5320,25 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       "   ✅ On-chain observer sees: relayer submits anonymous transfer\n",
     );
 
-    await provider.sendAndConfirm(transferTransaction, [transferRelayer]);
+    const { blockhash: s6Blockhash, lastValidBlockHeight: s6LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s6MsgV0 = new TransactionMessage({
+      payerKey: transferRelayer.publicKey,
+      recentBlockhash: s6Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        transferTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s6Vtx = new VersionedTransaction(s6MsgV0);
+    s6Vtx.sign([transferRelayer]);
+    const s6Sig = await provider.connection.sendTransaction(s6Vtx);
+    await provider.connection.confirmTransaction({
+      signature: s6Sig,
+      blockhash: s6Blockhash,
+      lastValidBlockHeight: s6LastValid,
+    });
 
     // Now insert outputs into off-chain tree (after on-chain transaction)
     const bobLeafIndex = offchainTree.insert(bobCommitment);
@@ -5328,6 +5451,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: alice.publicKey,
       fee: new BN(aliceAttemptFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const aliceAttemptExtDataHash = computeExtDataHash(
       poseidon,
@@ -5456,6 +5580,7 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
       relayer: bob.publicKey, // Bob signs the transaction
       fee: new BN(bobFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashBobWithdraw = computeExtDataHash(
       poseidon,
@@ -5605,22 +5730,27 @@ describe("Privacy Pool - UTXO Model (2-in-2-out) with Real Proofs", () => {
         systemProgram: SystemProgram.programId,
       })
       .signers([bob]) // BOB SIGNS, NOT ALICE!
-      .transaction();
+      .instruction();
 
-    // Add compute budget instructions
-    const bobComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 1_400_000,
+    const { blockhash: s7Blockhash, lastValidBlockHeight: s7LastValid } =
+      await provider.connection.getLatestBlockhash();
+    const s7MsgV0 = new TransactionMessage({
+      payerKey: bob.publicKey,
+      recentBlockhash: s7Blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }),
+        bobWithdrawTx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const s7Vtx = new VersionedTransaction(s7MsgV0);
+    s7Vtx.sign([bob]);
+    const s7Sig = await provider.connection.sendTransaction(s7Vtx);
+    await provider.connection.confirmTransaction({
+      signature: s7Sig,
+      blockhash: s7Blockhash,
+      lastValidBlockHeight: s7LastValid,
     });
-    const bobPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
-      microLamports: 1,
-    });
-
-    const bobTransaction = new Transaction();
-    bobTransaction.add(bobComputeUnits);
-    bobTransaction.add(bobPriorityFee);
-    bobTransaction.add(bobWithdrawTx);
-
-    await provider.sendAndConfirm(bobTransaction, [bob]);
 
     // Check balances after
     const afterVault = BigInt(await provider.connection.getBalance(vault));

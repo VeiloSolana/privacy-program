@@ -184,9 +184,7 @@ export function computeExtDataHash(
   const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
   const feeField = poseidon.F.e(extData.fee.toString());
   const refundField = poseidon.F.e(extData.refund.toString());
-  const claimantField = poseidon.F.e(
-    reduceToField(extData.claimant.toBytes()),
-  );
+  const claimantField = poseidon.F.e(reduceToField(extData.claimant.toBytes()));
 
   const hash1 = poseidon([recipientField, relayerField]);
   const hash2 = poseidon([feeField, refundField]);

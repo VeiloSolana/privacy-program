@@ -238,7 +238,13 @@ function computeNullifier(
 
 function computeExtDataHash(
   poseidon: any,
-  extData: { recipient: PublicKey; relayer: PublicKey; fee: any; refund: any },
+  extData: {
+    recipient: PublicKey;
+    relayer: PublicKey;
+    fee: any;
+    refund: any;
+    claimant: PublicKey;
+  },
 ): Uint8Array {
   const h1 = poseidon([
     poseidon.F.e(reduceToField(extData.recipient.toBytes())),
@@ -248,7 +254,8 @@ function computeExtDataHash(
     poseidon.F.e(extData.fee.toString()),
     poseidon.F.e(extData.refund.toString()),
   ]);
-  const final = poseidon([h1, h2]);
+  const h3 = poseidon.F.e(reduceToField(extData.claimant.toBytes()));
+  const final = poseidon([h1, h2, h3]);
   return Uint8Array.from(
     Buffer.from(poseidon.F.toString(final, 16).padStart(64, "0"), "hex"),
   );
@@ -1011,6 +1018,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       relayer: sharedRelayer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const depExtDataHash = computeExtDataHash(poseidon, depExtData);
 
@@ -1305,6 +1313,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       relayer: relayer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1780,6 +1789,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       relayer: relayer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2074,6 +2084,7 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
       relayer: relayer.publicKey,
       fee: new BN(SWAP_FEE.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2090,10 +2101,12 @@ describe("NoteCiphers — on-chain encrypted note recovery (relayer path)", () =
     // ---- Generate ZK swap proof --------------------------------------------
     console.log(`\n🔧 Generating ZK swap proof...`);
     const sourceRoot = new Uint8Array(
-      (await (program.account as any).merkleTreeAccount.fetch(noteTree))
-        .rootHistory[
-        (await (program.account as any).merkleTreeAccount.fetch(noteTree))
-          .rootIndex
+      (
+        await (program.account as any).merkleTreeAccount.fetch(noteTree)
+      ).rootHistory[
+        (
+          await (program.account as any).merkleTreeAccount.fetch(noteTree)
+        ).rootIndex
       ],
     );
 

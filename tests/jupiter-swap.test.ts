@@ -640,8 +640,11 @@ describe("Privacy Pool Jupiter Swap", () => {
       dummyNullifier2,
     );
 
-    // Execute deposit
-    const tx = await (program.methods as any)
+    // Execute deposit (versioned tx — NoteCiphers struct + claimant pushed legacy tx over limit)
+    const computeBudgetIx = ComputeBudgetProgram.setComputeUnitLimit({
+      units: 1_400_000,
+    });
+    const depositIx = await (program.methods as any)
       .transact(
         Array.from(root),
         0, // input_tree_id
@@ -659,12 +662,10 @@ describe("Privacy Pool Jupiter Swap", () => {
           relayer: extData.relayer,
           fee: extData.fee,
           refund: extData.refund,
+          claimant: extData.claimant,
         },
         proof,
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -684,10 +685,22 @@ describe("Privacy Pool Jupiter Swap", () => {
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .preInstructions([
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-      ])
-      .rpc();
+      .instruction();
+    const { blockhash, lastValidBlockHeight } =
+      await provider.connection.getLatestBlockhash();
+    const msgV0 = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [computeBudgetIx, depositIx],
+    }).compileToV0Message();
+    const vtx = new VersionedTransaction(msgV0);
+    vtx.sign([payer]);
+    const tx = await provider.connection.sendTransaction(vtx);
+    await provider.connection.confirmTransaction({
+      signature: tx,
+      blockhash,
+      lastValidBlockHeight,
+    });
 
     console.log(`✅ Deposit tx: ${tx}`);
 
@@ -994,6 +1007,7 @@ describe("Privacy Pool Jupiter Swap", () => {
           relayer: extData.relayer,
           fee: extData.fee,
           refund: extData.refund,
+          claimant: extData.claimant,
         },
         null,
       )
@@ -1093,14 +1107,16 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`✅ Jupiter swap tx: ${tx}`);
 
     // Verify nullifiers marked as spent
-    const nullifierMarker0Account =
-      await program.account.nullifierMarker.fetch(nullifierMarker0);
+    const nullifierMarker0Account = await program.account.nullifierMarker.fetch(
+      nullifierMarker0,
+    );
     expect(
       Buffer.from(nullifierMarker0Account.nullifier).toString("hex"),
     ).to.equal(Buffer.from(nullifier).toString("hex"));
 
-    const nullifierMarker1Account =
-      await program.account.nullifierMarker.fetch(nullifierMarker1);
+    const nullifierMarker1Account = await program.account.nullifierMarker.fetch(
+      nullifierMarker1,
+    );
     expect(
       Buffer.from(nullifierMarker1Account.nullifier).toString("hex"),
     ).to.equal(Buffer.from(dummyNullifier).toString("hex"));
@@ -1115,10 +1131,12 @@ describe("Privacy Pool Jupiter Swap", () => {
     console.log(`✅ Change commitment inserted at index ${sourceLeafIndex}`);
 
     // Verify TVL updates
-    const sourceConfigAccount =
-      await program.account.privacyConfig.fetch(sourceConfig);
-    const destConfigAccount =
-      await program.account.privacyConfig.fetch(destConfig);
+    const sourceConfigAccount = await program.account.privacyConfig.fetch(
+      sourceConfig,
+    );
+    const destConfigAccount = await program.account.privacyConfig.fetch(
+      destConfig,
+    );
 
     console.log(`  Source TVL: ${sourceConfigAccount.totalTvl}`);
     console.log(`  Dest TVL: ${destConfigAccount.totalTvl}`);

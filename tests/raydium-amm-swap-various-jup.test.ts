@@ -7,6 +7,7 @@ import {
   LAMPORTS_PER_SOL,
   Keypair,
   AddressLookupTableProgram,
+  AddressLookupTableAccount,
   TransactionMessage,
   VersionedTransaction,
   Transaction,
@@ -248,6 +249,33 @@ function deriveGlobalConfigPDA(programId: PublicKey): [PublicKey, number] {
   );
 }
 
+async function buildAlt(
+  provider: anchor.AnchorProvider,
+  payer: Keypair,
+  addresses: PublicKey[],
+): Promise<AddressLookupTableAccount> {
+  const slot = await provider.connection.getSlot("finalized");
+  const [createIx, lutAddress] = AddressLookupTableProgram.createLookupTable({
+    authority: payer.publicKey,
+    payer: payer.publicKey,
+    recentSlot: slot,
+  });
+  const extendIx = AddressLookupTableProgram.extendLookupTable({
+    payer: payer.publicKey,
+    authority: payer.publicKey,
+    lookupTable: lutAddress,
+    addresses,
+  });
+  await provider.sendAndConfirm(new Transaction().add(createIx).add(extendIx), [
+    payer,
+  ]);
+  await new Promise((r) => setTimeout(r, 1000));
+  const { value } = await provider.connection.getAddressLookupTable(lutAddress);
+  if (!value)
+    throw new Error(`ALT ${lutAddress.toBase58()} not found after creation`);
+  return value;
+}
+
 describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
@@ -280,6 +308,7 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
   > = {};
 
   let noteStorage: InMemoryNoteStorage;
+  let sharedLut: AddressLookupTableAccount;
 
   // Test user keys
   let privateKey: Uint8Array;
@@ -456,12 +485,17 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
           relayer: extData.relayer,
           fee: extData.fee,
           refund: extData.refund,
+          claimant: SystemProgram.programId,
         },
         proof,
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
+        {
+          note0EphemeralKey: Array.from(new Uint8Array(32)),
+          note0Encrypted: Array.from(new Uint8Array(80)),
+          note0ViewTag: 0,
+          note1EphemeralKey: Array.from(new Uint8Array(32)),
+          note1Encrypted: Array.from(new Uint8Array(80)),
+          note1ViewTag: 0,
+        },
       )
       .accounts({
         config: pool.config,
@@ -484,9 +518,20 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
       ])
-      .rpc();
+      .transaction();
 
-    console.log(`✅ Deposit tx: ${tx}`);
+    const { blockhash } = await provider.connection.getLatestBlockhash();
+    const msg = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: tx.instructions,
+    }).compileToV0Message([sharedLut]);
+    const vtx = new VersionedTransaction(msg);
+    vtx.sign([payer]);
+    const sig = await provider.connection.sendTransaction(vtx);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+
+    console.log(`✅ Deposit tx: ${sig}`);
 
     const leafIndex = pool.offchainTree.insert(commitment);
     pool.offchainTree.insert(changeCommitment);
@@ -618,6 +663,23 @@ describe("Privacy Pool Jupiter Swap - Various Pairs", () => {
     await setupPool(USDT_MINT, "USDT", 6);
     await setupPool(JUP_MINT, "JUP", 6);
     await setupPool(USD1_MINT, "USD1", 6);
+
+    // Build a shared ALT with the 6 stable SOL-pool accounts used in every
+    // initialDeposit call.  This compresses the repeated pubkeys and keeps
+    // the versioned tx well under Solana's 1232-byte limit even with the
+    // NoteCiphers (+225 bytes) and claimant (+32 bytes) additions.
+    const solPool = pools["SOL"];
+    sharedLut = await buildAlt(provider, payer, [
+      SystemProgram.programId,
+      globalConfig,
+      solPool.config,
+      solPool.vault,
+      solPool.noteTree,
+      solPool.nullifiers,
+      solPool.vaultTokenAccount,
+      TOKEN_PROGRAM_ID,
+    ]);
+    console.log("   Shared ALT:", sharedLut.key.toBase58());
   });
 
   // --------------------------------------------------------------------------

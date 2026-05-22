@@ -632,6 +632,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
           relayer: extData.relayer,
           fee: extData.fee,
           refund: extData.refund,
+          claimant: SystemProgram.programId,
         },
         proof,
         null,

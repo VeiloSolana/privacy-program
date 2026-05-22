@@ -8,6 +8,7 @@ import {
   ComputeBudgetProgram,
   SendTransactionError,
   AddressLookupTableProgram,
+  AddressLookupTableAccount,
   TransactionMessage,
   VersionedTransaction,
   TransactionInstruction,
@@ -316,6 +317,33 @@ function deriveCpmmPoolAuthority(poolState: PublicKey): [PublicKey, number] {
   );
 }
 
+async function buildAlt(
+  provider: anchor.AnchorProvider,
+  payer: Keypair,
+  addresses: PublicKey[],
+): Promise<AddressLookupTableAccount> {
+  const slot = await provider.connection.getSlot("finalized");
+  const [createIx, lutAddress] = AddressLookupTableProgram.createLookupTable({
+    authority: payer.publicKey,
+    payer: payer.publicKey,
+    recentSlot: slot,
+  });
+  const extendIx = AddressLookupTableProgram.extendLookupTable({
+    payer: payer.publicKey,
+    authority: payer.publicKey,
+    lookupTable: lutAddress,
+    addresses,
+  });
+  await provider.sendAndConfirm(new Transaction().add(createIx).add(extendIx), [
+    payer,
+  ]);
+  await new Promise((r) => setTimeout(r, 1000));
+  const { value } = await provider.connection.getAddressLookupTable(lutAddress);
+  if (!value)
+    throw new Error(`ALT ${lutAddress.toBase58()} not found after creation`);
+  return value;
+}
+
 describe("Privacy Pool Cross-Pool Swap", () => {
   const provider = makeProvider();
   anchor.setProvider(provider);
@@ -370,6 +398,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
 
   // Holder of USDC after withdrawal (used for reverse swap test)
   let usdcHolder: Keypair | null = null;
+
+  // Shared address lookup table for versioned transactions
+  let sharedLut: AddressLookupTableAccount;
 
   before(async () => {
     console.log("\n🔧 Setting up cross-pool swap test environment...\n");
@@ -475,6 +506,14 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     console.log("Source Config PDA (WSOL):", sourceConfig.toBase58());
     console.log("Dest Config PDA (USDC):", destConfig.toBase58());
     console.log("CPMM Pool State:", CPMM_POOL_STATE.toBase58());
+
+    // Build shared ALT for versioned transactions (SPL token txs exceed 1232 bytes)
+    sharedLut = await buildAlt(provider, payer, [
+      SystemProgram.programId,
+      TOKEN_PROGRAM_ID,
+      globalConfig,
+    ]);
+    console.log("Shared ALT:", sharedLut.key.toBase58());
   });
 
   it("initializes source privacy pool (WSOL)", async () => {
@@ -757,7 +796,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     );
 
     // Execute deposit with correct parameter order matching the program
-    const tx = await (program.methods as any)
+    const depositIx = await (program.methods as any)
       .transact(
         Array.from(root),
         0, // input_tree_id
@@ -775,12 +814,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           relayer: extData.relayer,
           fee: extData.fee,
           refund: extData.refund,
+          claimant: SystemProgram.programId,
         },
         proof,
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -800,10 +837,26 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .preInstructions([
+      .instruction();
+
+    const { blockhash: bh1, lastValidBlockHeight: lvbh1 } =
+      await provider.connection.getLatestBlockhash();
+    const msgV0_1 = new TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: bh1,
+      instructions: [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-      ])
-      .rpc();
+        depositIx,
+      ],
+    }).compileToV0Message([sharedLut]);
+    const vtx1 = new VersionedTransaction(msgV0_1);
+    vtx1.sign([payer]);
+    const tx = await provider.connection.sendTransaction(vtx1);
+    await provider.connection.confirmTransaction({
+      signature: tx,
+      blockhash: bh1,
+      lastValidBlockHeight: lvbh1,
+    });
 
     console.log(`✅ Deposit tx: ${tx}`);
 
@@ -1425,8 +1478,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     await new Promise((resolve) => setTimeout(resolve, 1000));
 
     // Fetch the lookup table account
-    const lookupTableAccount =
-      await provider.connection.getAddressLookupTable(lookupTableAddress);
+    const lookupTableAccount = await provider.connection.getAddressLookupTable(
+      lookupTableAddress,
+    );
     if (!lookupTableAccount.value) {
       throw new Error("Failed to fetch lookup table");
     }
@@ -1834,8 +1888,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     expect(wsolAccount).to.be.instanceOf(PublicKey);
 
     // Check balance
-    const balance =
-      await provider.connection.getTokenAccountBalance(wsolAccount);
+    const balance = await provider.connection.getTokenAccountBalance(
+      wsolAccount,
+    );
     expect(parseInt(balance.value.amount)).to.equal(wrapAmount);
 
     // Unwrap back to SOL
@@ -2167,10 +2222,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
+        null,
       )
       .accounts({
         config: destConfig,
@@ -2199,12 +2251,12 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const { blockhash, lastValidBlockHeight } =
       await provider.connection.getLatestBlockhash();
 
-    // Use versioned transaction (no ALT needed for simple withdrawal)
+    // Use versioned transaction with ALT (USDC withdrawal has ~16 accounts, exceeds 1232 bytes without ALT)
     const messageV0 = new TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
       instructions: [computeBudgetIx, withdrawIx],
-    }).compileToV0Message();
+    }).compileToV0Message([sharedLut]);
 
     const versionedTx = new VersionedTransaction(messageV0);
     versionedTx.sign([payer]);
@@ -2609,10 +2661,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         new BN(9999999999), // deadline (far future for tests)
         extData,
         proof,
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
-        Array.from(new Uint8Array(32)),
-        Array.from(new Uint8Array(80)),
+        null,
       )
       .accounts({
         config: sourceConfig,
@@ -2641,12 +2690,12 @@ describe("Privacy Pool Cross-Pool Swap", () => {
     const { blockhash, lastValidBlockHeight } =
       await provider.connection.getLatestBlockhash();
 
-    // Use versioned transaction (no ALT needed for simple withdrawal)
+    // Use versioned transaction with ALT (WSOL withdrawal has ~16 accounts, exceeds 1232 bytes without ALT)
     const messageV0 = new TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
       instructions: [computeBudgetIx, withdrawIx],
-    }).compileToV0Message();
+    }).compileToV0Message([sharedLut]);
 
     const versionedTx = new VersionedTransaction(messageV0);
     versionedTx.sign([payer]);
@@ -2736,8 +2785,9 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         destTokenMint,
         usdcHolder.publicKey,
       );
-      const balance =
-        await provider.connection.getTokenAccountBalance(holderTokenAccount);
+      const balance = await provider.connection.getTokenAccountBalance(
+        holderTokenAccount,
+      );
       console.log(`   Holder USDC Balance: ${balance.value.uiAmount}`);
 
       if (BigInt(balance.value.amount) < amount) {
@@ -2859,7 +2909,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       const leafIndex = treeAcc.nextIndex.toNumber();
 
       // Execute deposit with real ZK proof
-      const tx = await (program.methods as any)
+      const depositUsdcIx = await (program.methods as any)
         .transact(
           Array.from(root),
           0, // input_tree_id
@@ -2874,10 +2924,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           new BN(9999999999), // deadline (far future for tests)
           extData,
           proof,
-          Array.from(new Uint8Array(32)),
-          Array.from(new Uint8Array(80)),
-          Array.from(new Uint8Array(32)),
-          Array.from(new Uint8Array(80)),
+          null,
         )
         .accounts({
           config: destConfig,
@@ -2888,8 +2935,8 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           nullifiers: destNullifiers,
           nullifierMarker0,
           nullifierMarker1,
-          relayer: usdcHolder.publicKey,
-          recipient: usdcHolder.publicKey,
+          relayer: usdcHolder!.publicKey,
+          recipient: usdcHolder!.publicKey,
           vaultTokenAccount: destVaultTokenAccount,
           userTokenAccount: holderTokenAccount,
           recipientTokenAccount: holderTokenAccount,
@@ -2897,11 +2944,26 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .preInstructions([
+        .instruction();
+
+      const { blockhash: bhUsdcDep, lastValidBlockHeight: lvbhUsdcDep } =
+        await provider.connection.getLatestBlockhash();
+      const msgUsdcDep = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: bhUsdcDep,
+        instructions: [
           ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-        ])
-        .signers([usdcHolder])
-        .rpc();
+          depositUsdcIx,
+        ],
+      }).compileToV0Message([sharedLut]);
+      const vtxUsdcDep = new VersionedTransaction(msgUsdcDep);
+      vtxUsdcDep.sign([payer, usdcHolder!]);
+      const tx = await provider.connection.sendTransaction(vtxUsdcDep);
+      await provider.connection.confirmTransaction({
+        signature: tx,
+        blockhash: bhUsdcDep,
+        lastValidBlockHeight: lvbhUsdcDep,
+      });
 
       // Update offchain tree
       destOffchainTree.insert(commitment);
@@ -3287,7 +3349,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       );
 
       // Execute deposit
-      const tx = await (program.methods as any)
+      const depositWsolIx = await (program.methods as any)
         .transact(
           Array.from(root),
           0,
@@ -3305,12 +3367,10 @@ describe("Privacy Pool Cross-Pool Swap", () => {
             relayer: extData.relayer,
             fee: extData.fee,
             refund: extData.refund,
+            claimant: SystemProgram.programId,
           },
           proof,
-          Array.from(new Uint8Array(32)),
-          Array.from(new Uint8Array(80)),
-          Array.from(new Uint8Array(32)),
-          Array.from(new Uint8Array(80)),
+          null,
         )
         .accounts({
           config: sourceConfig,
@@ -3330,10 +3390,26 @@ describe("Privacy Pool Cross-Pool Swap", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .preInstructions([
+        .instruction();
+
+      const { blockhash: bhWsol, lastValidBlockHeight: lvbhWsol } =
+        await provider.connection.getLatestBlockhash();
+      const msgWsol = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: bhWsol,
+        instructions: [
           ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-        ])
-        .rpc();
+          depositWsolIx,
+        ],
+      }).compileToV0Message([sharedLut]);
+      const vtxWsol = new VersionedTransaction(msgWsol);
+      vtxWsol.sign([payer]);
+      const tx = await provider.connection.sendTransaction(vtxWsol);
+      await provider.connection.confirmTransaction({
+        signature: tx,
+        blockhash: bhWsol,
+        lastValidBlockHeight: lvbhWsol,
+      });
 
       console.log(`✅ Deposit tx: ${tx}`);
 

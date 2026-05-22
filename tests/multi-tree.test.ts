@@ -162,6 +162,7 @@ function computeExtDataHash(
   relayer: PublicKey,
   fee: bigint,
   refund: bigint,
+  claimant: PublicKey,
 ): Uint8Array {
   const h1 = poseidon([
     poseidon.F.e(reduceToField(recipient.toBytes()).toString()),
@@ -171,7 +172,8 @@ function computeExtDataHash(
     poseidon.F.e(fee.toString()),
     poseidon.F.e(refund.toString()),
   ]);
-  const final = poseidon([h1, h2]);
+  const h3 = poseidon.F.e(reduceToField(claimant.toBytes()));
+  const final = poseidon([h1, h2, h3]);
   return Uint8Array.from(
     Buffer.from(poseidon.F.toString(final, 16).padStart(64, "0"), "hex"),
   );
@@ -799,8 +801,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(
       poseidon,
@@ -808,6 +809,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
 
     const proof = await genProof({
@@ -939,8 +941,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(
       poseidon,
@@ -948,6 +949,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
 
     const proof = await genProof({
@@ -1016,14 +1018,14 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
     const extData = {
       recipient: sender.publicKey,
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
 
     // We use a bogus proof — program should reject on InvalidTreeId before verifying proof
@@ -1089,14 +1091,14 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
     const extData = {
       recipient: sender.publicKey,
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
 
     const bogusProof = {
@@ -1191,8 +1193,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
     const extHash = computeExtDataHash(
       poseidon,
@@ -1200,6 +1201,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
 
     const zeroPEs = new Array(TREE_HEIGHT).fill(0n);
@@ -1300,8 +1302,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       relayer: sender.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
     const wExtHash = computeExtDataHash(
       poseidon,
@@ -1309,6 +1310,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       fee,
       0n,
+      SystemProgram.programId,
     );
 
     // The dummy second input (zero amount) path uses the same tree
@@ -1402,8 +1404,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
-      encryptedOutput1: Buffer.alloc(32),
-      encryptedOutput2: Buffer.alloc(32),
+      claimant: SystemProgram.programId,
     };
     const extHash = computeExtDataHash(
       poseidon,
@@ -1411,6 +1412,7 @@ describe("Multi-tree: edge cases & scenarios", () => {
       sender.publicKey,
       0n,
       0n,
+      SystemProgram.programId,
     );
 
     let threw = false;
