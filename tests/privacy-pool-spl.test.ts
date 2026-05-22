@@ -462,6 +462,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -667,6 +668,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: relayer.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -943,6 +945,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: alice.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit = computeExtDataHash(poseidon, extDataDeposit);
 
@@ -1117,6 +1120,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: alice.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
 
@@ -1466,6 +1470,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashDeposit = computeExtDataHash(poseidon, extDataDeposit);
 
@@ -1616,6 +1621,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: user.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashTransfer = computeExtDataHash(poseidon, extDataTransfer);
 
@@ -1763,6 +1769,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: user.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHashWithdraw = computeExtDataHash(poseidon, extDataWithdraw);
 
@@ -1958,6 +1965,7 @@ describe("Privacy Pool - SPL Token Support", () => {
       relayer: sender.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 

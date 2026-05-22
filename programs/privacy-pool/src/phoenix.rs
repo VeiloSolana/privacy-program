@@ -140,7 +140,6 @@ pub fn phoenix_deposit_from_pool<'info>(
     output_commitment_0: [u8; 32],
     output_commitment_1: [u8; 32],
     withdrawal_id: [u8; 32],
-    claimant_pubkey: Pubkey,
     deadline: i64,
     ext_data: ExtData,
     proof: TransactionProof,
@@ -495,11 +494,14 @@ pub fn phoenix_deposit_from_pool<'info>(
     // ── 17. Initialize the per-deposit slot ───────────────────────────────────
     // Records the deposited amount and claim key so the exit flow can enforce
     // per-user withdrawal caps and prevent relayer theft.
+    // `claimant_pubkey` comes from `ext_data.claimant`, which is committed to by
+    // the Groth16 proof via `ext_data_hash`.  A relayer cannot substitute their
+    // own key without invalidating the proof (AUDIT-005 fix).
     let slot = &mut ctx.accounts.phoenix_slot;
     slot.bump = ctx.bumps.phoenix_slot;
     slot.amount = deposit_amount;
     slot.withdrawn = 0;
-    slot.claimant_pubkey = claimant_pubkey;
+    slot.claimant_pubkey = ext_data.claimant;
 
     Ok(())
 }

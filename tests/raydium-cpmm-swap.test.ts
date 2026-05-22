@@ -716,6 +716,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1073,6 +1074,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(SWAP_FEE), // 0.1 USDC relayer fee
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1908,6 +1910,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2078,6 +2081,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2331,6 +2335,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2510,6 +2515,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(expectedFeeWSOL.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -2806,6 +2812,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: usdcHolder.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3006,6 +3013,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: payer.publicKey,
         fee: new BN(fee.toString()),
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3238,6 +3246,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: payer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3476,6 +3485,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: payer.publicKey,
         fee: new BN(SWAP_FEE.toString()), // 0.05 USDT
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3917,6 +3927,7 @@ describe("Privacy Pool Cross-Pool Swap", () => {
         relayer: payer.publicKey,
         fee: new BN(RELAYER_FEE_SOL.toString()),
         refund: new BN(0),
+        claimant: SystemProgram.programId,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 

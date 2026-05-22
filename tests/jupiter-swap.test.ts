@@ -600,6 +600,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -873,6 +874,7 @@ describe("Privacy Pool Jupiter Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(relayerFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
     const swapParamsHash = computeSwapParamsHash(

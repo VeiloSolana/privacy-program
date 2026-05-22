@@ -164,7 +164,10 @@ export function derivePublicKey(poseidon: any, privateKey: Uint8Array): bigint {
   return poseidon.F.toObject(publicKeyHash);
 }
 
-// Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
+// Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund), claimant)
+// AUDIT-005 fix: claimant is now committed into the Groth16 public input ext_data_hash so a
+// malicious relayer cannot substitute their own key without invalidating the proof.
+// For non-Phoenix flows pass PublicKey.default() (all-zero bytes) as claimant.
 export function computeExtDataHash(
   poseidon: any,
   extData: {
@@ -172,6 +175,7 @@ export function computeExtDataHash(
     relayer: PublicKey;
     fee: BN;
     refund: BN;
+    claimant: PublicKey;
   },
 ): Uint8Array {
   const recipientField = poseidon.F.e(
@@ -180,10 +184,13 @@ export function computeExtDataHash(
   const relayerField = poseidon.F.e(reduceToField(extData.relayer.toBytes()));
   const feeField = poseidon.F.e(extData.fee.toString());
   const refundField = poseidon.F.e(extData.refund.toString());
+  const claimantField = poseidon.F.e(
+    reduceToField(extData.claimant.toBytes()),
+  );
 
   const hash1 = poseidon([recipientField, relayerField]);
   const hash2 = poseidon([feeField, refundField]);
-  const finalHash = poseidon([hash1, hash2]);
+  const finalHash = poseidon([hash1, hash2, claimantField]);
 
   const hashBytes = poseidon.F.toString(finalHash, 16).padStart(64, "0");
   return Uint8Array.from(Buffer.from(hashBytes, "hex"));

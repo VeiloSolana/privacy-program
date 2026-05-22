@@ -573,6 +573,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(0),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -805,6 +806,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(SWAP_FEE.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1224,6 +1226,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1401,6 +1404,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(fee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1607,6 +1611,7 @@ describe("Privacy Pool AMM V4 Swap", () => {
       relayer: payer.publicKey,
       fee: new BN(reverseSwapFee.toString()),
       refund: new BN(0),
+      claimant: SystemProgram.programId,
     };
     const extDataHash = computeExtDataHash(poseidon, extData);
 

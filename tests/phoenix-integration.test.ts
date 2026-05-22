@@ -634,6 +634,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: relayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -665,7 +666,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(commitment0),
             Array.from(commitment1),
             Array.from(Buffer.alloc(32, 0)), // withdrawal_id (dummy)
-            testMintExecutor, // claimant_pubkey (dummy — error fires before use)
             new BN(9_999_999_999), // deadline
             extData,
             dummyProof(), // proof — error fires before ZK verification
@@ -1514,6 +1514,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: stranger.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
       const n0 = randomBytes32();
@@ -1537,7 +1538,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(randomBytes32()),
             Array.from(randomBytes32()),
             Array.from(Buffer.alloc(32, 255)), // withdrawal_id (suite-3-local, no conflict)
-            usdcExecutor, // claimant_pubkey (dummy — error fires before use)
             new BN(9_999_999_999),
             extData,
             dummyProof(), // proof — error fires before ZK verification
@@ -1600,6 +1600,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: usdcRelayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1624,7 +1625,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(randomBytes32()),
             Array.from(randomBytes32()),
             Array.from(Buffer.alloc(32, 255)), // withdrawal_id (suite-3-local, no conflict)
-            usdcExecutor, // claimant_pubkey (dummy — error fires before use)
             new BN(9_999_999_999),
             extData,
             dummyProof(), // proof — error fires before ZK verification
@@ -2249,6 +2249,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer.publicKey, // correct: registered relayer
         fee: new BN(0),
         refund: new BN(0),
+        claimant: s4ClaimKey.publicKey,
       };
       const wrongExtDataHash = randomBytes32(); // deliberately wrong → triggers InvalidExtData
       const n0 = randomBytes32();
@@ -2272,7 +2273,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(randomBytes32()),
             Array.from(randomBytes32()),
             Array.from(WITHDRAWAL_ID_0), // withdrawal_id
-            s4ClaimKey.publicKey, // claimant_pubkey
             new BN(9_999_999_999),
             extData,
             dummyProof(), // proof — InvalidExtData fires before ZK verification
@@ -2989,6 +2989,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: SystemProgram.programId, // non-Phoenix transact: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3294,6 +3295,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer.publicKey,
         fee: new BN(relayerFee.toString()),
         refund: new BN(0),
+        claimant: SystemProgram.programId, // non-Phoenix swap: zero key
       };
       const swapExtDataHash = computeExtDataHash(poseidon, swapExtData);
       const swapParamsHash = computeSwapParamsHash(
@@ -3561,6 +3563,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: s4ClaimKey.publicKey,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -3618,7 +3621,6 @@ describe("Phoenix Eternal Integration", () => {
           Array.from(change0Commitment),
           Array.from(change1Commitment),
           Array.from(WITHDRAWAL_ID_0), // NEW: withdrawal_id — identifies this deposit's slot
-          s4ClaimKey.publicKey, // NEW: claimant_pubkey — must co-sign reissue_notes
           new BN(9_999_999_999),
           extData,
           proof,
@@ -4857,6 +4859,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
+        claimant: s4ClaimKey.publicKey,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -6077,6 +6080,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
+          claimant: s4ClaimKey.publicKey,
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -6590,6 +6594,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
+          claimant: s7ClaimKey!.publicKey,
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -6648,7 +6653,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(change0Commitment),
             Array.from(change1Commitment),
             Array.from(WITHDRAWAL_ID_7),
-            s7ClaimKey!.publicKey,
             new BN(9_999_999_999),
             extData,
             proof,
@@ -7764,6 +7768,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
+          claimant: s7ClaimKey!.publicKey,
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -8575,6 +8580,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
+          claimant: s8ClaimKey!.publicKey,
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -8626,7 +8632,6 @@ describe("Phoenix Eternal Integration", () => {
             Array.from(c0Commitment),
             Array.from(c1Commitment),
             Array.from(WITHDRAWAL_ID_8),
-            s8ClaimKey!.publicKey,
             new BN(9_999_999_999),
             extData,
             proof,
@@ -9098,6 +9103,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
+          claimant: s8ClaimKey!.publicKey,
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 

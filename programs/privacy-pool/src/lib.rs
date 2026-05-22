@@ -320,6 +320,12 @@ pub struct ExtData {
     pub fee: u64,
     /// Refund to user in lamports
     pub refund: u64,
+    /// Ephemeral claim key committed by the depositor at proof-generation time.
+    /// By including this field in the Poseidon hash that is verified against the
+    /// Groth16 public input `ext_data_hash`, the ZK proof cryptographically binds
+    /// the claimant identity — a relayer cannot substitute their own key without
+    /// invalidating the proof.  For non-Phoenix flows set to `Pubkey::default()`.
+    pub claimant: Pubkey,
 }
 
 impl ExtData {
@@ -380,8 +386,11 @@ impl ExtData {
         let mut refund_bytes = [0u8; 32];
         refund_bytes[24..].copy_from_slice(&self.refund.to_be_bytes());
 
-        // Hash in pairs to match binary Merkle tree pattern
-        // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund))
+        let claimant_bytes = Self::reduce_to_field(self.claimant.to_bytes());
+
+        // extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund), claimant)
+        // The claimant field was added to bind the claim key into the Groth16 public input,
+        // preventing a malicious relayer from substituting their own key (AUDIT-005).
         let hash1 = PoseidonHasher::hashv(&[&recipient_bytes, &relayer_bytes]).map_err(|_|
             error!(PrivacyError::MerkleHashFailed)
         )?;
@@ -390,7 +399,7 @@ impl ExtData {
             error!(PrivacyError::MerkleHashFailed)
         )?;
 
-        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2]).map_err(|_|
+        let final_hash = PoseidonHasher::hashv(&[&hash1, &hash2, &claimant_bytes]).map_err(|_|
             error!(PrivacyError::MerkleHashFailed)
         )?;
 
@@ -2106,7 +2115,6 @@ pub mod privacy_pool {
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
         withdrawal_id: [u8; 32],
-        claimant_pubkey: Pubkey,
         deadline: i64,
         ext_data: ExtData,
         proof: zk::TransactionProof,
@@ -2125,7 +2133,6 @@ pub mod privacy_pool {
             output_commitment_0,
             output_commitment_1,
             withdrawal_id,
-            claimant_pubkey,
             deadline,
             ext_data,
             proof,
