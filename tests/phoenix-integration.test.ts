@@ -591,7 +591,11 @@ describe("Phoenix Eternal Integration", () => {
 
     before(async () => {
       [testMintExecutor] = PublicKey.findProgramAddressSync(
-        [Buffer.from("phoenix_executor"), testMint.toBuffer()],
+        [
+          Buffer.from("phoenix_executor"),
+          testMint.toBuffer(),
+          SystemProgram.programId.toBuffer(),
+        ],
         program.programId,
       );
       [testMintPhoenixSlot] = PublicKey.findProgramAddressSync(
@@ -661,6 +665,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000), // deposit_amount
             Array.from(extDataHash), // ext_data_hash
             testMint, // mint_address ← NOT USDC, triggers error
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             Array.from(nullifier0),
             Array.from(nullifier1),
             Array.from(commitment0),
@@ -724,6 +729,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             testMint,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -746,6 +752,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             testMint, // non-USDC
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -766,7 +773,7 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrders(testMint)
+          .phoenixCancelOrders(testMint, SystemProgram.programId)
           .accounts({
             config,
             executor: testMintExecutor,
@@ -788,7 +795,12 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrdersById(testMint, [new BN(70000)], [new BN(1)])
+          .phoenixCancelOrdersById(
+            testMint,
+            SystemProgram.programId,
+            [new BN(70000)],
+            [new BN(1)],
+          )
           .accounts({
             config,
             executor: testMintExecutor,
@@ -809,7 +821,12 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrdersById(testMint, [new BN(70000)], [new BN(1)])
+          .phoenixCancelOrdersById(
+            testMint,
+            SystemProgram.programId,
+            [new BN(70000)],
+            [new BN(1)],
+          )
           .accounts({
             config,
             executor: testMintExecutor,
@@ -835,6 +852,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             testMint,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -859,6 +877,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             testMint, // non-USDC
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -881,6 +900,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixQueueWithdraw(
             testMint,
+            SystemProgram.programId,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 0)),
           )
@@ -954,7 +974,11 @@ describe("Phoenix Eternal Integration", () => {
         true,
       );
       [usdcExecutor] = PublicKey.findProgramAddressSync(
-        [Buffer.from("phoenix_executor"), USDC_MAINNET.toBuffer()],
+        [
+          Buffer.from("phoenix_executor"),
+          USDC_MAINNET.toBuffer(),
+          SystemProgram.programId.toBuffer(),
+        ],
         program.programId,
       );
       // Derive suite-3-local slot PDA (withdrawal_id=0xff…ff to avoid Suite 4 conflicts)
@@ -1062,6 +1086,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             USDC_MAINNET,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -1087,6 +1112,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             USDC_MAINNET,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -1111,7 +1137,7 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, badDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, badDisc)
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1134,7 +1160,7 @@ describe("Phoenix Eternal Integration", () => {
       const marketDisc = Buffer.from(phoenixDisc("place_market_order"));
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, marketDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, marketDisc)
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1174,7 +1200,7 @@ describe("Phoenix Eternal Integration", () => {
       const limitDisc = Buffer.from(phoenixDisc("place_limit_order"));
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, limitDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, limitDisc)
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1213,7 +1239,7 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrders(USDC_MAINNET)
+          .phoenixCancelOrders(USDC_MAINNET, SystemProgram.programId)
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1234,7 +1260,12 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrdersById(USDC_MAINNET, [], [])
+          .phoenixCancelOrdersById(
+            USDC_MAINNET,
+            SystemProgram.programId,
+            [],
+            [],
+          )
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1257,6 +1288,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             USDC_MAINNET,
+            SystemProgram.programId,
             [new BN(70000), new BN(80000)],
             [new BN(1)], // length mismatch
           )
@@ -1282,7 +1314,12 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrdersById(USDC_MAINNET, [new BN(70000)], [new BN(1)])
+          .phoenixCancelOrdersById(
+            USDC_MAINNET,
+            SystemProgram.programId,
+            [new BN(70000)],
+            [new BN(1)],
+          )
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1310,6 +1347,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -1334,6 +1372,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -1360,6 +1399,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
+            SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
@@ -1384,7 +1424,11 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixClosePosition(USDC_MAINNET, limitDisc)
+          .phoenixClosePosition(
+            USDC_MAINNET,
+            SystemProgram.programId,
+            limitDisc,
+          )
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1406,7 +1450,7 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixClosePosition(USDC_MAINNET, badDisc)
+          .phoenixClosePosition(USDC_MAINNET, SystemProgram.programId, badDisc)
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1429,7 +1473,11 @@ describe("Phoenix Eternal Integration", () => {
       const marketDisc = Buffer.from(phoenixDisc("place_market_order"));
       try {
         await (program.methods as any)
-          .phoenixClosePosition(USDC_MAINNET, marketDisc)
+          .phoenixClosePosition(
+            USDC_MAINNET,
+            SystemProgram.programId,
+            marketDisc,
+          )
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -1480,6 +1528,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixQueueWithdraw(
             USDC_MAINNET,
+            SystemProgram.programId,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 255)),
           )
@@ -1533,6 +1582,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000),
             Array.from(extDataHash),
             USDC_MAINNET,
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             Array.from(n0),
             Array.from(n1),
             Array.from(randomBytes32()),
@@ -1620,6 +1670,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000),
             Array.from(extDataHash),
             USDC_MAINNET,
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             Array.from(n0),
             Array.from(n1),
             Array.from(randomBytes32()),
@@ -1889,9 +1940,13 @@ describe("Phoenix Eternal Integration", () => {
       // Ephemeral claim keypair — stored in slot at deposit time; must co-sign reissue_notes
       s4ClaimKey = Keypair.generate();
 
-      // Derive executor PDA and its ATAs
+      // Derive executor PDA and its ATAs (per-user: seeds include claimant)
       [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("phoenix_executor"), USDC_MAINNET.toBuffer()],
+        [
+          Buffer.from("phoenix_executor"),
+          USDC_MAINNET.toBuffer(),
+          s4ClaimKey.publicKey.toBuffer(),
+        ],
         program.programId,
       );
       executorUsdcAta = await getAssociatedTokenAddress(
@@ -2064,6 +2119,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: s4Relayer,
         mint: USDC_MAINNET,
         poolConfig: s4UsdcConfig,
+        claimant: s4ClaimKey.publicKey,
       });
       console.log("   Suite 4 ready ✅");
     });
@@ -2086,7 +2142,11 @@ describe("Phoenix Eternal Integration", () => {
       }
 
       const sig = await (program.methods as any)
-        .phoenixRegisterPoolTrader(USDC_MAINNET, 0 /* Cross */)
+        .phoenixRegisterPoolTrader(
+          USDC_MAINNET,
+          s4ClaimKey.publicKey,
+          0 /* Cross */,
+        )
         .accounts({
           config: s4UsdcConfig,
           executor: executorPda,
@@ -2268,6 +2328,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000),
             Array.from(wrongExtDataHash), // wrong hash → InvalidExtData at check 5
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(n0),
             Array.from(n1),
             Array.from(randomBytes32()),
@@ -2349,7 +2410,7 @@ describe("Phoenix Eternal Integration", () => {
 
       try {
         const sig = await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, marketDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, marketDisc)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -2412,7 +2473,7 @@ describe("Phoenix Eternal Integration", () => {
       // Same 9 remaining accounts as place_order.
       try {
         const sig = await (program.methods as any)
-          .phoenixCancelOrders(USDC_MAINNET)
+          .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -2484,6 +2545,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixPlaceStopLoss(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             new BN(1), // triggerPriceTicks — 1 tick (far-OTM, LessThan SL won't fire)
             new BN(1), // executionPriceTicks
             1, // tradeSide: Ask (sell to close a long)
@@ -2571,6 +2633,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixCancelStopLoss(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             0, // executionDirection: 0=LessThan (cancel the same SL placed above)
           )
           .accounts({
@@ -2652,7 +2715,7 @@ describe("Phoenix Eternal Integration", () => {
 
       try {
         const sig = await (program.methods as any)
-          .phoenixClosePosition(USDC_MAINNET, marketDisc)
+          .phoenixClosePosition(USDC_MAINNET, s4ClaimKey.publicKey, marketDisc)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -2723,6 +2786,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixQueueWithdraw(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             withdrawAmount,
             Array.from(WITHDRAWAL_ID_0),
           )
@@ -2792,6 +2856,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixEmberUnwrap(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(WITHDRAWAL_ID_0),
             unwrapAmount,
           )
@@ -3616,6 +3681,7 @@ describe("Phoenix Eternal Integration", () => {
           new BN(depositAmount.toString()),
           Array.from(extDataHash),
           USDC_MAINNET,
+          s4ClaimKey.publicKey, // claimant
           Array.from(e2eUsdcNoteNullifier!),
           Array.from(dummyNullifier),
           Array.from(change0Commitment),
@@ -3807,7 +3873,7 @@ describe("Phoenix Eternal Integration", () => {
 
       try {
         const sig = await (program.methods as any)
-          .phoenixEmberWrap(USDC_MAINNET, wrapAmount)
+          .phoenixEmberWrap(USDC_MAINNET, s4ClaimKey.publicKey, wrapAmount)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -3876,6 +3942,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixEmberUnwrap(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(WITHDRAWAL_ID_0),
             unwrapAmount,
           )
@@ -4008,7 +4075,7 @@ describe("Phoenix Eternal Integration", () => {
       const before = await snapshotPhoenixBalances("e2e place_order pre-state");
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, orderData)
+          .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, orderData)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -4119,7 +4186,7 @@ describe("Phoenix Eternal Integration", () => {
 
       try {
         placeSig = await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, limitOrderData)
+          .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, limitOrderData)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -4206,7 +4273,7 @@ describe("Phoenix Eternal Integration", () => {
       );
       try {
         const cancelSig = await (program.methods as any)
-          .phoenixCancelOrders(USDC_MAINNET)
+          .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -4310,7 +4377,7 @@ describe("Phoenix Eternal Integration", () => {
       let orderPlaced = false;
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, limitOrderData)
+          .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, limitOrderData)
           .accounts({
             config: s4UsdcConfig,
             executor: executorPda,
@@ -4370,6 +4437,7 @@ describe("Phoenix Eternal Integration", () => {
         const cancelSig = await (program.methods as any)
           .phoenixCancelOrdersById(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             [new BN(LIMIT_PRICE_TICKS.toString())],
             [new BN(inferredOrderSeq.toString())],
           )
@@ -4414,7 +4482,7 @@ describe("Phoenix Eternal Integration", () => {
       if (!cancelOk) {
         try {
           await (program.methods as any)
-            .phoenixCancelOrders(USDC_MAINNET)
+            .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
             .accounts({
               config: s4UsdcConfig,
               executor: executorPda,
@@ -4579,6 +4647,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixQueueWithdraw(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             new BN(1_000_000),
             Array.from(WITHDRAWAL_ID_0),
           )
@@ -4693,6 +4762,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixEmberUnwrap(
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(WITHDRAWAL_ID_0),
             reissueAmount,
           )
@@ -6648,6 +6718,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(depositAmount.toString()),
             Array.from(extDataHash),
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(s6ReissueNoteNullifier!),
             Array.from(dummyNullifier),
             Array.from(change0Commitment),
@@ -8224,6 +8295,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer,
           mint: USDC_MAINNET,
           poolConfig: s4UsdcConfig,
+          claimant: s4ClaimKey.publicKey,
           traderPdaOverride: isolatedTraderPda,
         });
 
@@ -8262,7 +8334,11 @@ describe("Phoenix Eternal Integration", () => {
 
         try {
           const sig = await (program.methods as any)
-            .phoenixRegisterPoolTrader(USDC_MAINNET, 1 /* Isolated */)
+            .phoenixRegisterPoolTrader(
+              USDC_MAINNET,
+              s4ClaimKey.publicKey,
+              1 /* Isolated */,
+            )
             .accounts({
               config: s4UsdcConfig,
               executor: executorPda,
@@ -8627,6 +8703,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(depositAmount.toString()),
             Array.from(extDataHash),
             USDC_MAINNET,
+            s4ClaimKey.publicKey, // claimant
             Array.from(s7ReissueNoteNullifier!),
             Array.from(dummyNullifier),
             Array.from(c0Commitment),
@@ -9399,6 +9476,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer,
           mint: USDC_MAINNET,
           poolConfig: s4UsdcConfig,
+          claimant: s4ClaimKey.publicKey,
           traderPdaOverride: s9IsolatedPda,
         });
 
@@ -9609,7 +9687,11 @@ describe("Phoenix Eternal Integration", () => {
 
     before(async () => {
       [tpSlExecutor] = PublicKey.findProgramAddressSync(
-        [Buffer.from("phoenix_executor"), testMint.toBuffer()],
+        [
+          Buffer.from("phoenix_executor"),
+          testMint.toBuffer(),
+          SystemProgram.programId.toBuffer(),
+        ],
         program.programId,
       );
     });
@@ -9666,6 +9748,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceStopLoss(
             testMint,
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             new BN(1_000), // trigger_price_ticks
             new BN(1_000), // execution_price_ticks
             1, // trade_side: Ask
@@ -9694,6 +9777,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceStopLoss(
             testMint, // non-USDC
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             new BN(1_000),
             new BN(1_000),
             1,
@@ -9723,6 +9807,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelStopLoss(
             testMint,
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             0, // execution_direction: LessThan
           )
           .accounts({
@@ -9747,6 +9832,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelStopLoss(
             testMint, // non-USDC
+            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
             0,
           )
           .accounts({

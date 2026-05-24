@@ -135,6 +135,7 @@ pub fn phoenix_deposit_from_pool<'info>(
     deposit_amount: u64,
     ext_data_hash: [u8; 32],
     mint_address: Pubkey,
+    claimant: Pubkey,
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     output_commitment_0: [u8; 32],
@@ -182,6 +183,9 @@ pub fn phoenix_deposit_from_pool<'info>(
         ctx.accounts.executor.key(),
         PrivacyError::PhoenixRecipientMustBeVault
     );
+
+    // ── 4a. Claimant must match ext_data (ZK proof binds claimant) ────────────
+    require_keys_eq!(claimant, ext_data.claimant, PrivacyError::InvalidClaimant);
 
     // ── 5. Nullifier sanity ───────────────────────────────────────────────────
     let zero = [0u8; 32];
@@ -296,7 +300,12 @@ pub fn phoenix_deposit_from_pool<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Validate executor_token_account is the executor's canonical USDC ATA
     let expected_executor_usdc_ata = get_associated_token_address(&executor_key, &mint_address);
@@ -532,6 +541,7 @@ pub fn phoenix_deposit_from_pool<'info>(
 pub fn phoenix_place_order<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceOrder<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     order_data: Vec<u8>
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
@@ -555,7 +565,12 @@ pub fn phoenix_place_order<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // placeMarketOrder / placeLimitOrder account layout (from Phoenix IDL):
     //   0. phoenixProgram (readonly)
@@ -618,7 +633,8 @@ pub fn phoenix_place_order<'info>(
 /// `remaining_accounts` layout — same 9 accounts as `phoenix_place_order`.
 pub fn phoenix_cancel_orders<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelOrders<'info>>,
-    mint_address: Pubkey
+    mint_address: Pubkey,
+    claimant: Pubkey
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
 
@@ -631,7 +647,12 @@ pub fn phoenix_cancel_orders<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // cancelAll account layout (same as placeMarketOrder):
     //   0..9: same as place_market_order
@@ -698,6 +719,7 @@ pub fn phoenix_cancel_orders<'info>(
 pub fn phoenix_cancel_orders_by_id<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelOrdersById<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     price_in_ticks: Vec<u64>,
     sequence_numbers: Vec<u64>
 ) -> Result<()> {
@@ -715,7 +737,12 @@ pub fn phoenix_cancel_orders_by_id<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Encode: disc(8) + u32_le(len) + N × [u32_le(nodePointer=0) + u64_le(priceInTicks) + u64_le(seqNum)]
     let num = price_in_ticks.len() as u32;
@@ -792,6 +819,7 @@ pub fn phoenix_cancel_orders_by_id<'info>(
 pub fn phoenix_close_position<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixClosePosition<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     order_data: Vec<u8>
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
@@ -815,7 +843,12 @@ pub fn phoenix_close_position<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     let phoenix_account_metas = vec![
         AccountMeta::new_readonly(remaining[0].key(), false),
@@ -886,6 +919,7 @@ pub fn phoenix_close_position<'info>(
 pub fn phoenix_queue_withdraw<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixQueueWithdraw<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     amount: u64,
     _withdrawal_id: [u8; 32]
 ) -> Result<()> {
@@ -901,7 +935,12 @@ pub fn phoenix_queue_withdraw<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Validate remaining[9] is the executor's canonical PhUSD ATA (Phoenix withdrawal destination)
     let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
@@ -1012,6 +1051,7 @@ pub fn phoenix_queue_withdraw<'info>(
 pub fn phoenix_register_pool_trader<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixRegisterTrader<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     // 0 = Cross (max_positions=128, subaccount=0), 1 = Isolated (max_positions=1, subaccount=1)
     margin_type: u8
 ) -> Result<()> {
@@ -1029,11 +1069,17 @@ pub fn phoenix_register_pool_trader<'info>(
     {
         let executor = &mut ctx.accounts.executor;
         executor.mint_address = mint_address;
+        executor.claimant = claimant;
         executor.bump = executor_bump;
     }
 
     let executor_key = ctx.accounts.executor.key();
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Cross: max_positions=128, subaccount_index=0
     // Isolated: max_positions=1,  subaccount_index=1
@@ -1114,6 +1160,7 @@ pub fn phoenix_register_pool_trader<'info>(
 pub fn phoenix_ember_wrap<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixEmberWrap<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     amount: u64
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
@@ -1128,7 +1175,12 @@ pub fn phoenix_ember_wrap<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Validate executor PhUSD ATA
     let expected_phusd_ata = get_associated_token_address(&executor_key, &PHUSD_MINT);
@@ -1230,6 +1282,7 @@ pub fn phoenix_ember_wrap<'info>(
 pub fn phoenix_ember_unwrap<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixEmberUnwrap<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     _withdrawal_id: [u8; 32],
     amount: u64
 ) -> Result<()> {
@@ -1248,7 +1301,12 @@ pub fn phoenix_ember_unwrap<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
     let _vault_seeds: &[&[u8]] = &[b"privacy_vault_v3", mint_address.as_ref(), &[cfg.vault_bump]];
 
     // Validate executor PhUSD ATA (source of PhUSD to burn)
@@ -1635,6 +1693,7 @@ pub fn phoenix_reissue_notes(
 pub fn phoenix_place_stop_loss<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceStopLoss<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     trigger_price_ticks: u64,
     execution_price_ticks: u64,
     trade_side: u8,
@@ -1652,7 +1711,12 @@ pub fn phoenix_place_stop_loss<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Build instruction data:
     //   disc (8) + trigger_price (8) + execution_price (8) + trade_size (8=0)
@@ -1739,6 +1803,7 @@ pub fn phoenix_place_stop_loss<'info>(
 pub fn phoenix_cancel_stop_loss<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelStopLoss<'info>>,
     mint_address: Pubkey,
+    claimant: Pubkey,
     execution_direction: u8
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
@@ -1752,7 +1817,12 @@ pub fn phoenix_cancel_stop_loss<'info>(
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[b"phoenix_executor", mint_address.as_ref(), &[executor_bump]];
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
 
     // Build instruction data: disc (8) + execution_direction (1) = 9 bytes
     let disc = phoenix_disc("cancel_stop_loss");

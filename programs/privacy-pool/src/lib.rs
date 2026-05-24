@@ -243,11 +243,14 @@ impl PhoenixSlot {
 #[account]
 pub struct PhoenixExecutor {
     pub mint_address: Pubkey,
+    /// Ephemeral claimant key committed in the ZK proof at deposit time.
+    /// Used as a PDA seed so each deposit gets its own isolated executor.
+    pub claimant: Pubkey,
     pub bump: u8,
 }
 
 impl PhoenixExecutor {
-    pub const LEN: usize = 8 + 32 + 1;
+    pub const LEN: usize = 8 + 32 + 32 + 1;
 }
 
 /// Nullifier set metadata (actual nullifiers stored as individual PDAs).
@@ -966,6 +969,7 @@ pub struct FundNativeSource<'info> {
     deposit_amount: u64,
     ext_data_hash: [u8; 32],
     mint_address: Pubkey,
+    claimant: Pubkey,
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     output_commitment_0: [u8; 32],
@@ -1038,8 +1042,8 @@ pub struct PhoenixDepositFromPool<'info> {
     pub vault_token_account: UncheckedAccount<'info>,
 
     /// Executor PDA — signs all EMBER and Phoenix CPIs on behalf of the pool.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     /// Executor's USDC ATA — receives USDC from vault; EMBER pulls from here.
@@ -1071,14 +1075,14 @@ pub struct PhoenixDepositFromPool<'info> {
 /// Relayer-submitted order placement on Phoenix using the executor's trader account.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixPlaceOrder<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1095,14 +1099,14 @@ pub struct PhoenixPlaceOrder<'info> {
 /// when the open position's margin requirement exceeds free collateral.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixClosePosition<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1115,14 +1119,14 @@ pub struct PhoenixClosePosition<'info> {
 /// Cancel all open Phoenix orders for the executor's trader account.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelOrders<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1136,14 +1140,14 @@ pub struct PhoenixCancelOrders<'info> {
 /// Identical account layout to `PhoenixCancelOrders`; only the instruction data differs.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelOrdersById<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1157,14 +1161,14 @@ pub struct PhoenixCancelOrdersById<'info> {
 /// The executor PDA signs as both funder and positionAuthority.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixPlaceStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs as positionAuthority in the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1178,14 +1182,14 @@ pub struct PhoenixPlaceStopLoss<'info> {
 /// The executor PDA signs as both funder and traderWallet.
 /// Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs as traderWallet (positionAuthority) in the Phoenix cancel CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -1199,14 +1203,14 @@ pub struct PhoenixCancelStopLoss<'info> {
 /// After this, call `phoenix_ember_unwrap` to atomically crank the withdraw queue
 /// and convert PhUSD→USDC. Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey, amount: u64, withdrawal_id: [u8; 32])]
+#[instruction(mint_address: Pubkey, claimant: Pubkey, amount: u64, withdrawal_id: [u8; 32])]
 pub struct PhoenixQueueWithdraw<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the Phoenix withdrawFunds CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     /// Per-deposit slot — enforces that withdrawal cannot exceed the deposit amount.
@@ -1236,14 +1240,14 @@ pub struct PhoenixQueueWithdraw<'info> {
 ///                     [3]=perpAssetMap, [4]=globalVault, [5]=globalTraderIndex,
 ///                     [6]=activeTraderBuffer, [7]=withdrawQueue, [8]=traderAccount
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixConsumeWithdrawQueue<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — referenced as traderWallet in the Phoenix CPI (readonly, not signer).
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     /// Executor's PhUSD ATA — destination for PhUSD released by Phoenix.
@@ -1265,14 +1269,14 @@ pub struct PhoenixConsumeWithdrawQueue<'info> {
 /// remaining_accounts: [0]=emberProgram, [1]=phUsdMintAuthPda, [2]=usdcMint,
 ///                     [3]=phUsdMint(mut), [4]=emberUsdcReserve(mut)
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixEmberWrap<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
 
     /// Executor PDA — signs the EMBER deposit CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     /// Executor's USDC ATA — source of USDC; EMBER pulls from here.
@@ -1307,7 +1311,7 @@ pub struct PhoenixEmberWrap<'info> {
 ///     [9]=emberProgram, [10]=phUsdMintAuthPda, [11]=usdcMint,
 ///     [12]=phUsdMint(mut), [13]=emberUsdcReserve(mut)
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey, withdrawal_id: [u8; 32])]
+#[instruction(mint_address: Pubkey, claimant: Pubkey, withdrawal_id: [u8; 32])]
 pub struct PhoenixEmberUnwrap<'info> {
     #[account(
         mut,
@@ -1320,8 +1324,8 @@ pub struct PhoenixEmberUnwrap<'info> {
     pub vault: Account<'info, Vault>,
 
     /// Executor PDA — signs the EMBER withdraw CPI and the USDC transfer to vault.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address]; address only.
-    #[account(seeds = [b"phoenix_executor", mint_address.as_ref()], bump)]
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
     pub executor: UncheckedAccount<'info>,
 
     /// Executor's PhUSD ATA — source of PhUSD to burn via EMBER.
@@ -1376,7 +1380,7 @@ pub struct PhoenixEmberUnwrap<'info> {
 /// All Phoenix-specific accounts (log authority, global config, trader PDA)
 /// are supplied via `remaining_accounts` — see `phoenix::phoenix_register_pool_trader`.
 #[derive(Accounts)]
-#[instruction(mint_address: Pubkey, margin_type: u8)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey, margin_type: u8)]
 pub struct PhoenixRegisterTrader<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
     pub config: Account<'info, PrivacyConfig>,
@@ -1385,7 +1389,7 @@ pub struct PhoenixRegisterTrader<'info> {
     #[account(
         init_if_needed,
         payer = payer,
-        seeds = [b"phoenix_executor", mint_address.as_ref()],
+        seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()],
         bump,
         space = PhoenixExecutor::LEN
     )]
@@ -2110,6 +2114,7 @@ pub mod privacy_pool {
         deposit_amount: u64,
         ext_data_hash: [u8; 32],
         mint_address: Pubkey,
+        claimant: Pubkey,
         input_nullifier_0: [u8; 32],
         input_nullifier_1: [u8; 32],
         output_commitment_0: [u8; 32],
@@ -2128,6 +2133,7 @@ pub mod privacy_pool {
             deposit_amount,
             ext_data_hash,
             mint_address,
+            claimant,
             input_nullifier_0,
             input_nullifier_1,
             output_commitment_0,
@@ -2151,9 +2157,10 @@ pub mod privacy_pool {
     pub fn phoenix_place_order<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixPlaceOrder<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         order_data: Vec<u8>
     ) -> Result<()> {
-        phoenix::phoenix_place_order(ctx, mint_address, order_data)
+        phoenix::phoenix_place_order(ctx, mint_address, claimant, order_data)
     }
 
     /// Cancel all open orders for the vault's Phoenix trader account.
@@ -2162,9 +2169,10 @@ pub mod privacy_pool {
     #[inline(never)]
     pub fn phoenix_cancel_orders<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixCancelOrders<'info>>,
-        mint_address: Pubkey
+        mint_address: Pubkey,
+        claimant: Pubkey
     ) -> Result<()> {
-        phoenix::phoenix_cancel_orders(ctx, mint_address)
+        phoenix::phoenix_cancel_orders(ctx, mint_address, claimant)
     }
 
     /// **Cancel specific resting Phoenix orders by their FIFO order IDs.**
@@ -2177,10 +2185,17 @@ pub mod privacy_pool {
     pub fn phoenix_cancel_orders_by_id<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixCancelOrdersById<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         price_in_ticks: Vec<u64>,
         sequence_numbers: Vec<u64>
     ) -> Result<()> {
-        phoenix::phoenix_cancel_orders_by_id(ctx, mint_address, price_in_ticks, sequence_numbers)
+        phoenix::phoenix_cancel_orders_by_id(
+            ctx,
+            mint_address,
+            claimant,
+            price_in_ticks,
+            sequence_numbers
+        )
     }
 
     /// **Place a Phoenix native stop-loss / take-profit conditional order.**
@@ -2194,6 +2209,7 @@ pub mod privacy_pool {
     pub fn phoenix_place_stop_loss<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixPlaceStopLoss<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         trigger_price_ticks: u64,
         execution_price_ticks: u64,
         trade_side: u8,
@@ -2203,6 +2219,7 @@ pub mod privacy_pool {
         phoenix::phoenix_place_stop_loss(
             ctx,
             mint_address,
+            claimant,
             trigger_price_ticks,
             execution_price_ticks,
             trade_side,
@@ -2220,9 +2237,10 @@ pub mod privacy_pool {
     pub fn phoenix_cancel_stop_loss<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixCancelStopLoss<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         execution_direction: u8
     ) -> Result<()> {
-        phoenix::phoenix_cancel_stop_loss(ctx, mint_address, execution_direction)
+        phoenix::phoenix_cancel_stop_loss(ctx, mint_address, claimant, execution_direction)
     }
 
     /// **Place a market close/reduce order — risk management before withdrawal.**
@@ -2236,9 +2254,10 @@ pub mod privacy_pool {
     pub fn phoenix_close_position<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixClosePosition<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         order_data: Vec<u8>
     ) -> Result<()> {
-        phoenix::phoenix_close_position(ctx, mint_address, order_data)
+        phoenix::phoenix_close_position(ctx, mint_address, claimant, order_data)
     }
 
     /// **Wrap executor USDC → PhUSD 1:1 via EMBER deposit CPI.**
@@ -2251,9 +2270,10 @@ pub mod privacy_pool {
     pub fn phoenix_ember_wrap<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixEmberWrap<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         amount: u64
     ) -> Result<()> {
-        phoenix::phoenix_ember_wrap(ctx, mint_address, amount)
+        phoenix::phoenix_ember_wrap(ctx, mint_address, claimant, amount)
     }
 
     /// Queue a USDC withdrawal from the vault's Phoenix account back to the vault ATA.
@@ -2266,10 +2286,11 @@ pub mod privacy_pool {
     pub fn phoenix_queue_withdraw<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixQueueWithdraw<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         amount: u64,
         withdrawal_id: [u8; 32]
     ) -> Result<()> {
-        phoenix::phoenix_queue_withdraw(ctx, mint_address, amount, withdrawal_id)
+        phoenix::phoenix_queue_withdraw(ctx, mint_address, claimant, amount, withdrawal_id)
     }
 
     /// **Crank withdraw queue + convert vault's PhUSD back to USDC via EMBER (step 2 of exit flow).**
@@ -2282,10 +2303,11 @@ pub mod privacy_pool {
     pub fn phoenix_ember_unwrap<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixEmberUnwrap<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         withdrawal_id: [u8; 32],
         amount: u64
     ) -> Result<()> {
-        phoenix::phoenix_ember_unwrap(ctx, mint_address, withdrawal_id, amount)
+        phoenix::phoenix_ember_unwrap(ctx, mint_address, claimant, withdrawal_id, amount)
     }
 
     /// **Register the pool vault as a Phoenix Eternal trader (one-time setup).**
@@ -2298,10 +2320,11 @@ pub mod privacy_pool {
     pub fn phoenix_register_pool_trader<'info>(
         ctx: Context<'_, '_, 'info, 'info, PhoenixRegisterTrader<'info>>,
         mint_address: Pubkey,
+        claimant: Pubkey,
         // 0 = Cross margin (max_positions=128), 1 = Isolated margin (max_positions=1)
         margin_type: u8
     ) -> Result<()> {
-        phoenix::phoenix_register_pool_trader(ctx, mint_address, margin_type)
+        phoenix::phoenix_register_pool_trader(ctx, mint_address, claimant, margin_type)
     }
 
     /// **Re-mint private notes after Phoenix exit — final step of the Phoenix round-trip.**

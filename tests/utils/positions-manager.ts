@@ -26,6 +26,8 @@ import {
   SystemProgram,
   ComputeBudgetProgram,
   Connection,
+  VersionedTransaction,
+  TransactionMessage,
 } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -214,15 +216,19 @@ export interface CollateralSummary {
 // ─── PDA derivation ───────────────────────────────────────────────────────────
 
 /**
- * Derive the Veilo executor PDA for a given pool mint.
- * Seeds: ["phoenix_executor", mint]
+ * Derive the Veilo executor PDA for a given pool mint and claimant.
+ * Seeds: ["phoenix_executor", mint, claimant]
+ *
+ * The `claimant` is the ephemeral pubkey committed in the ZK proof at deposit time,
+ * giving each deposit its own isolated Phoenix trader account.
  */
 export function deriveExecutorPda(
   veiloProgramId: PublicKey,
   mint: PublicKey,
+  claimant: PublicKey,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("phoenix_executor"), mint.toBuffer()],
+    [Buffer.from("phoenix_executor"), mint.toBuffer(), claimant.toBuffer()],
     veiloProgramId,
   );
   return pda;
@@ -686,6 +692,12 @@ export interface PositionsManagerConfig {
   mint: PublicKey;
   /** Veilo pool config PDA — use `derivePoolConfig(programId, mint)` or a known address. */
   poolConfig: PublicKey;
+  /**
+   * Ephemeral claimant pubkey committed in the ZK proof at deposit time.
+   * Used as a seed for the per-user executor PDA: ["phoenix_executor", mint, claimant].
+   * Derive deterministically from `walletMasterSeed + "veilo-phoenix" + withdrawalId`.
+   */
+  claimant: PublicKey;
   /** Compute unit budget per transaction (default 400 000). */
   computeUnitLimit?: number;
   /**
@@ -711,6 +723,8 @@ export interface PositionsManagerConfig {
 export class PositionsManager {
   readonly mint: PublicKey;
   readonly poolConfig: PublicKey;
+  /** Ephemeral claimant pubkey — PDA seed for per-user executor isolation. */
+  readonly claimant: PublicKey;
   /** Veilo executor PDA — the on-chain signing wallet for Phoenix CPIs. */
   readonly executorPda: PublicKey;
   /** Phoenix Eternal trader PDA controlled by the executor. */
@@ -725,8 +739,13 @@ export class PositionsManager {
     this.relayer = cfg.relayer;
     this.mint = cfg.mint;
     this.poolConfig = cfg.poolConfig;
+    this.claimant = cfg.claimant;
     this.cu = cfg.computeUnitLimit ?? 400_000;
-    this.executorPda = deriveExecutorPda(cfg.program.programId, cfg.mint);
+    this.executorPda = deriveExecutorPda(
+      cfg.program.programId,
+      cfg.mint,
+      cfg.claimant,
+    );
     this.traderPda = cfg.traderPdaOverride ?? deriveTraderPda(this.executorPda);
   }
 
@@ -876,7 +895,7 @@ export class PositionsManager {
     const side: 0 | 1 = opts.side === "Long" ? 0 : 1;
     const pkt = encodeIocMarketOrder(side, opts.numBaseLots);
     return this.program.methods
-      .phoenixPlaceOrder(this.mint, pkt)
+      .phoenixPlaceOrder(this.mint, this.claimant, pkt)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
@@ -916,7 +935,7 @@ export class PositionsManager {
       opts.numBaseLots,
     );
     return this.program.methods
-      .phoenixPlaceOrder(this.mint, pkt)
+      .phoenixPlaceOrder(this.mint, this.claimant, pkt)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
@@ -952,7 +971,7 @@ export class PositionsManager {
       (opts.positionSide ?? "Long") === "Long" ? 1 /* Ask */ : 0; /* Bid */
     const pkt = encodeIocMarketOrder(closeSide, opts.numBaseLots, true);
     return this.program.methods
-      .phoenixClosePosition(this.mint, pkt)
+      .phoenixClosePosition(this.mint, this.claimant, pkt)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
@@ -1004,6 +1023,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixPlaceStopLoss(
         this.mint,
+        this.claimant,
         new BN(opts.triggerTicks.toString()),
         new BN(opts.executionTicks.toString()),
         tradeSideVal,
@@ -1047,7 +1067,7 @@ export class PositionsManager {
     const market = getMarket(opts.symbol);
     const directionVal: 0 | 1 = opts.direction === "LessThan" ? 0 : 1;
     return this.program.methods
-      .phoenixCancelStopLoss(this.mint, directionVal)
+      .phoenixCancelStopLoss(this.mint, this.claimant, directionVal)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
@@ -1070,6 +1090,137 @@ export class PositionsManager {
   }
 
   /**
+   * Place a market order and immediately set bracket SL and TP orders in one
+   * atomic versioned transaction — matching the Rise SDK `place_position_bracket_order`
+   * pattern.
+   *
+   * Both `stopLoss` and `takeProfit` are optional; omit either to place without that leg.
+   *
+   * **Order kinds** (matching Rise SDK defaults):
+   *   - SL: `orderKind = 1` (IOC) — execute at market regardless of slippage
+   *   - TP: `orderKind = 0` (Limit) — resting limit at trigger price, no slippage
+   *
+   * **Execution prices**:
+   *   - SL: set `executionTicks` to trigger ±10% (slippage tolerance, required)
+   *   - TP: `executionTicks` defaults to `triggerTicks` when omitted (limit at exact target)
+   *
+   * @param symbol       Market symbol (e.g. "SOL", "BTC")
+   * @param side         "Long" (Bid) or "Short" (Ask)
+   * @param numBaseLots  Size in base lots for the market order
+   * @param stopLoss     SL leg — `executionTicks` required (set worse than trigger for slippage)
+   * @param takeProfit   TP leg — `executionTicks` optional; defaults to `triggerTicks` (limit)
+   * @returns Transaction signature
+   *
+   * Example — open a 2-lot SOL long with $140 SL (10% slippage) and $160 TP (limit):
+   *   pm.placeOrderWithBracket({
+   *     symbol: "SOL", side: "Long", numBaseLots: 2n,
+   *     stopLoss:   { triggerTicks: 140_000n, executionTicks: 126_000n },  // ~10% below trigger
+   *     takeProfit: { triggerTicks: 160_000n },                            // limit at $160
+   *   });
+   */
+  async placeOrderWithBracket(opts: {
+    symbol: string;
+    side: OrderSide;
+    numBaseLots: bigint;
+    stopLoss?: { triggerTicks: bigint; executionTicks: bigint };
+    takeProfit?: { triggerTicks: bigint; executionTicks?: bigint };
+  }): Promise<string> {
+    const market = getMarket(opts.symbol);
+    const side: 0 | 1 = opts.side === "Long" ? 0 : 1;
+    const pkt = encodeIocMarketOrder(side, opts.numBaseLots);
+
+    // For a Long position:
+    //   SL fires when price drops BELOW trigger → LessThan (direction 0), close with Ask (1)
+    //   TP fires when price rises ABOVE trigger → GreaterThan (direction 1), close with Ask (1)
+    // For a Short position the directions are reversed.
+    const slDirection: 0 | 1 = opts.side === "Long" ? 0 : 1; // LessThan : GreaterThan
+    const tpDirection: 0 | 1 = opts.side === "Long" ? 1 : 0; // GreaterThan : LessThan
+    const closeSide: 0 | 1 = opts.side === "Long" ? 1 : 0; // Ask to close long, Bid to close short
+
+    // Rise SDK StopLossOrderKind: Limit = 0 (TP default), IOC = 1 (SL default)
+    const ORDER_KIND_LIMIT = 0; // resting limit at trigger — used for TP
+    const ORDER_KIND_IOC = 1; // immediate-or-cancel with slippage — used for SL
+
+    const baseAccounts = {
+      config: this.poolConfig,
+      executor: this.executorPda,
+      relayer: this.relayer.publicKey,
+      systemProgram: SystemProgram.programId,
+    };
+    const slRemainingAccounts = [
+      ...buildStopLossRemainingAccounts(
+        PHOENIX_EXCHANGE,
+        market,
+        this.traderPda,
+      ),
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ];
+
+    // Build instructions
+    const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu });
+    const orderIx = await this.program.methods
+      .phoenixPlaceOrder(this.mint, this.claimant, pkt)
+      .accounts(baseAccounts)
+      .remainingAccounts(
+        buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda),
+      )
+      .instruction();
+
+    const ixs = [cuIx, orderIx];
+
+    if (opts.stopLoss) {
+      // SL: IOC — executionTicks must include desired slippage tolerance
+      const slIx = await this.program.methods
+        .phoenixPlaceStopLoss(
+          this.mint,
+          this.claimant,
+          new BN(opts.stopLoss.triggerTicks.toString()),
+          new BN(opts.stopLoss.executionTicks.toString()),
+          closeSide,
+          slDirection,
+          ORDER_KIND_IOC,
+        )
+        .accounts(baseAccounts)
+        .remainingAccounts(slRemainingAccounts)
+        .instruction();
+      ixs.push(slIx);
+    }
+
+    if (opts.takeProfit) {
+      // TP: Limit — execution price defaults to trigger (resting limit, no slippage)
+      const tpExecution =
+        opts.takeProfit.executionTicks ?? opts.takeProfit.triggerTicks;
+      const tpIx = await this.program.methods
+        .phoenixPlaceStopLoss(
+          this.mint,
+          this.claimant,
+          new BN(opts.takeProfit.triggerTicks.toString()),
+          new BN(tpExecution.toString()),
+          closeSide,
+          tpDirection,
+          ORDER_KIND_LIMIT,
+        )
+        .accounts(baseAccounts)
+        .remainingAccounts(slRemainingAccounts)
+        .instruction();
+      ixs.push(tpIx);
+    }
+
+    const conn: Connection = (this.program.provider as any).connection;
+    const { blockhash } = await conn.getLatestBlockhash("confirmed");
+    const msg = new TransactionMessage({
+      payerKey: this.relayer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: ixs,
+    }).compileToV0Message();
+    const tx = new VersionedTransaction(msg);
+    tx.sign([this.relayer]);
+    const sig = await conn.sendTransaction(tx, { skipPreflight: false });
+    await conn.confirmTransaction(sig, "confirmed");
+    return sig;
+  }
+
+  /**
    * Cancel all resting (PostOnly) limit orders for a market.
    *
    * @param symbol Market symbol
@@ -1077,7 +1228,7 @@ export class PositionsManager {
   async cancelAllOrders(symbol: string): Promise<string> {
     const market = getMarket(symbol);
     return this.program.methods
-      .phoenixCancelOrders(this.mint)
+      .phoenixCancelOrders(this.mint, this.claimant)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
@@ -1121,6 +1272,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixQueueWithdraw(
         this.mint,
+        this.claimant,
         opts.amount,
         Array.from(opts.withdrawalId),
       )
@@ -1177,7 +1329,12 @@ export class PositionsManager {
       opts.withdrawalId,
     );
     return this.program.methods
-      .phoenixEmberUnwrap(this.mint, Array.from(opts.withdrawalId), opts.amount)
+      .phoenixEmberUnwrap(
+        this.mint,
+        this.claimant,
+        Array.from(opts.withdrawalId),
+        opts.amount,
+      )
       .accounts({
         config: this.poolConfig,
         vault: opts.vault,

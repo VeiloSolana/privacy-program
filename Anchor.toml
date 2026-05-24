@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:amm-various-jup"
+test = "npm run test:phoenix"
 
 [test]
 startup_wait = 60000
