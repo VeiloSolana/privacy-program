@@ -495,8 +495,6 @@ pub fn phoenix_deposit_from_pool<'info>(
         deposit_amount,
         relayer_fee: ext_data.fee,
         mint_address,
-        nullifiers: input_nullifiers,
-        commitments: output_commitments,
         timestamp,
     });
 
@@ -1658,7 +1656,6 @@ pub fn phoenix_reissue_notes(
     emit!(PhoenixReissueEvent {
         amount,
         mint_address,
-        commitments: output_commitments,
         timestamp,
     });
 
@@ -1881,10 +1878,6 @@ pub struct PhoenixDepositEvent {
     pub relayer_fee: u64,
     /// Token mint (always PHOENIX_REQUIRED_MINT)
     pub mint_address: Pubkey,
-    /// Nullifiers consumed (notes burned)
-    pub nullifiers: [[u8; 32]; 2],
-    /// New commitments inserted (change notes)
-    pub commitments: [[u8; 32]; 2],
     pub timestamp: i64,
 }
 
@@ -1949,8 +1942,6 @@ pub struct PhoenixReissueEvent {
     pub amount: u64,
     /// Token mint (always PHOENIX_REQUIRED_MINT)
     pub mint_address: Pubkey,
-    /// Output commitments inserted into the Merkle tree
-    pub commitments: [[u8; 32]; 2],
     pub timestamp: i64,
 }
 
