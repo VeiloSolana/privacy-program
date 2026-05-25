@@ -982,17 +982,17 @@ pub struct PhoenixDepositFromPool<'info> {
         seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(
         mut,
         seeds = [b"privacy_vault_v3", mint_address.as_ref()],
         bump = config.vault_bump
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
 
     #[account(
         mut,
@@ -1013,7 +1013,7 @@ pub struct PhoenixDepositFromPool<'info> {
         seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
-    pub nullifiers: Account<'info, NullifierSet>,
+    pub nullifiers: Box<Account<'info, NullifierSet>>,
 
     #[account(
         init,
@@ -1022,7 +1022,7 @@ pub struct PhoenixDepositFromPool<'info> {
         bump,
         space = NullifierMarker::LEN
     )]
-    pub nullifier_marker_0: Account<'info, NullifierMarker>,
+    pub nullifier_marker_0: Box<Account<'info, NullifierMarker>>,
 
     #[account(
         init,
@@ -1031,7 +1031,7 @@ pub struct PhoenixDepositFromPool<'info> {
         bump,
         space = NullifierMarker::LEN
     )]
-    pub nullifier_marker_1: Account<'info, NullifierMarker>,
+    pub nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
 
     #[account(mut)]
     pub relayer: Signer<'info>,
@@ -1065,7 +1065,7 @@ pub struct PhoenixDepositFromPool<'info> {
         bump,
         space = PhoenixSlot::LEN
     )]
-    pub phoenix_slot: Account<'info, PhoenixSlot>,
+    pub phoenix_slot: Box<Account<'info, PhoenixSlot>>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1078,7 +1078,7 @@ pub struct PhoenixDepositFromPool<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixPlaceOrder<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1102,7 +1102,7 @@ pub struct PhoenixPlaceOrder<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixClosePosition<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1122,7 +1122,7 @@ pub struct PhoenixClosePosition<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelOrders<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1143,7 +1143,7 @@ pub struct PhoenixCancelOrders<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelOrdersById<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1164,7 +1164,7 @@ pub struct PhoenixCancelOrdersById<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixPlaceStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs as positionAuthority in the Phoenix CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1185,7 +1185,7 @@ pub struct PhoenixPlaceStopLoss<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixCancelStopLoss<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs as traderWallet (positionAuthority) in the Phoenix cancel CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1206,7 +1206,7 @@ pub struct PhoenixCancelStopLoss<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey, amount: u64, withdrawal_id: [u8; 32])]
 pub struct PhoenixQueueWithdraw<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the Phoenix withdrawFunds CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1243,7 +1243,7 @@ pub struct PhoenixQueueWithdraw<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixConsumeWithdrawQueue<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — referenced as traderWallet in the Phoenix CPI (readonly, not signer).
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1272,7 +1272,7 @@ pub struct PhoenixConsumeWithdrawQueue<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey)]
 pub struct PhoenixEmberWrap<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — signs the EMBER deposit CPI.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1318,10 +1318,10 @@ pub struct PhoenixEmberUnwrap<'info> {
         seeds = [b"privacy_config_v3", mint_address.as_ref()],
         bump = config.bump
     )]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
 
     /// Executor PDA — signs the EMBER withdraw CPI and the USDC transfer to vault.
     /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
@@ -1356,7 +1356,7 @@ pub struct PhoenixEmberUnwrap<'info> {
         bump,
         space = PhoenixPendingReissue::LEN
     )]
-    pub pending_reissue: Account<'info, PhoenixPendingReissue>,
+    pub pending_reissue: Box<Account<'info, PhoenixPendingReissue>>,
 
     /// Per-deposit slot — read here to enforce ember_unwrap cannot exceed slot.amount.
     /// CHECK: Validated in handler as [b"phoenix_slot_v1", mint, withdrawal_id] PDA;
@@ -1383,7 +1383,7 @@ pub struct PhoenixEmberUnwrap<'info> {
 #[instruction(mint_address: Pubkey, claimant: Pubkey, margin_type: u8)]
 pub struct PhoenixRegisterTrader<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     /// Executor PDA — created here on first call, then registered as the Phoenix Eternal trader wallet.
     #[account(
@@ -1393,7 +1393,7 @@ pub struct PhoenixRegisterTrader<'info> {
         bump,
         space = PhoenixExecutor::LEN
     )]
-    pub executor: Account<'info, PhoenixExecutor>,
+    pub executor: Box<Account<'info, PhoenixExecutor>>,
 
     #[account(mut)] // mut needed for init_if_needed rent payment
     pub payer: Signer<'info>,
@@ -1434,13 +1434,13 @@ pub struct PhoenixRegisterTrader<'info> {
 )]
 pub struct PhoenixReissueNotes<'info> {
     #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Account<'info, PrivacyConfig>,
+    pub config: Box<Account<'info, PrivacyConfig>>,
 
     #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
-    pub global_config: Account<'info, GlobalConfig>,
+    pub global_config: Box<Account<'info, GlobalConfig>>,
 
     #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
 
     /// Input tree — for root validation of the dummy input notes (same as transact deposit).
     #[account(
@@ -1462,7 +1462,7 @@ pub struct PhoenixReissueNotes<'info> {
         seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
         bump = nullifiers.bump
     )]
-    pub nullifiers: Account<'info, NullifierSet>,
+    pub nullifiers: Box<Account<'info, NullifierSet>>,
 
     /// Dummy-input nullifier marker 0. init_if_needed: deposits reuse dummy witnesses.
     #[account(
@@ -1472,7 +1472,7 @@ pub struct PhoenixReissueNotes<'info> {
         bump,
         space = NullifierMarker::LEN
     )]
-    pub nullifier_marker_0: Account<'info, NullifierMarker>,
+    pub nullifier_marker_0: Box<Account<'info, NullifierMarker>>,
 
     /// Dummy-input nullifier marker 1. init_if_needed: deposits reuse dummy witnesses.
     #[account(
@@ -1482,7 +1482,7 @@ pub struct PhoenixReissueNotes<'info> {
         bump,
         space = NullifierMarker::LEN
     )]
-    pub nullifier_marker_1: Account<'info, NullifierMarker>,
+    pub nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
 
     /// Authorized relayer — must be registered in config.relayers.
     #[account(mut)]
@@ -1497,11 +1497,11 @@ pub struct PhoenixReissueNotes<'info> {
         bump,
         space = PhoenixPendingReissue::LEN
     )]
-    pub pending_reissue: Account<'info, PhoenixPendingReissue>,
+    pub pending_reissue: Box<Account<'info, PhoenixPendingReissue>>,
 
     /// Per-deposit slot — checked here to validate the claimant_pubkey.
     #[account(seeds = [b"phoenix_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()], bump)]
-    pub phoenix_slot: Account<'info, PhoenixSlot>,
+    pub phoenix_slot: Box<Account<'info, PhoenixSlot>>,
 
     /// Ephemeral claim key — must match `phoenix_slot.claimant_pubkey`.
     /// The user co-signs this transaction to prove they own the exit proceeds.

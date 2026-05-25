@@ -1,6 +1,6 @@
 [toolchain]
 anchor_version = "0.32.1"
-solana_version = "2.2.0"
+solana_version = "2.3.0"
 
 [features]
 resolution = true
@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:phoenix"
+test = "npm run test:sol"
 
 [test]
 startup_wait = 60000
