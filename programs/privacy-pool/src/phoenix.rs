@@ -2008,12 +2008,12 @@ pub fn phoenix_place_position_conditional_order<'info>(
     data.extend_from_slice(&disc);
     data.extend_from_slice(&asset_id.to_le_bytes());
 
-    // greaterTriggerOrder option — GreaterThan direction = 1
+    // greaterTriggerOrder option — GreaterThan direction = 0 (Phoenix convention: 0=GreaterThan, 1=LessThan)
     if has_greater {
         data.push(0x01);
         data.extend_from_slice(
             &encode_trigger(
-                1,
+                0,
                 greater_trade_side,
                 greater_order_kind,
                 greater_trigger_price,
@@ -2024,12 +2024,12 @@ pub fn phoenix_place_position_conditional_order<'info>(
         data.push(0x00);
     }
 
-    // lessTriggerOrder option — LessThan direction = 0
+    // lessTriggerOrder option — LessThan direction = 1 (Phoenix convention: 0=GreaterThan, 1=LessThan)
     if has_less {
         data.push(0x01);
         data.extend_from_slice(
             &encode_trigger(
-                0,
+                1,
                 less_trade_side,
                 less_order_kind,
                 less_trigger_price,
