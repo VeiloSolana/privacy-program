@@ -1157,6 +1157,27 @@ pub struct PhoenixCancelOrdersById<'info> {
     // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_orders_by_id
 }
 
+/// Transfer collateral between two Phoenix trader sub-accounts owned by the same executor.
+/// Typically used to move collateral from cross (subaccount 0) to isolated (subaccount 1).
+/// Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
+pub struct PhoenixTransferCollateral<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Executor PDA — signs the Phoenix transferCollateral CPI.
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_transfer_collateral
+}
+
 /// Place a Phoenix native stop-loss / take-profit conditional order.
 /// The executor PDA signs as both funder and positionAuthority.
 /// Phoenix accounts supplied via remaining_accounts.
@@ -1197,6 +1218,66 @@ pub struct PhoenixCancelStopLoss<'info> {
 
     pub system_program: Program<'info, System>,
     // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_stop_loss
+}
+
+/// Initialize the conditional-orders collection account for the executor PDA.
+/// The relayer pays rent. Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
+pub struct PhoenixCreateConditionalOrdersAccount<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Executor PDA — identified as traderWallet in the Phoenix CPI (non-signer for account creation).
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_create_conditional_orders_account
+}
+
+/// Place an atomic bracket order (SL+TP) via PlacePositionConditionalOrder.
+/// The executor PDA signs as traderWallet. Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
+pub struct PhoenixPlacePositionConditionalOrder<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Executor PDA — signs as traderWallet (readonly signer) in the Phoenix CPI.
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_place_position_conditional_order
+}
+
+/// Cancel a conditional order from the collection by index.
+/// The executor PDA signs as traderWallet. Phoenix accounts supplied via remaining_accounts.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey)]
+pub struct PhoenixCancelConditionalOrder<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Executor PDA — signs as traderWallet (readonly signer) in the Phoenix CPI.
+    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
+    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_conditional_order
 }
 
 /// Queue a Phoenix withdrawal back to the executor's PhUSD ATA.
@@ -2158,9 +2239,10 @@ pub mod privacy_pool {
         ctx: Context<'_, '_, 'info, 'info, PhoenixPlaceOrder<'info>>,
         mint_address: Pubkey,
         claimant: Pubkey,
-        order_data: Vec<u8>
+        order_data: Vec<u8>,
+        transfer_amount: Option<u64>
     ) -> Result<()> {
-        phoenix::phoenix_place_order(ctx, mint_address, claimant, order_data)
+        phoenix::phoenix_place_order(ctx, mint_address, claimant, order_data, transfer_amount)
     }
 
     /// Cancel all open orders for the vault's Phoenix trader account.
@@ -2196,6 +2278,23 @@ pub mod privacy_pool {
             price_in_ticks,
             sequence_numbers
         )
+    }
+
+    /// **Transfer collateral between Phoenix sub-accounts (cross ↔ isolated).**
+    ///
+    /// Moves `amount` PhUSD from `srcTraderAccount` to `dstTraderAccount`.
+    /// Both accounts must be owned by the same executor PDA.
+    /// Typically: cross sub-account → isolated sub-account before an isolated position.
+    ///
+    /// See `phoenix::phoenix_transfer_collateral` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_transfer_collateral<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixTransferCollateral<'info>>,
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        amount: u64
+    ) -> Result<()> {
+        phoenix::phoenix_transfer_collateral(ctx, mint_address, claimant, amount)
     }
 
     /// **Place a Phoenix native stop-loss / take-profit conditional order.**
@@ -2241,6 +2340,94 @@ pub mod privacy_pool {
         execution_direction: u8
     ) -> Result<()> {
         phoenix::phoenix_cancel_stop_loss(ctx, mint_address, claimant, execution_direction)
+    }
+
+    /// **Initialize the conditional-orders collection account for the executor PDA.**
+    ///
+    /// Must be called once (idempotent) before using `phoenix_place_position_conditional_order`.
+    /// `capacity`: maximum concurrent conditional orders (default: 8).
+    ///
+    /// See `phoenix::phoenix_create_conditional_orders_account` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_create_conditional_orders_account<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixCreateConditionalOrdersAccount<'info>>,
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        capacity: u8
+    ) -> Result<()> {
+        phoenix::phoenix_create_conditional_orders_account(ctx, mint_address, claimant, capacity)
+    }
+
+    /// **Place an atomic bracket order (SL + TP) using the conditional-orders API.**
+    ///
+    /// Replaces two sequential `phoenix_place_stop_loss` calls with a single atomic instruction
+    /// that avoids `PositionSequenceInvalidated` errors on mainnet.
+    ///
+    /// Set `has_greater = true` for a take-profit (TP) and `has_less = true` for a stop-loss (SL).
+    /// `size_percent`: 1–100, percentage of position to close (use 100 for full close).
+    ///
+    /// See `phoenix::phoenix_place_position_conditional_order` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_place_position_conditional_order<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixPlacePositionConditionalOrder<'info>>,
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        asset_id: u32,
+        has_greater: bool,
+        greater_trigger_price: u64,
+        greater_execution_price: u64,
+        greater_trade_side: u8,
+        greater_order_kind: u8,
+        has_less: bool,
+        less_trigger_price: u64,
+        less_execution_price: u64,
+        less_trade_side: u8,
+        less_order_kind: u8,
+        size_percent: u8
+    ) -> Result<()> {
+        phoenix::phoenix_place_position_conditional_order(
+            ctx,
+            mint_address,
+            claimant,
+            asset_id,
+            has_greater,
+            greater_trigger_price,
+            greater_execution_price,
+            greater_trade_side,
+            greater_order_kind,
+            has_less,
+            less_trigger_price,
+            less_execution_price,
+            less_trade_side,
+            less_order_kind,
+            size_percent
+        )
+    }
+
+    /// **Cancel a conditional order from the collection by slot index.**
+    ///
+    /// `conditional_order_index`: 1–191, the slot index assigned at placement.
+    /// `disable_first`: cancel the SL (lessTrigger) leg.
+    /// `disable_second`: cancel the TP (greaterTrigger) leg.
+    ///
+    /// See `phoenix::phoenix_cancel_conditional_order` for full documentation.
+    #[inline(never)]
+    pub fn phoenix_cancel_conditional_order<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PhoenixCancelConditionalOrder<'info>>,
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        conditional_order_index: u8,
+        disable_first: bool,
+        disable_second: bool
+    ) -> Result<()> {
+        phoenix::phoenix_cancel_conditional_order(
+            ctx,
+            mint_address,
+            claimant,
+            conditional_order_index,
+            disable_first,
+            disable_second
+        )
     }
 
     /// **Place a market close/reduce order — risk management before withdrawal.**

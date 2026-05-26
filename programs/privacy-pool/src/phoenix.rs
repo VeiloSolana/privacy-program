@@ -540,18 +540,19 @@ pub fn phoenix_place_order<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceOrder<'info>>,
     mint_address: Pubkey,
     claimant: Pubkey,
-    order_data: Vec<u8>
+    order_data: Vec<u8>,
+    // When Some(amount), a TransferCollateral (cross → isolated) CPI is executed
+    // atomically before the order. The first 8 remaining_accounts must then be
+    // the transfer accounts; the following 9 are the order accounts.
+    // When None, only the 9 order accounts are required.
+    transfer_amount: Option<u64>
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
 
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
     require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
 
-    let remaining = ctx.remaining_accounts;
-    require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
-    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
-
-    // Validate discriminator — only market or limit orders are accepted
+    // Validate discriminator — only market or limit orders are accepted.
     require!(order_data.len() >= 8, PrivacyError::PhoenixInvalidOrderData);
     let disc_bytes: [u8; 8] = order_data[..8].try_into().unwrap();
     let market_disc = phoenix_disc("place_market_order");
@@ -570,50 +571,117 @@ pub fn phoenix_place_order<'info>(
         &[executor_bump],
     ];
 
-    // placeMarketOrder / placeLimitOrder account layout (from Phoenix IDL):
-    //   0. phoenixProgram (readonly)
-    //   1. phoenixLogAuthority (readonly)
-    //   2. globalConfiguration (writable)
-    //   3. traderWallet (signer)
-    //   4. traderAccount (writable)
-    //   5. perpAssetMap (writable)
-    //   6. globalTraderIndex (writable)
-    //   7. activeTraderBuffer (writable)
-    //   8. orderbook (writable)
-    //   9. splines (writable)
-    let phoenix_account_metas = vec![
-        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
-        AccountMeta::new_readonly(remaining[1].key(), false), // phoenixLogAuthority
-        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
-        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
-        AccountMeta::new(remaining[3].key(), false), // traderAccount
-        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
-        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
-        AccountMeta::new(remaining[6].key(), false), // activeTraderBuffer
-        AccountMeta::new(remaining[7].key(), false), // orderbook
-        AccountMeta::new(remaining[8].key(), false) // splines
-    ];
+    let remaining = ctx.remaining_accounts;
 
-    let order_ix = Instruction {
-        program_id: PHOENIX_PROGRAM_ID,
-        accounts: phoenix_account_metas,
-        data: order_data,
+    // ── Optional pre-order collateral transfer ────────────────────────────
+    // remaining_accounts layout when transfer_amount is Some:
+    //   [0..8]  transferCollateral accounts (see below)
+    //   [8..17] placeMarketOrder / placeLimitOrder accounts
+    //
+    // transferCollateral layout (Phoenix IDL):
+    //   0. phoenixProgram      (readonly)
+    //   1. logAuthority        (readonly)
+    //   2. globalConfiguration (readonly — differs from place_order!)
+    //   3. srcTraderAccount    (writable)
+    //   4. dstTraderAccount    (writable)
+    //   5. perpAssetMap        (readonly — differs from place_order!)
+    //   6. globalTraderIndex   (writable)
+    //   7. activeTraderBuffer  (writable)
+    //   traderWallet           ← executor PDA (ctx.accounts.executor)
+    let order_offset: usize = if let Some(amount) = transfer_amount {
+        require!(amount > 0, PrivacyError::InvalidPublicAmount);
+        require!(remaining.len() >= 17, PrivacyError::PhoenixInvalidAccounts);
+        require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+        let transfer_metas = vec![
+            AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+            AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+            AccountMeta::new_readonly(remaining[2].key(), false), // globalConfig (readonly)
+            AccountMeta::new_readonly(executor_key, true), // traderWallet (executor)
+            AccountMeta::new(remaining[3].key(), false), // srcTraderAccount
+            AccountMeta::new(remaining[4].key(), false), // dstTraderAccount
+            AccountMeta::new_readonly(remaining[5].key(), false), // perpAssetMap (readonly)
+            AccountMeta::new(remaining[6].key(), false), // globalTraderIndex
+            AccountMeta::new(remaining[7].key(), false) // activeTraderBuffer
+        ];
+
+        let mut ix_data = phoenix_disc("transfer_collateral").to_vec();
+        ix_data.extend_from_slice(&amount.to_le_bytes());
+
+        invoke_signed(
+            &(Instruction {
+                program_id: PHOENIX_PROGRAM_ID,
+                accounts: transfer_metas,
+                data: ix_data,
+            }),
+            &[
+                remaining[1].to_account_info(), // logAuthority
+                remaining[2].to_account_info(), // globalConfig
+                ctx.accounts.executor.to_account_info(), // traderWallet
+                remaining[3].to_account_info(), // srcTraderAccount
+                remaining[4].to_account_info(), // dstTraderAccount
+                remaining[5].to_account_info(), // perpAssetMap
+                remaining[6].to_account_info(), // globalTraderIndex
+                remaining[7].to_account_info(), // activeTraderBuffer
+                remaining[0].to_account_info(), // phoenixProgram
+            ],
+            &[executor_seeds]
+        )?;
+
+        8 // order accounts start after the 8 transfer accounts
+    } else {
+        require!(remaining.len() >= 9, PrivacyError::PhoenixInvalidAccounts);
+        require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+        0
     };
 
-    let cpi_infos = vec![
-        remaining[1].to_account_info(),
-        remaining[2].to_account_info(),
-        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
-        remaining[3].to_account_info(),
-        remaining[4].to_account_info(),
-        remaining[5].to_account_info(),
-        remaining[6].to_account_info(),
-        remaining[7].to_account_info(),
-        remaining[8].to_account_info(),
-        remaining[0].to_account_info() // phoenixProgram
+    // ── Place order CPI ───────────────────────────────────────────────────
+    // placeMarketOrder / placeLimitOrder account layout (from Phoenix IDL):
+    //   0. phoenixProgram      (readonly)
+    //   1. phoenixLogAuthority (readonly)
+    //   2. globalConfiguration (writable)
+    //   3. traderWallet        (signer) ← executor PDA
+    //   4. traderAccount       (writable)
+    //   5. perpAssetMap        (writable)
+    //   6. globalTraderIndex   (writable)
+    //   7. activeTraderBuffer  (writable)
+    //   8. orderbook           (writable)
+    //   9. splines             (writable)
+    let r = &remaining[order_offset..];
+
+    let phoenix_account_metas = vec![
+        AccountMeta::new_readonly(r[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(r[1].key(), false), // phoenixLogAuthority
+        AccountMeta::new(r[2].key(), false), // globalConfiguration
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(r[3].key(), false), // traderAccount
+        AccountMeta::new(r[4].key(), false), // perpAssetMap
+        AccountMeta::new(r[5].key(), false), // globalTraderIndex
+        AccountMeta::new(r[6].key(), false), // activeTraderBuffer
+        AccountMeta::new(r[7].key(), false), // orderbook
+        AccountMeta::new(r[8].key(), false) // splines
     ];
 
-    invoke_signed(&order_ix, &cpi_infos, &[executor_seeds])?;
+    invoke_signed(
+        &(Instruction {
+            program_id: PHOENIX_PROGRAM_ID,
+            accounts: phoenix_account_metas,
+            data: order_data,
+        }),
+        &[
+            r[1].to_account_info(),
+            r[2].to_account_info(),
+            ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+            r[3].to_account_info(),
+            r[4].to_account_info(),
+            r[5].to_account_info(),
+            r[6].to_account_info(),
+            r[7].to_account_info(),
+            r[8].to_account_info(),
+            r[0].to_account_info(), // phoenixProgram
+        ],
+        &[executor_seeds]
+    )?;
 
     emit!(PhoenixOrderEvent {
         mint_address,
@@ -785,6 +853,108 @@ pub fn phoenix_cancel_orders_by_id<'info>(
     ];
 
     invoke_signed(&cancel_ix, &cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Transfer collateral between two Phoenix trader sub-accounts owned by the same executor.**
+///
+/// Moves `amount` PhUSD (6-decimal) from `srcTraderAccount` to `dstTraderAccount`.
+/// Typically used to fund an isolated sub-account from the cross sub-account
+/// before placing an isolated position.
+///
+/// `remaining_accounts` layout (8 accounts):
+/// ```
+/// [0] phoenixProgram            — readonly; validated == PHOENIX_PROGRAM_ID
+/// [1] phoenixLogAuthority       — readonly
+/// [2] globalConfiguration       — PDA ["global"]; readonly (unlike place_order)
+/// [3] srcTraderAccount          — writable (source, typically cross sub-account)
+/// [4] dstTraderAccount          — writable (destination, typically isolated sub-account)
+/// [5] perpAssetMap              — readonly (unlike place_order)
+/// [6] phoenixGlobalTraderIndex  — writable
+/// [7] phoenixActiveTraderBuffer — writable
+/// ```
+pub fn phoenix_transfer_collateral<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixTransferCollateral<'info>>,
+    mint_address: Pubkey,
+    claimant: Pubkey,
+    amount: u64
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 8, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
+
+    // transferCollateral account layout (Phoenix IDL):
+    //   0. phoenixProgram      (readonly)
+    //   1. logAuthority        (readonly)
+    //   2. globalConfiguration (readonly — not writable)
+    //   3. traderWallet        (readonly signer) ← executor PDA
+    //   4. srcTraderAccount    (writable)
+    //   5. dstTraderAccount    (writable)
+    //   6. perpAssetMap        (readonly — not writable)
+    //   7. globalTraderIndex   (writable)
+    //   8. activeTraderBuffer  (writable)
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration (readonly)
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor signs)
+        AccountMeta::new(remaining[3].key(), false), // srcTraderAccount
+        AccountMeta::new(remaining[4].key(), false), // dstTraderAccount
+        AccountMeta::new_readonly(remaining[5].key(), false), // perpAssetMap (readonly)
+        AccountMeta::new(remaining[6].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[7].key(), false) // activeTraderBuffer
+    ];
+
+    // transferCollateral data: disc(8) || amount_u64_le(8)
+    let mut ix_data = phoenix_disc("transfer_collateral").to_vec();
+    ix_data.extend_from_slice(&amount.to_le_bytes());
+
+    let transfer_ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor signs)
+        remaining[3].to_account_info(), // srcTraderAccount
+        remaining[4].to_account_info(), // dstTraderAccount
+        remaining[5].to_account_info(), // perpAssetMap
+        remaining[6].to_account_info(), // globalTraderIndex
+        remaining[7].to_account_info(), // activeTraderBuffer
+        remaining[0].to_account_info() // phoenixProgram
+    ];
+
+    invoke_signed(&transfer_ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixTransferCollateralEvent {
+        mint_address,
+        amount,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
 
     Ok(())
 }
@@ -1867,6 +2037,372 @@ pub fn phoenix_cancel_stop_loss<'info>(
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Initialize the conditional-orders collection account for the executor PDA.**
+///
+/// Creates the `traderConditionalOrders` PDA (seeds `["conditional_orders", traderAccount]`
+/// on Phoenix) that is required before calling `phoenix_place_position_conditional_order`.
+/// Safe to call multiple times — Phoenix is idempotent if the account already exists.
+///
+/// `capacity` controls how many concurrent conditional orders the account holds (default: 8).
+///
+/// `remaining_accounts` layout (6 accounts):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  phoenixLogAuthority     — readonly
+/// [2]  globalConfiguration     — readonly
+/// [3]  traderAccount           — readonly  (DynamicTrader PDA: seeds=["trader", executor, 0, 0])
+/// [4]  traderConditionalOrders — writable  (PDA: seeds=["conditional_orders", traderAccount])
+/// [5]  systemProgram           — readonly
+/// ```
+pub fn phoenix_create_conditional_orders_account<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCreateConditionalOrdersAccount<'info>>,
+    mint_address: Pubkey,
+    claimant: Pubkey,
+    capacity: u8
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 6, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
+
+    // Build instruction data: disc (8) + capacity (1) = 9 bytes
+    let disc = phoenix_disc("create_conditional_orders_account");
+    let mut data = Vec::with_capacity(9);
+    data.extend_from_slice(&disc);
+    data.push(capacity);
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // payer (relayer, writable signer)
+        AccountMeta::new_readonly(executor_key, false), // traderWallet (executor, readonly non-signer)
+        AccountMeta::new_readonly(remaining[3].key(), false), // traderAccount (readonly)
+        AccountMeta::new(remaining[4].key(), false), // traderConditionalOrders (writable)
+        AccountMeta::new_readonly(remaining[5].key(), false) // systemProgram
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.relayer.to_account_info(), // payer
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor)
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // traderConditionalOrders
+        remaining[5].to_account_info(), // systemProgram
+        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Place an atomic bracket order (SL + TP) using the new conditional-orders API.**
+///
+/// Unlike the legacy `place_stop_loss` which places each leg separately (causing
+/// `PositionSequenceInvalidated` when both SL and TP are set), this instruction
+/// calls Phoenix's `PlacePositionConditionalOrder` to place both legs **atomically**
+/// in a single instruction, avoiding any position-sequence race condition.
+///
+/// Set `has_greater = true` to include a take-profit (TP) trigger, and
+/// `has_less = true` to include a stop-loss (SL) trigger.  At least one must be set.
+/// Both trigger direction fields in the encoded payload are implied by their slot
+/// (greaterTrigger = GreaterThan=1, lessTrigger = LessThan=0).
+///
+/// `size_percent`: percentage of the current position size to close (1–100; use 100 for full).
+///
+/// `remaining_accounts` layout (11 accounts):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  phoenixLogAuthority     — readonly
+/// [2]  globalConfiguration     — readonly  (NOTE: readonly here, unlike place_stop_loss)
+/// [3]  traderAccount           — writable   (DynamicTrader PDA)
+/// [4]  perpAssetMap            — writable
+/// [5]  globalTraderIndex       — writable
+/// [6]  activeTraderBuffer      — writable
+/// [7]  orderbook               — writable
+/// [8]  splineCollection        — writable
+/// [9]  traderConditionalOrders — writable   (PDA: seeds=["conditional_orders", traderAccount])
+/// [10] systemProgram           — readonly
+/// ```
+pub fn phoenix_place_position_conditional_order<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlacePositionConditionalOrder<'info>>,
+    mint_address: Pubkey,
+    claimant: Pubkey,
+    asset_id: u32,
+    // TP (greaterTrigger) — fires when price rises above trigger
+    has_greater: bool,
+    greater_trigger_price: u64,
+    greater_execution_price: u64,
+    greater_trade_side: u8,
+    greater_order_kind: u8,
+    // SL (lessTrigger) — fires when price falls below trigger
+    has_less: bool,
+    less_trigger_price: u64,
+    less_execution_price: u64,
+    less_trade_side: u8,
+    less_order_kind: u8,
+    // Size
+    size_percent: u8
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(has_greater || has_less, PrivacyError::PhoenixInvalidAccounts); // at least one leg
+    require!(size_percent >= 1 && size_percent <= 100, PrivacyError::PhoenixInvalidAccounts);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 11, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
+
+    // Encode TriggerOrderParams: direction(1) + tradeSide(1) + orderKind(1) + triggerPrice(8) + executionPrice(8) = 19 bytes
+    let encode_trigger = |
+        direction: u8,
+        trade_side: u8,
+        order_kind: u8,
+        trigger_price: u64,
+        execution_price: u64
+    | -> Vec<u8> {
+        let mut v = Vec::with_capacity(19);
+        v.push(direction);
+        v.push(trade_side);
+        v.push(order_kind);
+        v.extend_from_slice(&trigger_price.to_le_bytes());
+        v.extend_from_slice(&execution_price.to_le_bytes());
+        v
+    };
+
+    // Build instruction data:
+    //   disc(8) + assetId(4) + greaterOption(1|20) + lessOption(1|20) + sizeBaseLots(1) + sizePercent(2)
+    let disc = phoenix_disc("place_position_conditional_order");
+    let mut data = Vec::with_capacity(55);
+    data.extend_from_slice(&disc);
+    data.extend_from_slice(&asset_id.to_le_bytes());
+
+    // greaterTriggerOrder option — GreaterThan direction = 1
+    if has_greater {
+        data.push(0x01);
+        data.extend_from_slice(
+            &encode_trigger(
+                1,
+                greater_trade_side,
+                greater_order_kind,
+                greater_trigger_price,
+                greater_execution_price
+            )
+        );
+    } else {
+        data.push(0x00);
+    }
+
+    // lessTriggerOrder option — LessThan direction = 0
+    if has_less {
+        data.push(0x01);
+        data.extend_from_slice(
+            &encode_trigger(
+                0,
+                less_trade_side,
+                less_order_kind,
+                less_trigger_price,
+                less_execution_price
+            )
+        );
+    } else {
+        data.push(0x00);
+    }
+
+    // sizeBaseLots: None (always use sizePercent)
+    data.push(0x00);
+
+    // sizePercent: Some(size_percent)
+    data.push(0x01);
+    data.push(size_percent);
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration (readonly!)
+        AccountMeta::new(ctx.accounts.relayer.key(), true), // payer (relayer, writable signer)
+        AccountMeta::new(remaining[3].key(), false), // traderAccount
+        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
+        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false), // activeTraderBuffer
+        AccountMeta::new(remaining[7].key(), false), // orderbook
+        AccountMeta::new(remaining[8].key(), false), // splineCollection
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor, readonly signer)
+        AccountMeta::new(remaining[9].key(), false), // traderConditionalOrders
+        AccountMeta::new_readonly(remaining[10].key(), false) // systemProgram
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.relayer.to_account_info(), // payer
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // perpAssetMap
+        remaining[5].to_account_info(), // globalTraderIndex
+        remaining[6].to_account_info(), // activeTraderBuffer
+        remaining[7].to_account_info(), // orderbook
+        remaining[8].to_account_info(), // splineCollection
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor, signer via PDA)
+        remaining[9].to_account_info(), // traderConditionalOrders
+        remaining[10].to_account_info(), // systemProgram
+        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixPlacePositionConditionalOrderEvent {
+        mint_address,
+        asset_id,
+        has_greater,
+        greater_trigger_price,
+        greater_execution_price,
+        has_less,
+        less_trigger_price,
+        less_execution_price,
+        size_percent,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **Cancel a conditional order by index from the conditional-orders collection.**
+///
+/// Calls Phoenix's `CancelConditionalOrder` instruction. The `conditional_order_index`
+/// is the slot index (1–191) assigned when the order was placed. Use `disable_first`
+/// and/or `disable_second` to cancel the individual legs (first = lessTrigger/SL,
+/// second = greaterTrigger/TP).
+///
+/// `remaining_accounts` layout (6 accounts):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  phoenixLogAuthority     — readonly
+/// [2]  globalConfiguration     — readonly
+/// [3]  traderAccount           — writable
+/// [4]  orderbook               — writable
+/// [5]  traderConditionalOrders — writable
+/// ```
+pub fn phoenix_cancel_conditional_order<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelConditionalOrder<'info>>,
+    mint_address: Pubkey,
+    claimant: Pubkey,
+    conditional_order_index: u8,
+    disable_first: bool,
+    disable_second: bool
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(conditional_order_index >= 1, PrivacyError::PhoenixInvalidAccounts);
+    require!(disable_first || disable_second, PrivacyError::PhoenixInvalidAccounts);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 6, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
+
+    // Build instruction data: disc(8) + conditionalOrderIndex(1) + disableFirst(1) + disableSecond(1) = 11 bytes
+    let disc = phoenix_disc("cancel_conditional_order");
+    let mut data = Vec::with_capacity(11);
+    data.extend_from_slice(&disc);
+    data.push(conditional_order_index);
+    data.push(disable_first as u8);
+    data.push(disable_second as u8);
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration
+        AccountMeta::new(remaining[3].key(), false), // traderAccount (writable)
+        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor, readonly signer)
+        AccountMeta::new(remaining[4].key(), false), // orderbook (writable)
+        AccountMeta::new(remaining[5].key(), false) // traderConditionalOrders (writable)
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        remaining[3].to_account_info(), // traderAccount
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor, signer via PDA)
+        remaining[4].to_account_info(), // orderbook
+        remaining[5].to_account_info(), // traderConditionalOrders
+        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixCancelConditionalOrderEvent {
+        mint_address,
+        conditional_order_index,
+        disable_first,
+        disable_second,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
 // ─── Events ──────────────────────────────────────────────────────────────────
 
 /// Emitted when private USDC notes are consumed and deposited into Phoenix.
@@ -1967,6 +2503,43 @@ pub struct PhoenixCancelStopLossEvent {
     pub mint_address: Pubkey,
     /// Direction cancelled: 0 = LessThan, 1 = GreaterThan
     pub execution_direction: u8,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when an atomic bracket order (SL+TP) is placed via the new conditional-orders API.
+#[event]
+pub struct PhoenixPlacePositionConditionalOrderEvent {
+    pub mint_address: Pubkey,
+    pub asset_id: u32,
+    pub has_greater: bool,
+    pub greater_trigger_price: u64,
+    pub greater_execution_price: u64,
+    pub has_less: bool,
+    pub less_trigger_price: u64,
+    pub less_execution_price: u64,
+    /// Percentage of position size to close (1–100)
+    pub size_percent: u8,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when a conditional order is cancelled from the collection.
+#[event]
+pub struct PhoenixCancelConditionalOrderEvent {
+    pub mint_address: Pubkey,
+    pub conditional_order_index: u8,
+    pub disable_first: bool,
+    pub disable_second: bool,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when collateral is transferred between Phoenix trader sub-accounts.
+#[event]
+pub struct PhoenixTransferCollateralEvent {
+    pub mint_address: Pubkey,
+    pub amount: u64,
     pub relayer: Pubkey,
     pub timestamp: i64,
 }

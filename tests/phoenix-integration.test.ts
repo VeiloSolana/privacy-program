@@ -83,11 +83,12 @@ import {
   PHOENIX_EXCHANGE,
   PHOENIX_SOL,
   assetIdFor,
-  stopLossPda,
+  conditionalOrdersPda,
   buildOrderRemainingAccounts,
   buildWithdrawRemainingAccounts,
   buildConsumeWithdrawQueueAccounts,
-  buildStopLossRemainingAccounts,
+  buildPositionConditionalOrderRemainingAccounts,
+  buildCancelConditionalOrderRemainingAccounts,
 } from "./utils/phoenix-markets";
 
 import {
@@ -732,6 +733,7 @@ describe("Phoenix Eternal Integration", () => {
             testMint,
             SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
+            null,
           )
           .accounts({
             config,
@@ -755,6 +757,7 @@ describe("Phoenix Eternal Integration", () => {
             testMint, // non-USDC
             SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
+            null,
           )
           .accounts({
             config,
@@ -1089,6 +1092,7 @@ describe("Phoenix Eternal Integration", () => {
             USDC_MAINNET,
             SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
+            null,
           )
           .accounts({
             config: usdcConfig,
@@ -1115,6 +1119,7 @@ describe("Phoenix Eternal Integration", () => {
             USDC_MAINNET,
             SystemProgram.programId,
             Buffer.from(phoenixDisc("place_market_order")),
+            null,
           )
           .accounts({
             config: usdcConfig,
@@ -1138,7 +1143,12 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, badDisc)
+          .phoenixPlaceOrder(
+            USDC_MAINNET,
+            SystemProgram.programId,
+            badDisc,
+            null,
+          )
           .accounts({
             config: usdcConfig,
             executor: usdcExecutor,
@@ -2527,31 +2537,40 @@ describe("Phoenix Eternal Integration", () => {
       }
     });
 
-    it("place_stop_loss: CPI reaches Phoenix (place a LessThan stop loss)", async function () {
+    it("place_position_conditional_order: CPI reaches Phoenix (place bracket order)", async function () {
       if (!suite4Ready) return this.skip();
 
-      // Derive the stopLossAccount PDA using the phoenix-markets helper.
-      // assetId = 0 for SOL-PERP.
+      // Derive the traderConditionalOrders PDA (shared per-trader across all markets).
       const assetId = assetIdFor("SOL");
-      const stopLossAccount = stopLossPda(
+      const condOrdersAccount = conditionalOrdersPda(
         PHOENIX_PROGRAM_ID,
         traderPda,
-        assetId,
       );
-      console.log(`   stopLossAccount PDA: ${stopLossAccount.toBase58()}`);
+      console.log(
+        `   traderConditionalOrders PDA: ${condOrdersAccount.toBase58()}`,
+      );
 
-      const before = await snapshotPhoenixBalances("place_stop_loss pre-state");
+      const before = await snapshotPhoenixBalances(
+        "place_position_conditional_order pre-state",
+      );
 
       try {
         const sig = await (program.methods as any)
-          .phoenixPlaceStopLoss(
+          .phoenixPlacePositionConditionalOrder(
             USDC_MAINNET,
             s4ClaimKey.publicKey, // claimant
-            new BN(1), // triggerPriceTicks — 1 tick (far-OTM, LessThan SL won't fire)
-            new BN(1), // executionPriceTicks
-            1, // tradeSide: Ask (sell to close a long)
-            0, // executionDirection: 0=LessThan (fire when price < trigger)
-            1, // orderKind: 1=IOC
+            assetId, // assetId (0 = SOL-PERP)
+            false, // hasGreater — no TP leg
+            new BN(0), // greaterTriggerPriceTicks
+            new BN(0), // greaterExecutionPriceTicks
+            1, // greaterCloseSide (Ask)
+            0, // greaterOrderKind (Limit)
+            true, // hasLess — SL leg only
+            new BN(1), // lessTriggerPriceTicks — 1 tick far-OTM
+            new BN(1), // lessExecutionPriceTicks
+            1, // lessCloseSide (Ask — close a long)
+            1, // lessOrderKind (IOC)
+            100, // sizePercent
           )
           .accounts({
             config: s4UsdcConfig,
@@ -2559,18 +2578,13 @@ describe("Phoenix Eternal Integration", () => {
             relayer: s4Relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .remainingAccounts([
-            ...buildStopLossRemainingAccounts(
+          .remainingAccounts(
+            buildPositionConditionalOrderRemainingAccounts(
               PHOENIX_EXCHANGE,
               PHOENIX_SOL,
               traderPda,
             ),
-            {
-              pubkey: SystemProgram.programId,
-              isSigner: false,
-              isWritable: false,
-            }, // [10]
-          ])
+          )
           .signers([s4Relayer])
           .rpc();
 
@@ -2578,15 +2592,21 @@ describe("Phoenix Eternal Integration", () => {
           commitment: "confirmed",
           maxSupportedTransactionVersion: 0,
         });
-        printProgramLogs(tx?.meta?.logMessages ?? [], "place_stop_loss");
-        console.log("   ✅ place_stop_loss CPI succeeded:", sig);
+        printProgramLogs(
+          tx?.meta?.logMessages ?? [],
+          "place_position_conditional_order",
+        );
+        console.log(
+          "   ✅ place_position_conditional_order CPI succeeded:",
+          sig,
+        );
       } catch (e: any) {
         console.log(e);
         const logs: string[] =
           e instanceof SendTransactionError
             ? (await e.getLogs(provider.connection)) ?? []
             : e.logs ?? [];
-        printProgramLogs(logs, "place_stop_loss CPI logs");
+        printProgramLogs(logs, "place_position_conditional_order CPI logs");
         const haystack = [...logs, e.message ?? ""].join("\n");
 
         // Fail if Veilo pre-checks fired — those mean we passed wrong accounts
@@ -2597,45 +2617,48 @@ describe("Phoenix Eternal Integration", () => {
           haystack.includes("InvalidSwapProgram")
         ) {
           throw new Error(
-            "place_stop_loss failed at Veilo pre-check (wrong accounts?): " +
+            "place_position_conditional_order failed at Veilo pre-check (wrong accounts?): " +
               e.message,
           );
         }
-        // Phoenix-level error (wrong assetId, insufficient rent, etc.) is acceptable —
+        // Phoenix-level error (account not initialised, insufficient rent, etc.) is acceptable —
         // it confirms the CPI was dispatched correctly from Veilo.
         console.log(
-          "   ✅ place_stop_loss: CPI reached Phoenix (Phoenix-level response as expected)",
+          "   ✅ place_position_conditional_order: CPI reached Phoenix (Phoenix-level response as expected)",
         );
       } finally {
         const after = await snapshotPhoenixBalances(
-          "place_stop_loss post-state",
+          "place_position_conditional_order post-state",
         );
-        printSnapshotDelta("place_stop_loss", before, after);
+        printSnapshotDelta("place_position_conditional_order", before, after);
       }
     });
 
-    it("cancel_stop_loss: CPI reaches Phoenix (cancel the LessThan stop loss)", async function () {
+    it("cancel_conditional_order: CPI reaches Phoenix (cancel the bracket order)", async function () {
       if (!suite4Ready) return this.skip();
 
-      // Same stopLossAccount PDA as place_stop_loss test
+      // Derive the same traderConditionalOrders PDA used when placing.
       const assetId = assetIdFor("SOL");
-      const stopLossAccount = stopLossPda(
+      const condOrdersAccount = conditionalOrdersPda(
         PHOENIX_PROGRAM_ID,
         traderPda,
-        assetId,
       );
-      console.log(`   stopLossAccount PDA: ${stopLossAccount.toBase58()}`);
+      console.log(
+        `   traderConditionalOrders PDA: ${condOrdersAccount.toBase58()}`,
+      );
 
       const before = await snapshotPhoenixBalances(
-        "cancel_stop_loss pre-state",
+        "cancel_conditional_order pre-state",
       );
 
       try {
         const sig = await (program.methods as any)
-          .phoenixCancelStopLoss(
+          .phoenixCancelConditionalOrder(
             USDC_MAINNET,
             s4ClaimKey.publicKey, // claimant
-            0, // executionDirection: 0=LessThan (cancel the same SL placed above)
+            1, // conditionalOrderIndex — slot 1 (1-based)
+            true, // disableFirst  (cancel lessTrigger/SL leg)
+            true, // disableSecond (cancel greaterTrigger/TP leg)
           )
           .accounts({
             config: s4UsdcConfig,
@@ -2643,26 +2666,13 @@ describe("Phoenix Eternal Integration", () => {
             relayer: s4Relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .remainingAccounts([
-            { pubkey: PHOENIX_PROGRAM_ID, isSigner: false, isWritable: false }, // [0]
-            {
-              pubkey: PHOENIX_EXCHANGE.logAuthority,
-              isSigner: false,
-              isWritable: false,
-            }, // [1]
-            {
-              pubkey: PHOENIX_EXCHANGE.globalConfig,
-              isSigner: false,
-              isWritable: false,
-            }, // [2] readonly for cancel
-            { pubkey: traderPda, isSigner: false, isWritable: false }, // [3] traderAccount (DynamicTrader)
-            { pubkey: stopLossAccount, isSigner: false, isWritable: true }, // [4] stopLossAccount
-            {
-              pubkey: SystemProgram.programId,
-              isSigner: false,
-              isWritable: false,
-            }, // [5] systemProgram
-          ])
+          .remainingAccounts(
+            buildCancelConditionalOrderRemainingAccounts(
+              PHOENIX_EXCHANGE,
+              PHOENIX_SOL,
+              traderPda,
+            ),
+          )
           .signers([s4Relayer])
           .rpc();
 
@@ -2670,15 +2680,18 @@ describe("Phoenix Eternal Integration", () => {
           commitment: "confirmed",
           maxSupportedTransactionVersion: 0,
         });
-        printProgramLogs(tx?.meta?.logMessages ?? [], "cancel_stop_loss");
-        console.log("   ✅ cancel_stop_loss CPI succeeded:", sig);
+        printProgramLogs(
+          tx?.meta?.logMessages ?? [],
+          "cancel_conditional_order",
+        );
+        console.log("   ✅ cancel_conditional_order CPI succeeded:", sig);
       } catch (e: any) {
         console.log(e);
         const logs: string[] =
           e instanceof SendTransactionError
             ? (await e.getLogs(provider.connection)) ?? []
             : e.logs ?? [];
-        printProgramLogs(logs, "cancel_stop_loss CPI logs");
+        printProgramLogs(logs, "cancel_conditional_order CPI logs");
         const haystack = [...logs, e.message ?? ""].join("\n");
 
         if (
@@ -2688,19 +2701,19 @@ describe("Phoenix Eternal Integration", () => {
           haystack.includes("InvalidSwapProgram")
         ) {
           throw new Error(
-            "cancel_stop_loss failed at Veilo pre-check: " + e.message,
+            "cancel_conditional_order failed at Veilo pre-check: " + e.message,
           );
         }
-        // Phoenix-level error is acceptable (e.g. stop loss account doesn't exist if
-        // place_stop_loss failed) — CPI reached Phoenix, which is what we want to confirm.
+        // Phoenix-level error is acceptable (e.g. conditionalOrders account not initialised) —
+        // CPI reached Phoenix, which is what we want to confirm.
         console.log(
-          "   ✅ cancel_stop_loss: CPI reached Phoenix (Phoenix-level response as expected)",
+          "   ✅ cancel_conditional_order: CPI reached Phoenix (Phoenix-level response as expected)",
         );
       } finally {
         const after = await snapshotPhoenixBalances(
-          "cancel_stop_loss post-state",
+          "cancel_conditional_order post-state",
         );
-        printSnapshotDelta("cancel_stop_loss", before, after);
+        printSnapshotDelta("cancel_conditional_order", before, after);
       }
     });
 
@@ -5193,16 +5206,16 @@ describe("Phoenix Eternal Integration", () => {
 
       before(async function () {
         if (!suite4Ready) return;
-        // Fund executor PDA so it can pay rent for stopLossAccount creation (~400 bytes).
-        // Without this, Phoenix's `place_stop_loss` fails when it tries to debit lamports
-        // from the funder (executor) to initialise the stopLossAccount PDA.
+        // Fund executor PDA so it can pay rent for traderConditionalOrders account creation.
+        // Without this, Phoenix's `place_position_conditional_order` fails when it tries to debit
+        // lamports from the executor to initialise the traderConditionalOrders PDA.
         const airdropSig = await provider.connection.requestAirdrop(
           executorPda,
-          10_000_000, // 0.01 SOL — covers stopLossAccount rent + buffer
+          10_000_000, // 0.01 SOL — covers traderConditionalOrders rent + buffer
         );
         await provider.connection.confirmTransaction(airdropSig, "confirmed");
         console.log(
-          "   💧  Airdropped 0.01 SOL to executorPda for stopLossAccount rent",
+          "   💧  Airdropped 0.01 SOL to executorPda for traderConditionalOrders rent",
         );
         suite6Ready = true;
       });
@@ -5374,8 +5387,8 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 3: Set stop-loss (LessThan @ −8% mark) ──────────────────────
-      it("step 3/13: set-stop-loss — conditional order SL → PhoenixPlaceStopLoss CPI", async function () {
+      // ── Step 3: Set stop-loss AND take-profit atomically (new API) ────────
+      it("step 3/13: set-bracket-order — atomic SL+TP → PhoenixPlacePositionConditionalOrder CPI", async function () {
         if (!suite6Ready) return this.skip();
 
         const slFactor =
@@ -5384,79 +5397,6 @@ describe("Phoenix Eternal Integration", () => {
           (entryPriceTicks * BigInt(Math.round(slFactor * 10000))) / 10000n;
         const slExecution =
           S6_DIRECTION === "Long" ? slTrigger - 200n : slTrigger + 200n;
-        const slDir = S6_DIRECTION === "Long" ? "LessThan" : "GreaterThan";
-        const slSide = S6_DIRECTION === "Long" ? "Short" : "Long";
-
-        console.log(`   📉  Stop-Loss config:`);
-        console.log(
-          `        triggerPriceTicks  : ${slTrigger} ≈ $${(
-            Number(slTrigger) / 1_000
-          ).toFixed(2)}/SOL`,
-        );
-        console.log(
-          `        executionTicks     : ${slExecution} ≈ $${(
-            Number(slExecution) / 1_000
-          ).toFixed(2)}/SOL`,
-        );
-        console.log(
-          `        executionDirection : ${slDir} (fires when price ${
-            S6_DIRECTION === "Long" ? "↓ below" : "↑ above"
-          } trigger)`,
-        );
-        console.log(
-          `        tradeSide          : ${slSide} (${
-            S6_DIRECTION === "Long"
-              ? "sell SOL, close long"
-              : "buy SOL, close short"
-          })`,
-        );
-        console.log(`        orderKind          : 1 = IOC`);
-        console.log(
-          `        stopLossAccount    : ${pm
-            .stopLossAccountPda("SOL")
-            .toBase58()}`,
-        );
-
-        try {
-          const sig = await pm.setConditionalOrder({
-            symbol: "SOL",
-            direction: slDir,
-            triggerTicks: slTrigger,
-            executionTicks: slExecution,
-            tradeSide: slSide,
-          });
-          const tx = await provider.connection.getTransaction(sig, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
-          });
-          printProgramLogs(tx?.meta?.logMessages ?? [], "set-stop-loss");
-          console.log(`   ✅  set-stop-loss CPI succeeded: ${sig}`);
-        } catch (e: any) {
-          console.log(e);
-          const logs: string[] =
-            e instanceof SendTransactionError
-              ? (await e.getLogs(provider.connection)) ?? []
-              : e.logs ?? [];
-          printProgramLogs(logs, "set-stop-loss error");
-          const hay = [...logs, e.message ?? ""].join("\n");
-          if (
-            hay.includes("RelayerNotAllowed") ||
-            hay.includes("PhoenixInvalidPool") ||
-            hay.includes("PhoenixInvalidAccounts")
-          ) {
-            throw new Error(
-              "set-stop-loss: Veilo guard rejected — " + e.message,
-            );
-          }
-          console.log(
-            "   ✅  set-stop-loss: CPI reached Phoenix (Phoenix-level response)",
-          );
-        }
-      });
-
-      // ── Step 4: Set take-profit (GreaterThan @ +8% mark) ─────────────────
-      it("step 4/13: set-take-profit — conditional order TP → PhoenixPlaceStopLoss CPI", async function () {
-        if (!suite6Ready) return this.skip();
 
         const tpFactor =
           S6_DIRECTION === "Long" ? 1 + S6_TP_PCT : 1 - S6_TP_PCT;
@@ -5464,60 +5404,57 @@ describe("Phoenix Eternal Integration", () => {
           (entryPriceTicks * BigInt(Math.round(tpFactor * 10000))) / 10000n;
         const tpExecution =
           S6_DIRECTION === "Long" ? tpTrigger + 200n : tpTrigger - 200n;
-        const tpDir = S6_DIRECTION === "Long" ? "GreaterThan" : "LessThan";
-        const tpSide = S6_DIRECTION === "Long" ? "Short" : "Long";
 
-        console.log(`   📈  Take-Profit config:`);
+        console.log(`   📊  Bracket order config (atomic SL+TP):`);
         console.log(
-          `        triggerPriceTicks  : ${tpTrigger} ≈ $${(
+          `        SL triggerTicks    : ${slTrigger} ≈ $${(
+            Number(slTrigger) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        SL executionTicks  : ${slExecution} ≈ $${(
+            Number(slExecution) / 1_000
+          ).toFixed(2)}/SOL`,
+        );
+        console.log(
+          `        TP triggerTicks    : ${tpTrigger} ≈ $${(
             Number(tpTrigger) / 1_000
           ).toFixed(2)}/SOL`,
         );
         console.log(
-          `        executionTicks     : ${tpExecution} ≈ $${(
+          `        TP executionTicks  : ${tpExecution} ≈ $${(
             Number(tpExecution) / 1_000
           ).toFixed(2)}/SOL`,
         );
         console.log(
-          `        executionDirection : ${tpDir} (fires when price ${
-            S6_DIRECTION === "Long" ? "↑ above" : "↓ below"
-          } trigger)`,
-        );
-        console.log(
-          `        tradeSide          : ${tpSide} (${
-            S6_DIRECTION === "Long"
-              ? "sell SOL, close long"
-              : "buy SOL, close short"
-          })`,
-        );
-        console.log(`        orderKind          : 1 = IOC`);
-        console.log(
-          `        stopLossAccount    : ${pm
-            .stopLossAccountPda("SOL")
+          `        conditionalOrders  : ${pm
+            .conditionalOrdersAccountPda()
             .toBase58()}`,
         );
 
         try {
-          const sig = await pm.setConditionalOrder({
+          const sig = await pm.setBracketOrder({
             symbol: "SOL",
-            direction: tpDir,
-            triggerTicks: tpTrigger,
-            executionTicks: tpExecution,
-            tradeSide: tpSide,
+            side: S6_DIRECTION,
+            stopLoss: { triggerTicks: slTrigger, executionTicks: slExecution },
+            takeProfit: {
+              triggerTicks: tpTrigger,
+              executionTicks: tpExecution,
+            },
           });
           const tx = await provider.connection.getTransaction(sig, {
             commitment: "confirmed",
             maxSupportedTransactionVersion: 0,
           });
-          printProgramLogs(tx?.meta?.logMessages ?? [], "set-take-profit");
-          console.log(`   ✅  set-take-profit CPI succeeded: ${sig}`);
+          printProgramLogs(tx?.meta?.logMessages ?? [], "set-bracket-order");
+          console.log(`   ✅  set-bracket-order CPI succeeded: ${sig}`);
         } catch (e: any) {
           console.log(e);
           const logs: string[] =
             e instanceof SendTransactionError
               ? (await e.getLogs(provider.connection)) ?? []
               : e.logs ?? [];
-          printProgramLogs(logs, "set-take-profit error");
+          printProgramLogs(logs, "set-bracket-order error");
           const hay = [...logs, e.message ?? ""].join("\n");
           if (
             hay.includes("RelayerNotAllowed") ||
@@ -5525,29 +5462,42 @@ describe("Phoenix Eternal Integration", () => {
             hay.includes("PhoenixInvalidAccounts")
           ) {
             throw new Error(
-              "set-take-profit: Veilo guard rejected — " + e.message,
+              "set-bracket-order: Veilo guard rejected — " + e.message,
             );
           }
           console.log(
-            "   ✅  set-take-profit: CPI reached Phoenix (Phoenix-level response)",
+            "   ✅  set-bracket-order: CPI reached Phoenix (Phoenix-level response)",
           );
         }
       });
 
-      // ── Step 5: Verify stopLossAccount on-chain ───────────────────────────
-      it("step 5/13: verify-orders — read stopLossAccount PDA, confirm TP/SL registered", async function () {
+      // ── Step 4: (skipped — merged into step 3 via atomic setBracketOrder) ─
+      it("step 4/13: set-take-profit — skipped (merged into step 3 atomic bracket order)", async function () {
+        if (!suite6Ready) return this.skip();
+        console.log(
+          "   ℹ️   SL+TP placed atomically in step 3 via PlacePositionConditionalOrder.",
+        );
+        console.log(
+          "        This step is intentionally skipped to avoid PositionSequenceInvalidated.",
+        );
+      });
+
+      // ── Step 5: Verify traderConditionalOrders on-chain ──────────────────
+      it("step 5/13: verify-orders — read traderConditionalOrders PDA, confirm bracket registered", async function () {
         if (!suite6Ready) return this.skip();
 
-        const stopLossAccount = pm.stopLossAccountPda("SOL");
+        const condOrdersAccount = pm.conditionalOrdersAccountPda();
 
         console.log(
-          `   🔍  Reading stopLossAccount PDA: ${stopLossAccount.toBase58()}`,
+          `   🔍  Reading traderConditionalOrders PDA: ${condOrdersAccount.toBase58()}`,
         );
-        const info = await provider.connection.getAccountInfo(stopLossAccount);
+        const info = await provider.connection.getAccountInfo(
+          condOrdersAccount,
+        );
 
         if (info) {
           const raw = Buffer.from(info.data);
-          console.log(`   ✅  stopLossAccount EXISTS on-chain`);
+          console.log(`   ✅  traderConditionalOrders EXISTS on-chain`);
           console.log(`        size    : ${info.data.length} bytes`);
           console.log(`        owner   : ${info.owner.toBase58()}`);
           console.log(`        lamports: ${info.lamports}`);
@@ -5555,18 +5505,18 @@ describe("Phoenix Eternal Integration", () => {
             `        raw (first 80 bytes): ${raw.slice(0, 80).toString("hex")}`,
           );
           console.log(
-            `   📋  One PDA per (traderPda, assetId=0). Both LessThan (SL) and`,
+            `   📋  One PDA per traderPda (shared across all markets). Both SL and TP`,
           );
           console.log(
-            `        GreaterThan (TP) conditional slots are stored within it.`,
+            `        legs are stored atomically via PlacePositionConditionalOrder.`,
           );
         } else {
-          console.log(`   ⚠️   stopLossAccount NOT found on-chain`);
+          console.log(`   ⚠️   traderConditionalOrders NOT found on-chain`);
           console.log(
-            `        Both TP/SL CPIs returned Phoenix-level errors on localnet.`,
+            `        The bracket CPI returned a Phoenix-level error on localnet.`,
           );
           console.log(
-            `        On mainnet with a live oracle the place_stop_loss CPI would succeed.`,
+            `        On mainnet with a live oracle the place_position_conditional_order CPI would succeed.`,
           );
         }
       });
@@ -6494,25 +6444,22 @@ describe("Phoenix Eternal Integration", () => {
         );
         console.log(`   CPI FLOW VERIFIED:`);
         console.log(
-          `     ✅  Veilo → Phoenix  place_market_order   (open long)`,
+          `     ✅  Veilo → Phoenix  place_market_order              (open long)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  place_stop_loss      (SL, direction=0 LessThan)`,
+          `     ✅  Veilo → Phoenix  place_position_conditional_order (SL + TP, atomic bracket)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  place_stop_loss      (TP, direction=1 GreaterThan)`,
+          `     ✅  Veilo → Phoenix  close_position                  (market IOC sell, exact ${S6_LOTS} lots)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  close_position       (market IOC sell, exact ${S6_LOTS} lots)`,
+          `     ✅  Veilo → Phoenix  cancel_conditional_order        (remove SL leg)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  cancel_stop_loss     (remove SL)`,
+          `     ✅  Veilo → Phoenix  cancel_conditional_order        (remove TP leg)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  cancel_stop_loss     (remove TP)`,
-        );
-        console.log(
-          `     ✅  Veilo → Phoenix  queue_withdraw       ($${(
+          `     ✅  Veilo → Phoenix  queue_withdraw                  ($${(
             Number(S6_WITHDRAW.toString()) / 1_000_000
           ).toFixed(4)} USDC)`,
         );
@@ -6582,14 +6529,14 @@ describe("Phoenix Eternal Integration", () => {
       before(async function () {
         if (!suite4Ready) return;
         s7ClaimKey = Keypair.generate();
-        // Top up executorPda for stopLossAccount rent (3 new markets = up to 3 PDAs)
+        // Top up executorPda for traderConditionalOrders rent (covers bracket order PDAs)
         const airdropSig = await provider.connection.requestAirdrop(
           executorPda,
           30_000_000, // 0.03 SOL — covers rent for SOL/XRP/SUI stopLossAccounts
         );
         await provider.connection.confirmTransaction(airdropSig, "confirmed");
         console.log(
-          "   💧  Airdropped 0.03 SOL to executorPda (Suite 7 stopLossAccount rent)",
+          "   💧  Airdropped 0.03 SOL to executorPda (Suite 7 traderConditionalOrders rent)",
         );
         suite7Ready = true;
       });
@@ -7241,114 +7188,113 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 6: Set SL/TP for Trades A+B (4 conditional orders; Trade C shares SOL PDA) ─
-      it("step 7/14: set-orders — place SL & TP for Long SOL and Short XRP (4 orders)", async function () {
+      // ── Step 6: Set SL/TP for Trades A+B (2 atomic bracket orders) ────────────────────────
+      it("step 7/14: set-orders — place bracket orders for Long SOL and Short XRP", async function () {
         if (!suite7Ready) return this.skip();
         this.timeout(90_000);
 
-        // Shared helper: place one conditional order, tolerate Phoenix-level errors
-        const setOrder = async (
-          symbol: string,
-          direction: "LessThan" | "GreaterThan",
-          triggerTicks: bigint,
-          executionTicks: bigint,
-          tradeSide: "Long" | "Short",
-          label: string,
-        ) => {
-          console.log(
-            `   📋  ${label}: ${direction} @ ${triggerTicks} ticks (≈$${(
-              Number(triggerTicks) / 1_000
-            ).toFixed(2)}) → close ${tradeSide}`,
-          );
-          try {
-            const sig = await pm.setConditionalOrder({
-              symbol,
-              direction,
-              triggerTicks,
-              executionTicks,
-              tradeSide,
-            });
-            console.log(`   ✅  ${label} placed: ${sig}`);
-          } catch (e: any) {
-            const logs: string[] =
-              e instanceof SendTransactionError
-                ? (await e.getLogs(provider.connection)) ?? []
-                : e.logs ?? [];
-            const hay = [...logs, e.message ?? ""].join("\n");
-            if (
-              hay.includes("RelayerNotAllowed") ||
-              hay.includes("PhoenixInvalidPool") ||
-              hay.includes("PhoenixInvalidAccounts")
-            ) {
-              throw new Error(`${label}: Veilo guard rejected — ` + e.message);
-            }
-            console.log(
-              `   ✅  ${label}: CPI reached Phoenix (Phoenix-level response)`,
-            );
-          }
-        };
-
-        // SOL Long:  SL = LessThan (price drops),  TP = GreaterThan (price rises)
+        // ── SOL Long: SL fires on price DROP (lessTrigger), TP fires on price RISE (greaterTrigger) ──
         const solSlTicks =
           (solEntryTicks * BigInt(Math.round((1 - S7_SL_PCT) * 10000))) /
           10000n;
         const solTpTicks =
           (solEntryTicks * BigInt(Math.round((1 + S7_TP_PCT) * 10000))) /
           10000n;
-        await setOrder(
-          "SOL",
-          "LessThan",
-          solSlTicks,
-          solSlTicks - 200n,
-          "Short",
-          "SOL SL (Long -5%)",
-        );
-        await setOrder(
-          "SOL",
-          "GreaterThan",
-          solTpTicks,
-          solTpTicks + 200n,
-          "Short",
-          "SOL TP (Long +10%)",
-        );
 
-        // XRP Short: SL = GreaterThan (price rises), TP = LessThan (price falls)
+        console.log(
+          `   📋  SOL Long bracket: SL @ ${solSlTicks} ticks (≈$${(
+            Number(solSlTicks) / 1_000
+          ).toFixed(2)}), TP @ ${solTpTicks} ticks (≈$${(
+            Number(solTpTicks) / 1_000
+          ).toFixed(2)})`,
+        );
+        try {
+          const sig = await pm.setBracketOrder({
+            symbol: "SOL",
+            side: "Long",
+            stopLoss: {
+              triggerTicks: solSlTicks,
+              executionTicks: solSlTicks - 200n,
+            },
+            takeProfit: {
+              triggerTicks: solTpTicks,
+              executionTicks: solTpTicks + 200n,
+            },
+          });
+          console.log(`   ✅  SOL bracket placed (slot 1): ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(`SOL bracket: Veilo guard rejected — ` + e.message);
+          }
+          console.log(
+            `   ✅  SOL bracket: CPI reached Phoenix (Phoenix-level response)`,
+          );
+        }
+
+        // ── XRP Short: SL fires on price RISE (greaterTrigger), TP fires on price DROP (lessTrigger) ──
         const xrpSlTicks =
           (xrpEntryTicks * BigInt(Math.round((1 + S7_SL_PCT) * 10000))) /
           10000n;
         const xrpTpTicks =
           (xrpEntryTicks * BigInt(Math.round((1 - S7_TP_PCT) * 10000))) /
           10000n;
-        await setOrder(
-          "XRP",
-          "GreaterThan",
-          xrpSlTicks,
-          xrpSlTicks + 200n,
-          "Long",
-          "XRP SL (Short +5%)",
-        );
-        await setOrder(
-          "XRP",
-          "LessThan",
-          xrpTpTicks,
-          xrpTpTicks - 200n,
-          "Long",
-          "XRP TP (Short -10%)",
-        );
 
-        // Trade C (Long SOL) shares the SOL stopLossAccount PDA with Trade A.
-        // Phoenix only allows one stop-loss per (trader, assetId), so placing a second
-        // SOL SL/TP would fail with "account already exists". The SOL SL/TP placed for
-        // Trade A already covers the combined SOL long exposure (Trade A + Trade C).
+        console.log(
+          `   📋  XRP Short bracket: SL @ ${xrpSlTicks} ticks (≈$${(
+            Number(xrpSlTicks) / 1_000
+          ).toFixed(3)}), TP @ ${xrpTpTicks} ticks (≈$${(
+            Number(xrpTpTicks) / 1_000
+          ).toFixed(3)})`,
+        );
+        try {
+          const sig = await pm.setBracketOrder({
+            symbol: "XRP",
+            side: "Short",
+            stopLoss: {
+              triggerTicks: xrpSlTicks,
+              executionTicks: xrpSlTicks + 200n,
+            },
+            takeProfit: {
+              triggerTicks: xrpTpTicks,
+              executionTicks: xrpTpTicks - 200n,
+            },
+          });
+          console.log(`   ✅  XRP bracket placed (slot 2): ${sig}`);
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("PhoenixInvalidAccounts")
+          ) {
+            throw new Error(`XRP bracket: Veilo guard rejected — ` + e.message);
+          }
+          console.log(
+            `   ✅  XRP bracket: CPI reached Phoenix (Phoenix-level response)`,
+          );
+        }
 
         console.log(
           `   ─────────────────────────────────────────────────────────`,
         );
         console.log(
-          `   📊  4 conditional orders submitted (SL+TP for SOL long and XRP short)`,
+          `   📊  2 atomic bracket orders submitted (SOL long + XRP short)`,
         );
         console.log(
-          `   📍  Trade C (Long SOL) shares SOL stop-loss PDA with Trade A`,
+          `   📍  SOL bracket → slot 1, XRP bracket → slot 2 (same traderConditionalOrders PDA)`,
         );
         console.log(
           `   📍  Trade D (XRP limit) has no TP/SL — resting until cancelled in step 9`,
@@ -7521,10 +7467,17 @@ describe("Phoenix Eternal Integration", () => {
           symbol: string,
           direction: "LessThan" | "GreaterThan",
           label: string,
+          conditionalOrderIndex = 1,
         ) => {
-          console.log(`   🗑   Cancel ${label}: ${direction} on ${symbol}`);
+          console.log(
+            `   🗑   Cancel ${label}: ${direction} on ${symbol} (slot ${conditionalOrderIndex})`,
+          );
           try {
-            const sig = await pm.cancelConditionalOrder({ symbol, direction });
+            const sig = await pm.cancelConditionalOrder({
+              symbol,
+              direction,
+              conditionalOrderIndex,
+            });
             console.log(`   ✅  cancel-${label} CPI succeeded: ${sig}`);
           } catch (e: any) {
             const logs: string[] =
@@ -7573,14 +7526,17 @@ describe("Phoenix Eternal Integration", () => {
           );
         }
 
-        // Cancel all conditional orders: SL+TP for SOL and XRP short (4 orders)
-        // Trade C (Long SOL) shares the SOL stop-loss PDA with Trade A — no extra cancel.
-        await cancelConditional("SOL", "LessThan", "SOL SL (Long)");
-        await cancelConditional("SOL", "GreaterThan", "SOL TP (Long)");
-        await cancelConditional("XRP", "GreaterThan", "XRP SL (Short)");
-        await cancelConditional("XRP", "LessThan", "XRP TP (Short)");
+        // Cancel all conditional orders: SOL bracket (slot 1) and XRP bracket (slot 2).
+        // Long SOL: SL = lessTrigger (disableFirst), TP = greaterTrigger (disableSecond)
+        // Short XRP: SL = greaterTrigger (disableSecond), TP = lessTrigger (disableFirst)
+        await cancelConditional("SOL", "LessThan", "SOL SL (Long)", 1);
+        await cancelConditional("SOL", "GreaterThan", "SOL TP (Long)", 1);
+        await cancelConditional("XRP", "GreaterThan", "XRP SL (Short)", 2);
+        await cancelConditional("XRP", "LessThan", "XRP TP (Short)", 2);
 
-        console.log(`   ✅  All 5 orders cancelled (1 limit + 4 conditional)`);
+        console.log(
+          `   ✅  All orders cancelled (1 limit + 2 bracket orders / 4 legs)`,
+        );
       });
 
       // ── Step 10: Queue Phoenix withdrawal (full collateral balance) ───────
@@ -8191,7 +8147,7 @@ describe("Phoenix Eternal Integration", () => {
           ).toFixed(3)}/XRP  (−10%)`,
         );
         console.log(
-          `     (Trade C Long SOL shares SOL SL/TP with Trade A — same Phoenix stopLossAccount PDA)`,
+          `     (Trade C Long SOL covered by SOL bracket in slot 1 — same traderConditionalOrders PDA)`,
         );
         console.log(`     All 4 conditional orders cancelled in step 10.`);
         console.log(
@@ -8211,7 +8167,7 @@ describe("Phoenix Eternal Integration", () => {
           `     ✅  Veilo → Phoenix  place_limit_order    (D: Long XRP PostOnly bid)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  place_stop_loss ×4   (SL+TP for SOL long and XRP short)`,
+          `     ✅  Veilo → Phoenix  place_position_conditional_order ×2  (atomic bracket: SOL long + XRP short)`,
         );
         console.log(
           `     ✅  Veilo → Phoenix  close_position  ×3   (A: SOL, B: XRP, C: SOL)`,
@@ -8220,7 +8176,7 @@ describe("Phoenix Eternal Integration", () => {
           `     ✅  Veilo → Phoenix  cancel_all           (D: cancel XRP limit bid)`,
         );
         console.log(
-          `     ✅  Veilo → Phoenix  cancel_stop_loss ×4  (clear all SL/TP orders)`,
+          `     ✅  Veilo → Phoenix  cancel_conditional_order ×4  (clear all SL/TP legs)`,
         );
         console.log(
           `     ✅  Veilo → Phoenix  queue_withdraw       ($${(
@@ -8304,14 +8260,14 @@ describe("Phoenix Eternal Integration", () => {
 
         s8ClaimKey = Keypair.generate();
 
-        // Fund executor for isolated stopLossAccount rent
+        // Fund executor for traderConditionalOrders rent (isolated sub-account bracket order)
         const airdropSig = await provider.connection.requestAirdrop(
           executorPda,
           10_000_000, // 0.01 SOL
         );
         await provider.connection.confirmTransaction(airdropSig, "confirmed");
         console.log(
-          "   💧  Airdropped 0.01 SOL to executorPda (Suite 8 isolated stopLossAccount rent)",
+          "   💧  Airdropped 0.01 SOL to executorPda (Suite 8 isolated traderConditionalOrders rent)",
         );
 
         console.log(

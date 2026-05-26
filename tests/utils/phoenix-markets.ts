@@ -23,7 +23,7 @@
  * (confirmed 2026-05-21, slot 421 084 972)
  */
 
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
 import type { AccountMeta } from "@solana/web3.js";
 
 // ─── Phoenix program constants ────────────────────────────────────────────────
@@ -512,6 +512,35 @@ export function buildOrderRemainingAccounts(
 }
 
 /**
+ * Build the 8 `remainingAccounts` for `phoenix_transfer_collateral` CPIs.
+ *
+ *   [0] phoenixProgram       (readonly)
+ *   [1] logAuthority         (readonly)
+ *   [2] globalConfig         (readonly — NOT writable, unlike place_order)
+ *   [3] srcTraderAccount     (writable — cross sub-account PDA)
+ *   [4] dstTraderAccount     (writable — isolated sub-account PDA)
+ *   [5] perpAssetMap         (readonly — NOT writable, unlike place_order)
+ *   [6] globalTraderIndex    (writable)
+ *   [7] activeTraderBuffer   (writable)
+ */
+export function buildTransferCollateralRemainingAccounts(
+  exchange: PhoenixExchangeAccounts,
+  srcTraderPda: PublicKey,
+  dstTraderPda: PublicKey,
+): AccountMeta[] {
+  return [
+    { pubkey: exchange.program, isSigner: false, isWritable: false },
+    { pubkey: exchange.logAuthority, isSigner: false, isWritable: false },
+    { pubkey: exchange.globalConfig, isSigner: false, isWritable: false }, // readonly
+    { pubkey: srcTraderPda, isSigner: false, isWritable: true },
+    { pubkey: dstTraderPda, isSigner: false, isWritable: true },
+    { pubkey: exchange.perpAssetMap, isSigner: false, isWritable: false }, // readonly
+    { pubkey: exchange.globalTraderIndex, isSigner: false, isWritable: true },
+    { pubkey: exchange.activeTraderBuffer, isSigner: false, isWritable: true },
+  ];
+}
+
+/**
  * Build the 9 fixed `remainingAccounts` for `phoenix_queue_withdraw` CPIs
  * (withdrawFunds instruction).
  * Append the per-call destination ATA as account [9] after this array.
@@ -595,6 +624,124 @@ export function buildStopLossRemainingAccounts(
   return [
     ...buildOrderRemainingAccounts(exchange, market, traderPda),
     { pubkey: stopLossAccount, isSigner: false, isWritable: true },
+  ];
+}
+
+/**
+ * Derive the `traderConditionalOrders` PDA for the new conditional-orders API.
+ * Seeds: ["conditional_orders", traderAccount_pubkey]
+ *
+ * @example
+ *   const pda = conditionalOrdersPda(PHOENIX_PROGRAM_ID, traderPda);
+ */
+export function conditionalOrdersPda(
+  phoenixProgramId: PublicKey,
+  traderPda: PublicKey,
+): PublicKey {
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("conditional_orders"), traderPda.toBuffer()],
+    phoenixProgramId,
+  );
+  return pda;
+}
+
+/**
+ * Build the `remainingAccounts` for `phoenix_create_conditional_orders_account` CPI:
+ *
+ *   [0] phoenixProgram          (readonly)
+ *   [1] logAuthority            (readonly)
+ *   [2] globalConfig            (readonly)
+ *   [3] traderAccount           (readonly)
+ *   [4] traderConditionalOrders (writable) ← PDA ["conditional_orders", traderPda]
+ *   [5] systemProgram           (readonly)
+ */
+export function buildCreateConditionalOrdersAccountRemainingAccounts(
+  exchange: PhoenixExchangeAccounts,
+  traderPda: PublicKey,
+): AccountMeta[] {
+  const conditionalOrdersAccount = conditionalOrdersPda(
+    exchange.program,
+    traderPda,
+  );
+  return [
+    { pubkey: exchange.program, isSigner: false, isWritable: false },
+    { pubkey: exchange.logAuthority, isSigner: false, isWritable: false },
+    { pubkey: exchange.globalConfig, isSigner: false, isWritable: false },
+    { pubkey: traderPda, isSigner: false, isWritable: false },
+    { pubkey: conditionalOrdersAccount, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+}
+
+/**
+ * Build the `remainingAccounts` for `phoenix_place_position_conditional_order` CPI.
+ * Uses the new conditional-orders API that places SL+TP atomically.
+ *
+ * NOTE: globalConfig is **readonly** here (unlike `buildStopLossRemainingAccounts`
+ *       where it is writable). This matches the PlacePositionConditionalOrder instruction.
+ *
+ *   [0] phoenixProgram          (readonly)
+ *   [1] logAuthority            (readonly)
+ *   [2] globalConfig            (readonly) ← different from place_stop_loss!
+ *   [3] traderAccount           (writable)
+ *   [4] perpAssetMap            (writable)
+ *   [5] globalTraderIndex       (writable)
+ *   [6] activeTraderBuffer      (writable)
+ *   [7] orderbook               (writable)
+ *   [8] splineCollection        (writable)
+ *   [9] traderConditionalOrders (writable) ← PDA ["conditional_orders", traderPda]
+ *  [10] systemProgram           (readonly)
+ */
+export function buildPositionConditionalOrderRemainingAccounts(
+  exchange: PhoenixExchangeAccounts,
+  market: PhoenixMarket,
+  traderPda: PublicKey,
+): AccountMeta[] {
+  const conditionalOrdersAccount = conditionalOrdersPda(
+    exchange.program,
+    traderPda,
+  );
+  return [
+    { pubkey: exchange.program, isSigner: false, isWritable: false },
+    { pubkey: exchange.logAuthority, isSigner: false, isWritable: false },
+    { pubkey: exchange.globalConfig, isSigner: false, isWritable: false }, // readonly!
+    { pubkey: traderPda, isSigner: false, isWritable: true },
+    { pubkey: exchange.perpAssetMap, isSigner: false, isWritable: true },
+    { pubkey: exchange.globalTraderIndex, isSigner: false, isWritable: true },
+    { pubkey: exchange.activeTraderBuffer, isSigner: false, isWritable: true },
+    { pubkey: market.orderbook, isSigner: false, isWritable: true },
+    { pubkey: market.splines, isSigner: false, isWritable: true },
+    { pubkey: conditionalOrdersAccount, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+}
+
+/**
+ * Build the `remainingAccounts` for `phoenix_cancel_conditional_order` CPI.
+ *
+ *   [0] phoenixProgram          (readonly)
+ *   [1] logAuthority            (readonly)
+ *   [2] globalConfig            (readonly)
+ *   [3] traderAccount           (writable)
+ *   [4] orderbook               (writable)
+ *   [5] traderConditionalOrders (writable)
+ */
+export function buildCancelConditionalOrderRemainingAccounts(
+  exchange: PhoenixExchangeAccounts,
+  market: PhoenixMarket,
+  traderPda: PublicKey,
+): AccountMeta[] {
+  const conditionalOrdersAccount = conditionalOrdersPda(
+    exchange.program,
+    traderPda,
+  );
+  return [
+    { pubkey: exchange.program, isSigner: false, isWritable: false },
+    { pubkey: exchange.logAuthority, isSigner: false, isWritable: false },
+    { pubkey: exchange.globalConfig, isSigner: false, isWritable: false },
+    { pubkey: traderPda, isSigner: false, isWritable: true },
+    { pubkey: market.orderbook, isSigner: false, isWritable: true },
+    { pubkey: conditionalOrdersAccount, isSigner: false, isWritable: true },
   ];
 }
 

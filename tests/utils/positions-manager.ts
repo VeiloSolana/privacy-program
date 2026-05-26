@@ -41,7 +41,11 @@ import {
   buildOrderRemainingAccounts,
   buildWithdrawRemainingAccounts,
   buildConsumeWithdrawQueueAccounts,
-  buildStopLossRemainingAccounts,
+  buildTransferCollateralRemainingAccounts,
+  conditionalOrdersPda,
+  buildCreateConditionalOrdersAccountRemainingAccounts,
+  buildPositionConditionalOrderRemainingAccounts,
+  buildCancelConditionalOrderRemainingAccounts,
 } from "./phoenix-markets";
 
 // ─── EMBER / PhUSD constants ──────────────────────────────────────────────────
@@ -879,6 +883,46 @@ export class PositionsManager {
   // ── Order management ────────────────────────────────────────────────────
 
   /**
+   * Transfer collateral between two Phoenix trader sub-accounts owned by this executor.
+   *
+   * @param amountPhUsd  Amount in PhUSD (6-decimal) units to transfer.
+   * @param srcTraderPda Source trader PDA (defaults to this.traderPda — cross sub-account).
+   * @param dstTraderPda Destination trader PDA (required — typically the isolated sub-account).
+   * @returns Transaction signature
+   */
+  async transferCollateral(opts: {
+    amountPhUsd: bigint;
+    srcTraderPda?: PublicKey;
+    dstTraderPda: PublicKey;
+  }): Promise<string> {
+    const srcTraderPda = opts.srcTraderPda ?? this.traderPda;
+    return this.program.methods
+      .phoenixTransferCollateral(
+        this.mint,
+        this.claimant,
+        new BN(opts.amountPhUsd.toString()),
+      )
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildTransferCollateralRemainingAccounts(
+          PHOENIX_EXCHANGE,
+          srcTraderPda,
+          opts.dstTraderPda,
+        ),
+      )
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
+      ])
+      .signers([this.relayer])
+      .rpc();
+  }
+
+  /**
    * Place a market IOC order on Phoenix Eternal.
    *
    * @param symbol      Market symbol — "SOL", "BTC", "ETH", "XRP", etc.
@@ -890,21 +934,38 @@ export class PositionsManager {
     symbol: string;
     side: OrderSide;
     numBaseLots: bigint;
+    /** If set, runs TransferCollateral (cross → isolated) atomically before the order. */
+    transfer?: { amountPhUsd: bigint; srcTraderPda: PublicKey };
   }): Promise<string> {
     const market = getMarket(opts.symbol);
     const side: 0 | 1 = opts.side === "Long" ? 0 : 1;
     const pkt = encodeIocMarketOrder(side, opts.numBaseLots);
+    const transferAmount = opts.transfer
+      ? new BN(opts.transfer.amountPhUsd.toString())
+      : null;
+    const remainingAccounts = opts.transfer
+      ? [
+          ...buildTransferCollateralRemainingAccounts(
+            PHOENIX_EXCHANGE,
+            opts.transfer.srcTraderPda,
+            this.traderPda,
+          ),
+          ...buildOrderRemainingAccounts(
+            PHOENIX_EXCHANGE,
+            market,
+            this.traderPda,
+          ),
+        ]
+      : buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda);
     return this.program.methods
-      .phoenixPlaceOrder(this.mint, this.claimant, pkt)
+      .phoenixPlaceOrder(this.mint, this.claimant, pkt, transferAmount)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
         systemProgram: SystemProgram.programId,
       })
-      .remainingAccounts(
-        buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda),
-      )
+      .remainingAccounts(remainingAccounts)
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
@@ -926,6 +987,8 @@ export class PositionsManager {
     side: OrderSide;
     priceInTicks: bigint;
     numBaseLots: bigint;
+    /** If set, runs TransferCollateral (cross → isolated) atomically before the order. */
+    transfer?: { amountPhUsd: bigint; srcTraderPda: PublicKey };
   }): Promise<string> {
     const market = getMarket(opts.symbol);
     const side: 0 | 1 = opts.side === "Long" ? 0 : 1;
@@ -934,17 +997,32 @@ export class PositionsManager {
       opts.priceInTicks,
       opts.numBaseLots,
     );
+    const transferAmount = opts.transfer
+      ? new BN(opts.transfer.amountPhUsd.toString())
+      : null;
+    const remainingAccounts = opts.transfer
+      ? [
+          ...buildTransferCollateralRemainingAccounts(
+            PHOENIX_EXCHANGE,
+            opts.transfer.srcTraderPda,
+            this.traderPda,
+          ),
+          ...buildOrderRemainingAccounts(
+            PHOENIX_EXCHANGE,
+            market,
+            this.traderPda,
+          ),
+        ]
+      : buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda);
     return this.program.methods
-      .phoenixPlaceOrder(this.mint, this.claimant, pkt)
+      .phoenixPlaceOrder(this.mint, this.claimant, pkt, transferAmount)
       .accounts({
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
         systemProgram: SystemProgram.programId,
       })
-      .remainingAccounts(
-        buildOrderRemainingAccounts(PHOENIX_EXCHANGE, market, this.traderPda),
-      )
+      .remainingAccounts(remainingAccounts)
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
@@ -989,71 +1067,6 @@ export class PositionsManager {
   }
 
   /**
-   * Place a conditional (stop-loss or take-profit) order on Phoenix.
-   *
-   * Examples:
-   *   // Stop-loss for a SOL long — fires when price drops below $140:
-   *   pm.setConditionalOrder({ symbol: "SOL", direction: "LessThan",
-   *     triggerTicks: 140_000n, executionTicks: 139_800n,
-   *     tradeSide: "Short" })
-   *
-   *   // Take-profit for a SOL long — fires when price rises above $160:
-   *   pm.setConditionalOrder({ symbol: "SOL", direction: "GreaterThan",
-   *     triggerTicks: 160_000n, executionTicks: 160_200n,
-   *     tradeSide: "Short" })
-   *
-   * @param direction      "LessThan"    = trigger fires when price < triggerTicks
-   *                       "GreaterThan" = trigger fires when price > triggerTicks
-   * @param triggerTicks   Trigger price in Phoenix ticks (SOL-PERP: 1 tick = $0.001)
-   * @param executionTicks Limit price for the triggered order (usually slightly worse)
-   * @param tradeSide      Side of the triggered order: "Long"=Bid, "Short"=Ask
-   * @param orderKind      1 = IOC (default), 2 = FillOrKill
-   */
-  async setConditionalOrder(opts: {
-    symbol: string;
-    direction: StopLossDirection;
-    triggerTicks: bigint;
-    executionTicks: bigint;
-    tradeSide: OrderSide;
-    orderKind?: number;
-  }): Promise<string> {
-    const market = getMarket(opts.symbol);
-    const directionVal: 0 | 1 = opts.direction === "LessThan" ? 0 : 1;
-    const tradeSideVal: 0 | 1 = opts.tradeSide === "Long" ? 0 : 1;
-    return this.program.methods
-      .phoenixPlaceStopLoss(
-        this.mint,
-        this.claimant,
-        new BN(opts.triggerTicks.toString()),
-        new BN(opts.executionTicks.toString()),
-        tradeSideVal,
-        directionVal,
-        opts.orderKind ?? 1,
-      )
-      .accounts({
-        config: this.poolConfig,
-        executor: this.executorPda,
-        relayer: this.relayer.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .remainingAccounts([
-        // [0..9]: stopLoss remaining accounts (includes stopLossAccount at [9])
-        ...buildStopLossRemainingAccounts(
-          PHOENIX_EXCHANGE,
-          market,
-          this.traderPda,
-        ),
-        // [10]: system program (required by the Phoenix stop-loss instruction)
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ])
-      .preInstructions([
-        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
-      ])
-      .signers([this.relayer])
-      .rpc();
-  }
-
-  /**
    * Cancel a conditional (stop-loss or take-profit) order.
    * The `direction` must match the direction used when the order was placed.
    *
@@ -1063,30 +1076,16 @@ export class PositionsManager {
   async cancelConditionalOrder(opts: {
     symbol: string;
     direction: StopLossDirection;
+    /** Conditional-order slot index (1-based). Defaults to 1 (first slot). */
+    conditionalOrderIndex?: number;
   }): Promise<string> {
-    const market = getMarket(opts.symbol);
-    const directionVal: 0 | 1 = opts.direction === "LessThan" ? 0 : 1;
-    return this.program.methods
-      .phoenixCancelStopLoss(this.mint, this.claimant, directionVal)
-      .accounts({
-        config: this.poolConfig,
-        executor: this.executorPda,
-        relayer: this.relayer.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .remainingAccounts([
-        ...buildStopLossRemainingAccounts(
-          PHOENIX_EXCHANGE,
-          market,
-          this.traderPda,
-        ),
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ])
-      .preInstructions([
-        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
-      ])
-      .signers([this.relayer])
-      .rpc();
+    // disableFirst = LessThan (SL) leg, disableSecond = GreaterThan (TP) leg.
+    return this.cancelBracketOrder({
+      symbol: opts.symbol,
+      conditionalOrderIndex: opts.conditionalOrderIndex ?? 1,
+      disableFirst: opts.direction === "LessThan",
+      disableSecond: opts.direction === "GreaterThan",
+    });
   }
 
   /**
@@ -1133,8 +1132,7 @@ export class PositionsManager {
     //   SL fires when price drops BELOW trigger → LessThan (direction 0), close with Ask (1)
     //   TP fires when price rises ABOVE trigger → GreaterThan (direction 1), close with Ask (1)
     // For a Short position the directions are reversed.
-    const slDirection: 0 | 1 = opts.side === "Long" ? 0 : 1; // LessThan : GreaterThan
-    const tpDirection: 0 | 1 = opts.side === "Long" ? 1 : 0; // GreaterThan : LessThan
+    // NOTE: direction is encoded implicitly by the greaterTrigger/lessTrigger slot in the new API.
     const closeSide: 0 | 1 = opts.side === "Long" ? 1 : 0; // Ask to close long, Bid to close short
 
     // Rise SDK StopLossOrderKind: Limit = 0 (TP default), IOC = 1 (SL default)
@@ -1147,14 +1145,6 @@ export class PositionsManager {
       relayer: this.relayer.publicKey,
       systemProgram: SystemProgram.programId,
     };
-    const slRemainingAccounts = [
-      ...buildStopLossRemainingAccounts(
-        PHOENIX_EXCHANGE,
-        market,
-        this.traderPda,
-      ),
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ];
 
     // Build instructions
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu });
@@ -1168,42 +1158,54 @@ export class PositionsManager {
 
     const ixs = [cuIx, orderIx];
 
-    if (opts.stopLoss) {
-      // SL: IOC — executionTicks must include desired slippage tolerance
-      const slIx = await this.program.methods
-        .phoenixPlaceStopLoss(
+    // Use the new atomic PlacePositionConditionalOrder if any bracket leg is requested.
+    // This avoids the PositionSequenceInvalidated bug caused by two sequential place_stop_loss calls.
+    if (opts.stopLoss || opts.takeProfit) {
+      const isLong = opts.side === "Long";
+      // Long:  TP fires when price RISES (greaterTrigger), SL when price DROPS (lessTrigger)
+      // Short: SL fires when price RISES (greaterTrigger), TP when price DROPS (lessTrigger)
+      const greaterOpt = isLong ? opts.takeProfit : opts.stopLoss;
+      const lessOpt = isLong ? opts.stopLoss : opts.takeProfit;
+      const hasGreater = !!greaterOpt;
+      const hasLess = !!lessOpt;
+      const greaterTrigger = greaterOpt?.triggerTicks ?? 0n;
+      const greaterExecution =
+        greaterOpt?.executionTicks ?? greaterOpt?.triggerTicks ?? 0n;
+      const lessTrigger = lessOpt?.triggerTicks ?? 0n;
+      const lessExecution =
+        lessOpt?.executionTicks ?? lessOpt?.triggerTicks ?? 0n;
+      const greaterOrderKind = isLong ? ORDER_KIND_LIMIT : ORDER_KIND_IOC;
+      const lessOrderKind = isLong ? ORDER_KIND_IOC : ORDER_KIND_LIMIT;
+      // Auto-create the conditionalOrders PDA if it doesn't exist yet.
+      const createIxOrNull = await this._ensureConditionalOrdersIx();
+      if (createIxOrNull) ixs.push(createIxOrNull);
+      const bracketIx = await this.program.methods
+        .phoenixPlacePositionConditionalOrder(
           this.mint,
           this.claimant,
-          new BN(opts.stopLoss.triggerTicks.toString()),
-          new BN(opts.stopLoss.executionTicks.toString()),
+          Number(market.assetId),
+          hasGreater,
+          new BN(greaterTrigger.toString()),
+          new BN(greaterExecution.toString()),
           closeSide,
-          slDirection,
-          ORDER_KIND_IOC,
+          greaterOrderKind,
+          hasLess,
+          new BN(lessTrigger.toString()),
+          new BN(lessExecution.toString()),
+          closeSide,
+          lessOrderKind,
+          100, // size_percent: close full position
         )
         .accounts(baseAccounts)
-        .remainingAccounts(slRemainingAccounts)
-        .instruction();
-      ixs.push(slIx);
-    }
-
-    if (opts.takeProfit) {
-      // TP: Limit — execution price defaults to trigger (resting limit, no slippage)
-      const tpExecution =
-        opts.takeProfit.executionTicks ?? opts.takeProfit.triggerTicks;
-      const tpIx = await this.program.methods
-        .phoenixPlaceStopLoss(
-          this.mint,
-          this.claimant,
-          new BN(opts.takeProfit.triggerTicks.toString()),
-          new BN(tpExecution.toString()),
-          closeSide,
-          tpDirection,
-          ORDER_KIND_LIMIT,
+        .remainingAccounts(
+          buildPositionConditionalOrderRemainingAccounts(
+            PHOENIX_EXCHANGE,
+            market,
+            this.traderPda,
+          ),
         )
-        .accounts(baseAccounts)
-        .remainingAccounts(slRemainingAccounts)
         .instruction();
-      ixs.push(tpIx);
+      ixs.push(bracketIx);
     }
 
     const conn: Connection = (this.program.provider as any).connection;
@@ -1398,5 +1400,206 @@ export class PositionsManager {
   stopLossAccountPda(symbol: string): PublicKey {
     const market = getMarket(symbol);
     return stopLossPda(PHOENIX_PROGRAM_ID, this.traderPda, market.assetId);
+  }
+
+  /**
+   * Derive the conditional-orders collection PDA for this executor's trader account.
+   * Seeds: ["conditional_orders", traderPda]
+   */
+  conditionalOrdersAccountPda(): PublicKey {
+    return conditionalOrdersPda(PHOENIX_PROGRAM_ID, this.traderPda);
+  }
+
+  /**
+   * Create the conditional-orders collection account for this executor (one-time init).
+   * Must be called before `setBracketOrder` / `phoenix_place_position_conditional_order`.
+   * Idempotent — safe to call again if the account already exists.
+   *
+   * @param capacity Maximum concurrent conditional orders (default: 8)
+   */
+  async initConditionalOrdersAccount(capacity = 8): Promise<string> {
+    return this.program.methods
+      .phoenixCreateConditionalOrdersAccount(this.mint, this.claimant, capacity)
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildCreateConditionalOrdersAccountRemainingAccounts(
+          PHOENIX_EXCHANGE,
+          this.traderPda,
+        ),
+      )
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
+      ])
+      .signers([this.relayer])
+      .rpc();
+  }
+
+  /**
+   * Build the `create_conditional_orders_account` instruction if the PDA doesn't
+   * exist yet. Returns `null` if the account is already initialized.
+   * Used by `setBracketOrder` and `placeOrderWithBracket` to auto-init transparently.
+   */
+  private async _ensureConditionalOrdersIx(): Promise<
+    import("@solana/web3.js").TransactionInstruction | null
+  > {
+    const conn: Connection = (this.program.provider as any).connection;
+    const condOrdersAcct = this.conditionalOrdersAccountPda();
+    const acctInfo = await conn.getAccountInfo(condOrdersAcct);
+    if (acctInfo) return null;
+    return this.program.methods
+      .phoenixCreateConditionalOrdersAccount(this.mint, this.claimant, 8)
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildCreateConditionalOrdersAccountRemainingAccounts(
+          PHOENIX_EXCHANGE,
+          this.traderPda,
+        ),
+      )
+      .instruction();
+  }
+
+  /**
+   * Atomically place a bracket order (SL and/or TP) using the new
+   * `PlacePositionConditionalOrder` instruction.
+   *
+   * Unlike `setConditionalOrder` (legacy `place_stop_loss`), this places both legs
+   * atomically and does NOT increment `positionSeqNum` twice, which caused
+   * `PositionSequenceInvalidated` on mainnet when both SL and TP were set.
+   *
+   * The `traderConditionalOrders` account is created automatically the first time
+   * if it doesn't already exist (transparent to the caller).
+   *
+   * @param symbol         Market symbol (e.g. "SOL")
+   * @param side           Position side — determines which leg is SL vs TP
+   * @param stopLoss       SL leg — `executionTicks` required (set worse for slippage)
+   * @param takeProfit     TP leg — `executionTicks` defaults to `triggerTicks` (limit)
+   * @param sizePercent    Percentage of position to close (1–100, default 100)
+   */
+  async setBracketOrder(opts: {
+    symbol: string;
+    side: OrderSide;
+    stopLoss?: { triggerTicks: bigint; executionTicks: bigint };
+    takeProfit?: { triggerTicks: bigint; executionTicks?: bigint };
+    sizePercent?: number;
+  }): Promise<string> {
+    const market = getMarket(opts.symbol);
+    const isLong = opts.side === "Long";
+    const closeSide: 0 | 1 = isLong ? 1 : 0; // Ask to close long, Bid to close short
+    const ORDER_KIND_LIMIT = 0;
+    const ORDER_KIND_IOC = 1;
+    const sizePercent = opts.sizePercent ?? 100;
+
+    // Long:  TP fires when price RISES (greaterTrigger), SL when price DROPS (lessTrigger)
+    // Short: SL fires when price RISES (greaterTrigger), TP when price DROPS (lessTrigger)
+    const greaterOpt = isLong ? opts.takeProfit : opts.stopLoss;
+    const lessOpt = isLong ? opts.stopLoss : opts.takeProfit;
+    const hasGreater = !!greaterOpt;
+    const hasLess = !!lessOpt;
+    const greaterTrigger = greaterOpt?.triggerTicks ?? 0n;
+    const greaterExecution =
+      greaterOpt?.executionTicks ?? greaterOpt?.triggerTicks ?? 0n;
+    const lessTrigger = lessOpt?.triggerTicks ?? 0n;
+    const lessExecution =
+      lessOpt?.executionTicks ?? lessOpt?.triggerTicks ?? 0n;
+    // Long TP = limit (price favourable), Long SL = IOC (market out fast)
+    // Short SL = IOC (price is rising — exit fast), Short TP = limit
+    const greaterOrderKind = isLong ? ORDER_KIND_LIMIT : ORDER_KIND_IOC;
+    const lessOrderKind = isLong ? ORDER_KIND_IOC : ORDER_KIND_LIMIT;
+
+    // Auto-create the conditionalOrders PDA if this is the first bracket order for this executor.
+    const createIxOrNull = await this._ensureConditionalOrdersIx();
+    const preInstructions = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
+      ...(createIxOrNull ? [createIxOrNull] : []),
+    ];
+
+    return this.program.methods
+      .phoenixPlacePositionConditionalOrder(
+        this.mint,
+        this.claimant,
+        Number(market.assetId),
+        hasGreater,
+        new BN(greaterTrigger.toString()),
+        new BN(greaterExecution.toString()),
+        closeSide,
+        greaterOrderKind,
+        hasLess,
+        new BN(lessTrigger.toString()),
+        new BN(lessExecution.toString()),
+        closeSide,
+        lessOrderKind,
+        sizePercent,
+      )
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildPositionConditionalOrderRemainingAccounts(
+          PHOENIX_EXCHANGE,
+          market,
+          this.traderPda,
+        ),
+      )
+      .preInstructions(preInstructions)
+      .signers([this.relayer])
+      .rpc();
+  }
+
+  /**
+   * Cancel a conditional order from the collection by slot index.
+   *
+   * @param symbol                 Market symbol
+   * @param conditionalOrderIndex  Slot index (1–191) returned at placement
+   * @param disableFirst           Cancel the SL (lessTrigger) leg
+   * @param disableSecond          Cancel the TP (greaterTrigger) leg
+   */
+  async cancelBracketOrder(opts: {
+    symbol: string;
+    conditionalOrderIndex: number;
+    disableFirst?: boolean;
+    disableSecond?: boolean;
+  }): Promise<string> {
+    const market = getMarket(opts.symbol);
+    const disableFirst = opts.disableFirst ?? true;
+    const disableSecond = opts.disableSecond ?? true;
+    return this.program.methods
+      .phoenixCancelConditionalOrder(
+        this.mint,
+        this.claimant,
+        opts.conditionalOrderIndex,
+        disableFirst,
+        disableSecond,
+      )
+      .accounts({
+        config: this.poolConfig,
+        executor: this.executorPda,
+        relayer: this.relayer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        buildCancelConditionalOrderRemainingAccounts(
+          PHOENIX_EXCHANGE,
+          market,
+          this.traderPda,
+        ),
+      )
+      .preInstructions([
+        ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
+      ])
+      .signers([this.relayer])
+      .rpc();
   }
 }
