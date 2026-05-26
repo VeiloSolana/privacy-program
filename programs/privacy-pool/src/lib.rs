@@ -30,9 +30,9 @@ pub const MAX_RELAYERS: usize = 16;
 /// and reduce congestion on single tree updates
 pub const MAX_MERKLE_TREES: u16 = 10000;
 
-/// Maximum withdrawal fee basis points: 100 = 1%
+/// Maximum withdrawal fee basis points: 500 = 5%
 /// Withdrawal fees are kept low to ensure users can always exit the pool affordably
-pub const MAX_FEE_BPS: u16 = 100;
+pub const MAX_FEE_BPS: u16 = 500;
 
 /// Maximum swap fee basis points: 1000 = 10%
 pub const MAX_SWAP_FEE_BPS: u16 = 1000;
