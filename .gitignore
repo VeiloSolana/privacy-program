@@ -67,3 +67,4 @@ zk/
 circuits/
 fixtures/
 claimant.ts
+test-output.txt

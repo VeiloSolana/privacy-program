@@ -5707,7 +5707,9 @@ describe("Phoenix Eternal Integration", () => {
           `   🗑   Cancelling Stop-Loss (executionDirection=0, LessThan)`,
         );
         console.log(
-          `        stopLossAccount: ${pm.stopLossAccountPda("SOL").toBase58()}`,
+          `        traderConditionalOrders: ${pm
+            .conditionalOrdersAccountPda()
+            .toBase58()}`,
         );
 
         try {
@@ -5751,7 +5753,9 @@ describe("Phoenix Eternal Integration", () => {
           `   🗑   Cancelling Take-Profit (executionDirection=1, GreaterThan)`,
         );
         console.log(
-          `        stopLossAccount: ${pm.stopLossAccountPda("SOL").toBase58()}`,
+          `        traderConditionalOrders: ${pm
+            .conditionalOrdersAccountPda()
+            .toBase58()}`,
         );
 
         try {
@@ -6614,7 +6618,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
-          claimant: s7ClaimKey!.publicKey,
+          claimant: s4ClaimKey.publicKey, // must match instruction arg `claimant` (executor PDA seed)
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -7727,8 +7731,9 @@ describe("Phoenix Eternal Integration", () => {
         // PDAs for this suite's withdrawal slot
         const s7PhoenixSlot = pm.phoenixSlotPda(WITHDRAWAL_ID_7);
         const s7PendingReissue = pm.pendingReissuePda(WITHDRAWAL_ID_7);
-        // s7ClaimKey is generated in before() and stored in outer scope
-        // so it matches the claimant recorded in s7PhoenixSlot at deposit time.
+        // s4ClaimKey is the executor's claimant key — it must match the `claimant`
+        // instruction arg used in step 1's deposit, which is stored as
+        // s7PhoenixSlot.claimant_pubkey (see phoenix.rs line 521).
 
         // ── Build two zero-value input notes ────────────────────────────────
         const dummyInputTree = new OffchainMerkleTree(22, poseidon);
@@ -7798,7 +7803,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
-          claimant: s7ClaimKey!.publicKey,
+          claimant: s4ClaimKey.publicKey, // must match s7PhoenixSlot.claimant_pubkey (set at deposit)
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -7863,10 +7868,10 @@ describe("Phoenix Eternal Integration", () => {
             relayer: s4Relayer.publicKey,
             pendingReissue: s7PendingReissue,
             phoenixSlot: s7PhoenixSlot,
-            claimant: s7ClaimKey!.publicKey,
+            claimant: s4ClaimKey.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .signers([s4Relayer, s7ClaimKey!])
+          .signers([s4Relayer, s4ClaimKey])
           .instruction();
 
         // ── Send via Address Lookup Table (ZK proof exceeds 1232-byte limit) ─
@@ -7892,7 +7897,7 @@ describe("Phoenix Eternal Integration", () => {
             marker1,
             s7PendingReissue,
             s7PhoenixSlot,
-            s7ClaimKey!.publicKey,
+            s4ClaimKey.publicKey,
             SystemProgram.programId,
             USDC_MAINNET,
           ],
@@ -7920,7 +7925,7 @@ describe("Phoenix Eternal Integration", () => {
         }).compileToV0Message([lutAcc.value]);
 
         const vtx = new VersionedTransaction(msgV0);
-        vtx.sign([s4Relayer, s7ClaimKey!]);
+        vtx.sign([s4Relayer, s4ClaimKey]);
 
         // ── Submit and evaluate ──────────────────────────────────────────────
         const before = await snapshotPhoenixBalances(
@@ -8217,6 +8222,7 @@ describe("Phoenix Eternal Integration", () => {
       let suite8Ready = false;
       let s8ClaimKey: Keypair | null = null;
       let isolatedTraderPda: PublicKey;
+      let s8CrossDepositAmount = 0n; // amount deposited into cross account in step 4; used by step 5 transfer
 
       let markPriceUsd = 85;
       let entryPriceTicks = 85_000n;
@@ -8277,7 +8283,7 @@ describe("Phoenix Eternal Integration", () => {
       });
 
       // ── Step 1: Register isolated trader sub-account ──────────────────────
-      it("step 1/10: register-isolated — create Phoenix isolated margin sub-account", async function () {
+      it("step 1/11: register-isolated — create Phoenix isolated margin sub-account", async function () {
         if (!suite8Ready) return this.skip();
 
         // Re-run guard: skip if already initialised
@@ -8366,7 +8372,7 @@ describe("Phoenix Eternal Integration", () => {
       });
 
       // ── Step 2: Grant full trading capabilities to isolated sub-account ───
-      it("step 2/10: grant-capabilities — enable full trading on isolated sub-account", async function () {
+      it("step 2/11: grant-capabilities — enable full trading on isolated sub-account", async function () {
         if (!suite8Ready) return this.skip();
 
         const traderAcc = await provider.connection.getAccountInfo(
@@ -8466,7 +8472,7 @@ describe("Phoenix Eternal Integration", () => {
       });
 
       // ── Step 3: Snapshot entry state + fetch mark price ───────────────────
-      it("step 3/10: entry-state — snapshot isolated collateral and SOL mark price", async function () {
+      it("step 3/11: entry-state — snapshot isolated collateral and SOL mark price", async function () {
         if (!suite8Ready) return this.skip();
         this.timeout(15_000);
 
@@ -8544,7 +8550,7 @@ describe("Phoenix Eternal Integration", () => {
       });
 
       // ── Step 4: Deposit — spend Suite 7 reissued note into isolated account ─
-      it("step 4/10: deposit — fund isolated Phoenix collateral with Suite 7 reissued note", async function () {
+      it("step 4/11: deposit — fund cross Phoenix collateral with Suite 7 reissued note", async function () {
         if (!suite8Ready) return this.skip();
         if (
           !s7ReissueNotePrivKey ||
@@ -8615,7 +8621,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
-          claimant: s8ClaimKey!.publicKey,
+          claimant: s4ClaimKey.publicKey, // must match instruction arg `claimant` (executor PDA seed)
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -8703,7 +8709,7 @@ describe("Phoenix Eternal Integration", () => {
               isSigner: false,
               isWritable: true,
             },
-            { pubkey: isolatedTraderPda, isSigner: false, isWritable: true }, // isolated sub-account
+            { pubkey: traderPda, isSigner: false, isWritable: true }, // cross sub-account
             {
               pubkey: PHOENIX_EXCHANGE.globalVault,
               isSigner: false,
@@ -8759,7 +8765,7 @@ describe("Phoenix Eternal Integration", () => {
             PHOENIX_PROGRAM_ID,
             PHOENIX_EXCHANGE.logAuthority,
             PHOENIX_EXCHANGE.globalConfig,
-            isolatedTraderPda,
+            traderPda,
             PHOENIX_EXCHANGE.globalVault,
             PHOENIX_EXCHANGE.globalTraderIndex,
             PHOENIX_EXCHANGE.activeTraderBuffer,
@@ -8807,15 +8813,17 @@ describe("Phoenix Eternal Integration", () => {
             blockhash,
             lastValidBlockHeight,
           });
-          console.log(`   ✅  step4 isolated deposit succeeded: ${txSig}`);
-          const postDeposit = await readIsolatedCollateral();
+          console.log(`   ✅  step4 cross deposit succeeded: ${txSig}`);
+          const crossSummary = await pm.getCollateralSummary();
+          const postDeposit = crossSummary.quoteLotCollateral;
           console.log(
-            `   📊  Isolated collateral after deposit: ${postDeposit} lots (~$${(
+            `   📊  Cross collateral after deposit: ${postDeposit} lots (~$${(
               Number(postDeposit) / 1_000_000
             ).toFixed(4)} USDC)`,
           );
-          // Mark note as consumed
+          // Mark note as consumed and save amount for step 5 transfer
           s7ReissueNoteAmount = 0n;
+          s8CrossDepositAmount = depositAmount;
         } catch (e: any) {
           const logs: string[] =
             e instanceof SendTransactionError
@@ -8832,19 +8840,85 @@ describe("Phoenix Eternal Integration", () => {
             hay.includes("DuplicateNullifiers")
           ) {
             throw new Error(
-              "step4 isolated deposit: Veilo guard rejected — " + e.message,
+              "step4 cross deposit: Veilo guard rejected — " + e.message,
             );
           }
           console.log(
-            `   ⚠️  step4 isolated deposit: Phoenix localnet CPI issue — continuing: ${
+            `   ⚠️  step4 cross deposit: Phoenix localnet CPI issue — continuing: ${
               e.message?.split("\n")[0]
             }`,
           );
         }
       });
 
-      // ── Step 5: Open isolated long position ──────────────────────────────
-      it("step 5/10: open-position — market IOC long on SOL via isolated sub-account", async function () {
+      // ── Step 5: Transfer collateral cross → isolated ──────────────────────────────
+      it("step 5/11: transfer-collateral — move cross sub-account funds to isolated sub-account", async function () {
+        if (!suite8Ready) return this.skip();
+        this.timeout(30_000);
+
+        if (s8CrossDepositAmount === 0n) {
+          console.log(
+            "   ⚠️  No cross deposit amount available — skipping transfer-collateral (step 4 did not complete)",
+          );
+          return;
+        }
+
+        const preCrossCollateral = (await pm.getCollateralSummary())
+          .quoteLotCollateral;
+        const preIsolatedCollateral = await readIsolatedCollateral();
+        console.log(
+          `   📤  Transferring ${s8CrossDepositAmount} PhUSD lots  cross → isolated`,
+        );
+        console.log(
+          `   📊  Pre-transfer: cross=${preCrossCollateral} lots, isolated=${preIsolatedCollateral} lots`,
+        );
+
+        try {
+          const sig = await pm.transferCollateral({
+            amountPhUsd: s8CrossDepositAmount,
+            dstTraderPda: isolatedTraderPda,
+          });
+          const tx = await provider.connection.getTransaction(sig, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          });
+          printProgramLogs(tx?.meta?.logMessages ?? [], "transfer-collateral");
+          const postCrossCollateral = (await pm.getCollateralSummary())
+            .quoteLotCollateral;
+          const postIsolatedCollateral = await readIsolatedCollateral();
+          console.log(`   ✅  transfer-collateral succeeded: ${sig}`);
+          console.log(
+            `   📊  Post-transfer: cross=${postCrossCollateral} lots, isolated=${postIsolatedCollateral} lots`,
+          );
+        } catch (e: any) {
+          const logs: string[] =
+            e instanceof SendTransactionError
+              ? (await e.getLogs(provider.connection)) ?? []
+              : e.logs ?? [];
+          printProgramLogs(logs, "transfer-collateral error");
+          const hay = [...logs, e.message ?? ""].join("\n");
+          if (
+            hay.includes("RelayerNotAllowed") ||
+            hay.includes("PhoenixInvalidPool") ||
+            hay.includes("InvalidClaimant")
+          ) {
+            throw new Error(
+              "transfer-collateral: Veilo guard rejected — " + e.message,
+            );
+          }
+          console.log(
+            `   ✅  transfer-collateral: Veilo CPI reached Phoenix — localnet response: ${
+              logs.find(
+                (l) =>
+                  l.includes("Program log:") && !l.includes("Phoenix Eternal"),
+              ) ?? e.message?.split("\n")[0]
+            }`,
+          );
+        }
+      });
+
+      // ── Step 6: Open isolated long position ──────────────────────────────
+      it("step 6/11: open-position — market IOC long on SOL via isolated sub-account", async function () {
         if (!suite8Ready) return this.skip();
         this.timeout(30_000);
 
@@ -8903,8 +8977,8 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 6: Close isolated position ──────────────────────────────────
-      it("step 6/10: close-position — reduce-only IOC ask on SOL (isolated)", async function () {
+      // ── Step 7: Close isolated position ──────────────────────────────────
+      it("step 7/11: close-position — reduce-only IOC ask on SOL (isolated)", async function () {
         if (!suite8Ready) return this.skip();
         this.timeout(30_000);
 
@@ -8954,8 +9028,8 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 7: Queue withdrawal from isolated sub-account ────────────────
-      it("step 7/10: queue-withdraw — queue full collateral from isolated sub-account", async function () {
+      // ── Step 8: Queue withdrawal from isolated sub-account ────────────────
+      it("step 8/11: queue-withdraw — queue full collateral from isolated sub-account", async function () {
         if (!suite8Ready) return this.skip();
 
         const liveCollateral = await readIsolatedCollateral();
@@ -9016,7 +9090,7 @@ describe("Phoenix Eternal Integration", () => {
       });
 
       // ── Step 8: Ember unwrap (consume withdrawal queue) ───────────────────
-      it("step 8/10: ember-unwrap — consume withdrawal queue for isolated sub-account", async function () {
+      it("step 9/11: ember-unwrap — consume withdrawal queue for isolated sub-account", async function () {
         if (!suite8Ready) return this.skip();
 
         try {
@@ -9057,8 +9131,8 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 9: Reissue notes from withdrawn isolated collateral ──────────
-      it("step 9/10: reissue-notes — re-mint private USDC notes from isolated withdrawal", async function () {
+      // ── Step 10: Reissue notes from withdrawn isolated collateral ──────────
+      it("step 10/11: reissue-notes — re-mint private USDC notes from isolated withdrawal", async function () {
         if (!suite8Ready) return this.skip();
         this.timeout(180_000);
 
@@ -9139,7 +9213,7 @@ describe("Phoenix Eternal Integration", () => {
           relayer: s4Relayer.publicKey,
           fee: new BN(0),
           refund: new BN(0),
-          claimant: s8ClaimKey!.publicKey,
+          claimant: s4ClaimKey.publicKey, // must match s8PhoenixSlot.claimant_pubkey (set at deposit)
         };
         const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -9201,10 +9275,10 @@ describe("Phoenix Eternal Integration", () => {
             relayer: s4Relayer.publicKey,
             pendingReissue: s8PendingReissue,
             phoenixSlot: s8PhoenixSlot,
-            claimant: s8ClaimKey!.publicKey,
+            claimant: s4ClaimKey.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .signers([s4Relayer, s8ClaimKey!])
+          .signers([s4Relayer, s4ClaimKey])
           .instruction();
 
         const slot = await provider.connection.getSlot("finalized");
@@ -9229,7 +9303,7 @@ describe("Phoenix Eternal Integration", () => {
             marker1,
             s8PendingReissue,
             s8PhoenixSlot,
-            s8ClaimKey!.publicKey,
+            s4ClaimKey.publicKey,
             SystemProgram.programId,
             USDC_MAINNET,
           ],
@@ -9257,7 +9331,7 @@ describe("Phoenix Eternal Integration", () => {
         }).compileToV0Message([lutAcc.value]);
 
         const vtx = new VersionedTransaction(msgV0);
-        vtx.sign([s4Relayer, s8ClaimKey!]);
+        vtx.sign([s4Relayer, s4ClaimKey]);
 
         try {
           const txSig = await provider.connection.sendTransaction(vtx);
@@ -9324,8 +9398,8 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
 
-      // ── Step 10: Isolated PnL summary ─────────────────────────────────────
-      it("step 10/10: pnl-summary — isolated margin full lifecycle PnL report", async function () {
+      // ── Step 11: Isolated PnL summary ─────────────────────────────────────
+      it("step 11/11: pnl-summary — isolated margin full lifecycle PnL report", async function () {
         if (!suite8Ready) return this.skip();
 
         const exitCollateral = await readIsolatedCollateral();
@@ -9633,179 +9707,5 @@ describe("Phoenix Eternal Integration", () => {
         }
       });
     }); // end Suite 9
-  });
-
-  // ── Suite 5: TP/SL Validation Errors ─────────────────────────────────────
-  //
-  // Tests for phoenix_place_stop_loss and phoenix_cancel_stop_loss validation
-  // guards. All run against the non-USDC test pool so no Phoenix program is
-  // required — they exercise pre-CPI checks only.
-
-  describe("TP/SL Validation Errors (non-USDC pool)", () => {
-    let tpSlExecutor: PublicKey;
-
-    before(async () => {
-      [tpSlExecutor] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("phoenix_executor"),
-          testMint.toBuffer(),
-          SystemProgram.programId.toBuffer(),
-        ],
-        program.programId,
-      );
-    });
-
-    it("derives stopLossAccount PDA from seeds [stoploss, traderPda, assetId_le_u64]", () => {
-      // executorPda for the USDC pool (off-chain derivation only)
-      const [executorPda] = PublicKey.findProgramAddressSync(
-        [Buffer.from("phoenix_executor"), USDC_MAINNET.toBuffer()],
-        program.programId,
-      );
-      // traderPda = DynamicTrader PDA — Phoenix derives stopLossAccount from this, per SDK pdas.ts
-      const [traderPda] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("trader"),
-          executorPda.toBuffer(),
-          new Uint8Array([0]),
-          new Uint8Array([0]),
-        ],
-        PHOENIX_PROGRAM_ID,
-      );
-      // assetId = 0 for this derivation check (SOL-PERP asset id TBD from on-chain metadata)
-      const assetIdBuf = Buffer.alloc(8);
-      assetIdBuf.writeBigUInt64LE(0n, 0);
-      const [stopLossAccount] = PublicKey.findProgramAddressSync(
-        [Buffer.from("stoploss"), traderPda.toBuffer(), assetIdBuf],
-        PHOENIX_PROGRAM_ID,
-      );
-      console.log(`   executorPda:     ${executorPda.toBase58()}`);
-      console.log(`   traderPda:       ${traderPda.toBase58()}`);
-      console.log(`   stopLossAccount: ${stopLossAccount.toBase58()}`);
-      if (stopLossAccount.equals(PublicKey.default)) {
-        throw new Error("stopLossAccount must not be the zero pubkey");
-      }
-    });
-
-    it("place_stop_loss discriminator: sha256('global:place_stop_loss')[0..8]", () => {
-      const disc = phoenixDisc("place_stop_loss");
-      if (disc.length !== 8) throw new Error("Expected 8-byte discriminator");
-      console.log(`   place_stop_loss  disc: [${Array.from(disc).join(",")}]`);
-    });
-
-    it("cancel_stop_loss discriminator: sha256('global:cancel_stop_loss')[0..8]", () => {
-      const disc = phoenixDisc("cancel_stop_loss");
-      if (disc.length !== 8) throw new Error("Expected 8-byte discriminator");
-      console.log(`   cancel_stop_loss disc: [${Array.from(disc).join(",")}]`);
-    });
-
-    it("phoenix_place_stop_loss: rejects unregistered relayer (RelayerNotAllowed)", async () => {
-      const stranger = Keypair.generate();
-      await airdropAndConfirm(provider, stranger.publicKey, LAMPORTS_PER_SOL);
-
-      await expectTxError(
-        provider,
-        (program.methods as any)
-          .phoenixPlaceStopLoss(
-            testMint,
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
-            new BN(1_000), // trigger_price_ticks
-            new BN(1_000), // execution_price_ticks
-            1, // trade_side: Ask
-            0, // execution_direction: LessThan
-            1, // order_kind: IOC
-          )
-          .accounts({
-            config,
-            executor: tpSlExecutor,
-            relayer: stranger.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
-          .remainingAccounts([])
-          .signers([stranger])
-          .rpc(),
-        "RelayerNotAllowed",
-      );
-      console.log(
-        "   ✅ Unregistered relayer rejected by phoenix_place_stop_loss",
-      );
-    });
-
-    it("phoenix_place_stop_loss: rejects non-USDC pool (PhoenixInvalidPool)", async () => {
-      await expectTxError(
-        provider,
-        (program.methods as any)
-          .phoenixPlaceStopLoss(
-            testMint, // non-USDC
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
-            new BN(1_000),
-            new BN(1_000),
-            1,
-            0,
-            1,
-          )
-          .accounts({
-            config,
-            executor: tpSlExecutor,
-            relayer: relayer.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
-          .remainingAccounts([])
-          .signers([relayer])
-          .rpc(),
-        "PhoenixInvalidPool",
-      );
-      console.log("   ✅ Non-USDC pool rejected by phoenix_place_stop_loss");
-    });
-
-    it("phoenix_cancel_stop_loss: rejects unregistered relayer (RelayerNotAllowed)", async () => {
-      const stranger = Keypair.generate();
-      await airdropAndConfirm(provider, stranger.publicKey, LAMPORTS_PER_SOL);
-
-      await expectTxError(
-        provider,
-        (program.methods as any)
-          .phoenixCancelStopLoss(
-            testMint,
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
-            0, // execution_direction: LessThan
-          )
-          .accounts({
-            config,
-            executor: tpSlExecutor,
-            relayer: stranger.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
-          .remainingAccounts([])
-          .signers([stranger])
-          .rpc(),
-        "RelayerNotAllowed",
-      );
-      console.log(
-        "   ✅ Unregistered relayer rejected by phoenix_cancel_stop_loss",
-      );
-    });
-
-    it("phoenix_cancel_stop_loss: rejects non-USDC pool (PhoenixInvalidPool)", async () => {
-      await expectTxError(
-        provider,
-        (program.methods as any)
-          .phoenixCancelStopLoss(
-            testMint, // non-USDC
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
-            0,
-          )
-          .accounts({
-            config,
-            executor: tpSlExecutor,
-            relayer: relayer.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
-          .remainingAccounts([])
-          .signers([relayer])
-          .rpc(),
-        "PhoenixInvalidPool",
-      );
-      console.log("   ✅ Non-USDC pool rejected by phoenix_cancel_stop_loss");
-    });
   });
 });

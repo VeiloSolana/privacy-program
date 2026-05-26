@@ -1834,211 +1834,6 @@ pub fn phoenix_reissue_notes(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **Place a native Phoenix stop-loss / take-profit conditional order.**
-///
-/// Calls Phoenix's `place_stop_loss` instruction on behalf of the executor PDA.
-/// The relayer pays rent for the new `stopLossAccount`; the executor PDA signs only
-/// as `positionAuthority` (it carries Anchor data and cannot be used as a System
-/// Program transfer source).
-///
-/// Prices must be expressed in Phoenix ticks (not USD).
-///
-/// `remaining_accounts` layout (11 accounts, single-element arena arrays):
-/// ```text
-/// [0]  phoenixProgram          — readonly
-/// [1]  phoenixLogAuthority     — readonly
-/// [2]  globalConfiguration     — writable
-/// [3]  traderAccount           — writable  (executor's Phoenix trader PDA)
-/// [4]  perpAssetMap            — writable
-/// [5]  globalTraderIndex       — writable
-/// [6]  activeTraderBuffer      — writable
-/// [7]  orderbook               — writable
-/// [8]  splineCollection        — writable
-/// [9]  stopLossAccount         — writable  (PDA: seeds=["stoploss", traderAccount, asset_id_le_u64])
-/// [10] systemProgram           — readonly
-/// ```
-pub fn phoenix_place_stop_loss<'info>(
-    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceStopLoss<'info>>,
-    mint_address: Pubkey,
-    claimant: Pubkey,
-    trigger_price_ticks: u64,
-    execution_price_ticks: u64,
-    trade_side: u8,
-    execution_direction: u8,
-    order_kind: u8
-) -> Result<()> {
-    let cfg = &ctx.accounts.config;
-
-    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
-    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
-
-    let remaining = ctx.remaining_accounts;
-    require!(remaining.len() >= 11, PrivacyError::PhoenixInvalidAccounts);
-    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
-
-    let executor_key = ctx.accounts.executor.key();
-    let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[
-        b"phoenix_executor",
-        mint_address.as_ref(),
-        claimant.as_ref(),
-        &[executor_bump],
-    ];
-
-    // Build instruction data:
-    //   disc (8) + trigger_price (8) + execution_price (8) + trade_size (8=0)
-    //   + trade_side (1) + execution_direction (1) + order_kind (1) = 35 bytes
-    let disc = phoenix_disc("place_stop_loss");
-    let mut data = Vec::with_capacity(35);
-    data.extend_from_slice(&disc);
-    data.extend_from_slice(&trigger_price_ticks.to_le_bytes());
-    data.extend_from_slice(&execution_price_ticks.to_le_bytes());
-    data.extend_from_slice(&(0u64).to_le_bytes()); // tradeSize — always 0 (full position)
-    data.push(trade_side);
-    data.push(execution_direction);
-    data.push(order_kind);
-
-    let account_metas = vec![
-        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
-        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
-        AccountMeta::new(remaining[2].key(), false), // globalConfiguration
-        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer, writable signer — executor has data so cannot pay rent)
-        AccountMeta::new(remaining[3].key(), false), // traderAccount
-        AccountMeta::new(remaining[4].key(), false), // perpAssetMap
-        AccountMeta::new(remaining[5].key(), false), // globalTraderIndex
-        AccountMeta::new(remaining[6].key(), false), // activeTraderBuffer
-        AccountMeta::new(remaining[7].key(), false), // orderbook
-        AccountMeta::new(remaining[8].key(), false), // splineCollection
-        AccountMeta::new_readonly(executor_key, true), // positionAuthority (executor, readonly signer)
-        AccountMeta::new(remaining[9].key(), false), // stopLossAccount
-        AccountMeta::new_readonly(remaining[10].key(), false) // systemProgram
-    ];
-
-    let ix = Instruction {
-        program_id: PHOENIX_PROGRAM_ID,
-        accounts: account_metas,
-        data,
-    };
-
-    let cpi_infos = vec![
-        remaining[1].to_account_info(), // logAuthority
-        remaining[2].to_account_info(), // globalConfiguration
-        ctx.accounts.relayer.to_account_info(), // funder (relayer pays rent for stopLossAccount)
-        remaining[3].to_account_info(), // traderAccount
-        remaining[4].to_account_info(), // perpAssetMap
-        remaining[5].to_account_info(), // globalTraderIndex
-        remaining[6].to_account_info(), // activeTraderBuffer
-        remaining[7].to_account_info(), // orderbook
-        remaining[8].to_account_info(), // splineCollection
-        ctx.accounts.executor.to_account_info(), // positionAuthority (executor)
-        remaining[9].to_account_info(), // stopLossAccount
-        remaining[10].to_account_info(), // systemProgram
-        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
-    ];
-
-    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
-
-    emit!(PhoenixPlaceStopLossEvent {
-        mint_address,
-        trigger_price_ticks,
-        execution_price_ticks,
-        trade_side,
-        execution_direction,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// **Cancel a native Phoenix stop-loss / take-profit conditional order.**
-///
-/// Calls Phoenix's `cancel_stop_loss` instruction on behalf of the executor PDA.
-/// The executor PDA signs as both `funder` (writable) and `traderWallet` (readonly signer).
-///
-/// `remaining_accounts` layout (6 accounts):
-/// ```text
-/// [0]  phoenixProgram          — readonly
-/// [1]  phoenixLogAuthority     — readonly
-/// [2]  globalConfiguration     — readonly  (note: readonly for cancel, unlike place)
-/// [3]  traderAccount           — readonly  (DynamicTrader PDA: seeds=["trader", executor, 0, 0])
-/// [4]  stopLossAccount         — writable  (PDA: seeds=["stoploss", traderAccount, asset_id_le_u64])
-/// [5]  systemProgram           — readonly
-/// ```
-pub fn phoenix_cancel_stop_loss<'info>(
-    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixCancelStopLoss<'info>>,
-    mint_address: Pubkey,
-    claimant: Pubkey,
-    execution_direction: u8
-) -> Result<()> {
-    let cfg = &ctx.accounts.config;
-
-    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
-    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
-
-    let remaining = ctx.remaining_accounts;
-    require!(remaining.len() >= 6, PrivacyError::PhoenixInvalidAccounts);
-    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
-
-    let executor_key = ctx.accounts.executor.key();
-    let executor_bump = ctx.bumps.executor;
-    let executor_seeds: &[&[u8]] = &[
-        b"phoenix_executor",
-        mint_address.as_ref(),
-        claimant.as_ref(),
-        &[executor_bump],
-    ];
-
-    // Build instruction data: disc (8) + execution_direction (1) = 9 bytes
-    let disc = phoenix_disc("cancel_stop_loss");
-    let mut data = Vec::with_capacity(9);
-    data.extend_from_slice(&disc);
-    data.push(execution_direction);
-
-    let account_metas = vec![
-        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
-        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
-        AccountMeta::new_readonly(remaining[2].key(), false), // globalConfiguration (readonly for cancel)
-        AccountMeta::new(ctx.accounts.relayer.key(), true), // funder (relayer — must match who paid rent at place)
-        AccountMeta::new_readonly(remaining[3].key(), false), // traderAccount (DynamicTrader, readonly)
-        AccountMeta::new_readonly(executor_key, true), // traderWallet (executor, readonly signer)
-        AccountMeta::new(remaining[4].key(), false), // stopLossAccount (writable)
-        AccountMeta::new_readonly(remaining[5].key(), false) // systemProgram
-    ];
-
-    let ix = Instruction {
-        program_id: PHOENIX_PROGRAM_ID,
-        accounts: account_metas,
-        data,
-    };
-
-    let cpi_infos = vec![
-        remaining[1].to_account_info(), // logAuthority
-        remaining[2].to_account_info(), // globalConfiguration
-        ctx.accounts.relayer.to_account_info(), // funder (relayer — receives returned rent)
-        remaining[3].to_account_info(), // traderAccount (DynamicTrader)
-        ctx.accounts.executor.to_account_info(), // traderWallet (executor, position authority)
-        remaining[4].to_account_info(), // stopLossAccount
-        remaining[5].to_account_info(), // systemProgram
-        remaining[0].to_account_info() // phoenixProgram (last = program invoked)
-    ];
-
-    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
-
-    emit!(PhoenixCancelStopLossEvent {
-        mint_address,
-        execution_direction,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// **Initialize the conditional-orders collection account for the executor PDA.**
 ///
 /// Creates the `traderConditionalOrders` PDA (seeds `["conditional_orders", traderAccount]`
@@ -2123,7 +1918,7 @@ pub fn phoenix_create_conditional_orders_account<'info>(
 
 /// **Place an atomic bracket order (SL + TP) using the new conditional-orders API.**
 ///
-/// Unlike the legacy `place_stop_loss` which places each leg separately (causing
+/// Unlike the old two-call approach which places each leg separately (causing
 /// `PositionSequenceInvalidated` when both SL and TP are set), this instruction
 /// calls Phoenix's `PlacePositionConditionalOrder` to place both legs **atomically**
 /// in a single instruction, avoiding any position-sequence race condition.
@@ -2139,7 +1934,7 @@ pub fn phoenix_create_conditional_orders_account<'info>(
 /// ```text
 /// [0]  phoenixProgram          — readonly
 /// [1]  phoenixLogAuthority     — readonly
-/// [2]  globalConfiguration     — readonly  (NOTE: readonly here, unlike place_stop_loss)
+/// [2]  globalConfiguration     — readonly
 /// [3]  traderAccount           — writable   (DynamicTrader PDA)
 /// [4]  perpAssetMap            — writable
 /// [5]  globalTraderIndex       — writable
@@ -2478,32 +2273,6 @@ pub struct PhoenixReissueEvent {
     pub amount: u64,
     /// Token mint (always PHOENIX_REQUIRED_MINT)
     pub mint_address: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a stop-loss / take-profit order is placed on Phoenix.
-#[event]
-pub struct PhoenixPlaceStopLossEvent {
-    pub mint_address: Pubkey,
-    /// Trigger price in Phoenix ticks
-    pub trigger_price_ticks: u64,
-    /// Execution price in Phoenix ticks
-    pub execution_price_ticks: u64,
-    /// Closing order side: 0 = Bid, 1 = Ask
-    pub trade_side: u8,
-    /// Direction: 0 = LessThan (long SL / short TP), 1 = GreaterThan (long TP / short SL)
-    pub execution_direction: u8,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a stop-loss / take-profit order is cancelled on Phoenix.
-#[event]
-pub struct PhoenixCancelStopLossEvent {
-    pub mint_address: Pubkey,
-    /// Direction cancelled: 0 = LessThan, 1 = GreaterThan
-    pub execution_direction: u8,
-    pub relayer: Pubkey,
     pub timestamp: i64,
 }
 

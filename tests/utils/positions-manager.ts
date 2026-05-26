@@ -37,7 +37,6 @@ import {
   PHOENIX_EXCHANGE,
   getMarket,
   getMarketByAssetId,
-  stopLossPda,
   buildOrderRemainingAccounts,
   buildWithdrawRemainingAccounts,
   buildConsumeWithdrawQueueAccounts,
@@ -1393,14 +1392,6 @@ export class PositionsManager {
     );
   }
 
-  /**
-   * Derive the stop-loss account PDA for a market on the Phoenix program.
-   * Shorthand for `stopLossPda(PHOENIX_PROGRAM_ID, traderPda, assetId)`.
-   */
-  stopLossAccountPda(symbol: string): PublicKey {
-    const market = getMarket(symbol);
-    return stopLossPda(PHOENIX_PROGRAM_ID, this.traderPda, market.assetId);
-  }
 
   /**
    * Derive the conditional-orders collection PDA for this executor's trader account.

@@ -1178,48 +1178,6 @@ pub struct PhoenixTransferCollateral<'info> {
     // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_transfer_collateral
 }
 
-/// Place a Phoenix native stop-loss / take-profit conditional order.
-/// The executor PDA signs as both funder and positionAuthority.
-/// Phoenix accounts supplied via remaining_accounts.
-#[derive(Accounts)]
-#[instruction(mint_address: Pubkey, claimant: Pubkey)]
-pub struct PhoenixPlaceStopLoss<'info> {
-    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Box<Account<'info, PrivacyConfig>>,
-
-    /// Executor PDA — signs as positionAuthority in the Phoenix CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
-    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
-    pub executor: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub relayer: Signer<'info>,
-
-    pub system_program: Program<'info, System>,
-    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_place_stop_loss
-}
-
-/// Cancel a Phoenix native stop-loss / take-profit conditional order.
-/// The executor PDA signs as both funder and traderWallet.
-/// Phoenix accounts supplied via remaining_accounts.
-#[derive(Accounts)]
-#[instruction(mint_address: Pubkey, claimant: Pubkey)]
-pub struct PhoenixCancelStopLoss<'info> {
-    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
-    pub config: Box<Account<'info, PrivacyConfig>>,
-
-    /// Executor PDA — signs as traderWallet (positionAuthority) in the Phoenix cancel CPI.
-    /// CHECK: Validated as seeds=[b"phoenix_executor", mint_address, claimant]; address only.
-    #[account(mut, seeds = [b"phoenix_executor", mint_address.as_ref(), claimant.as_ref()], bump)]
-    pub executor: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub relayer: Signer<'info>,
-
-    pub system_program: Program<'info, System>,
-    // Phoenix accounts supplied via remaining_accounts — see phoenix::phoenix_cancel_stop_loss
-}
-
 /// Initialize the conditional-orders collection account for the executor PDA.
 /// The relayer pays rent. Phoenix accounts supplied via remaining_accounts.
 #[derive(Accounts)]
@@ -2295,51 +2253,6 @@ pub mod privacy_pool {
         amount: u64
     ) -> Result<()> {
         phoenix::phoenix_transfer_collateral(ctx, mint_address, claimant, amount)
-    }
-
-    /// **Place a Phoenix native stop-loss / take-profit conditional order.**
-    ///
-    /// `execution_direction`: 0 = LessThan (fires when price falls below trigger — long SL / short TP),
-    /// 1 = GreaterThan (fires when price rises above trigger — long TP / short SL).
-    /// Prices are in Phoenix ticks. `trade_side`: 0 = Bid, 1 = Ask. `order_kind`: 1 = IOC.
-    ///
-    /// See `phoenix::phoenix_place_stop_loss` for full documentation.
-    #[inline(never)]
-    pub fn phoenix_place_stop_loss<'info>(
-        ctx: Context<'_, '_, 'info, 'info, PhoenixPlaceStopLoss<'info>>,
-        mint_address: Pubkey,
-        claimant: Pubkey,
-        trigger_price_ticks: u64,
-        execution_price_ticks: u64,
-        trade_side: u8,
-        execution_direction: u8,
-        order_kind: u8
-    ) -> Result<()> {
-        phoenix::phoenix_place_stop_loss(
-            ctx,
-            mint_address,
-            claimant,
-            trigger_price_ticks,
-            execution_price_ticks,
-            trade_side,
-            execution_direction,
-            order_kind
-        )
-    }
-
-    /// **Cancel a Phoenix native stop-loss / take-profit conditional order.**
-    ///
-    /// `execution_direction`: 0 = LessThan, 1 = GreaterThan — selects which leg to cancel.
-    ///
-    /// See `phoenix::phoenix_cancel_stop_loss` for full documentation.
-    #[inline(never)]
-    pub fn phoenix_cancel_stop_loss<'info>(
-        ctx: Context<'_, '_, 'info, 'info, PhoenixCancelStopLoss<'info>>,
-        mint_address: Pubkey,
-        claimant: Pubkey,
-        execution_direction: u8
-    ) -> Result<()> {
-        phoenix::phoenix_cancel_stop_loss(ctx, mint_address, claimant, execution_direction)
     }
 
     /// **Initialize the conditional-orders collection account for the executor PDA.**
