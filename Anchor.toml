@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:phoenix"
+test = "npm run test:position"
 
 [test]
 startup_wait = 60000
@@ -70,6 +70,7 @@ address = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 [[test.validator.clone]]
 address = "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"
 
+
 [[test.validator.clone]]
 address = "Ff68JGeEiUEF859B2xEaPX82vuFeuwxqoxGNHTZPAuKR"
 
@@ -103,252 +104,189 @@ address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
 [[test.validator.clone]]
 address = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
 
-# ── Phoenix Eternal ──────────────────────────────────────────────────────────
+# ── Position pool tokens ─────────────────────────────────────────────────────────
 [[test.validator.clone]]
-address = "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"   # Phoenix Eternal program
+address = "ACpzkGJV3DDU8HXy8yjab7RL9qNmDGym2GwLkzNppump"   # Meme token mint (pump.fun SPL)
 
-[[test.validator.account]]
-address = "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"   # Phoenix global configuration PDA ["global"] (modified: riskAuthority = test wallet)
-filename = "tests/fixtures/phoenix-global-config.json"
-
-[[test.validator.clone]]
-address = "2nHGAaEw3D5dd4hVueaUNoygkQFmoeKqRQWnSPqSMFUC"   # Phoenix perpAssetMap (global)
-
-[[test.validator.clone]]
-address = "HCrPXLByGqRh2szQi3gj7oRdRVBNi1gccAyn4CQCT3HK"   # Phoenix globalTraderIndex
-
-[[test.validator.clone]]
-address = "2U32rSzzrQS3eVmGHsnbw5kcqKF3wQXpHGd3hMq5YJok"   # Phoenix activeTraderBuffer
-
-[[test.validator.clone]]
-address = "71Si24E4uc3oCaPbPZTozC1ptSNNqygjjebxSmErSsC2"   # Phoenix SOL-PERP market orderbook
-
-[[test.validator.clone]]
-address = "EVhkquLbfm5rDRXtZu9FoyDSXX5mYq2EYU6yD8zfKEqM"   # Phoenix SOL-PERP splines
-
-[[test.validator.clone]]
-address = "AXFz1MuzMUBHi5UKJuK3FDCQ73o3rSzubGU2mPr4LLU7"   # Phoenix BTC-PERP market orderbook (kept for Suite 6)
-
-[[test.validator.clone]]
-address = "Dh9NrYjzzdvcYgFSbrkATQ1rPkPjDovXWnFVhfWmD2ZF"   # Phoenix BTC-PERP splines (kept for Suite 6)
-
-[[test.validator.clone]]
-address = "9u7aqptdRFbsnnoHtjK13E5JkeM14EW5fAKTRPidVF88"   # Phoenix ETH-PERP market orderbook (kept for Suite 6)
-
-[[test.validator.clone]]
-address = "DN7uE4FBSs9Uy6V3GNvAbTdUMufY1hBkdy3JV1UfYdg"   # Phoenix ETH-PERP splines (kept for Suite 6)
-
-[[test.validator.clone]]
-address = "CwaHtR69D287PLnoX8zzzk1zqwNQKVJiJQTNs6JrVyna"   # Phoenix XRP-PERP market orderbook (Suite 7)
-
-[[test.validator.clone]]
-address = "DTX3dsRdJfx2bUWWKgGAKv3UGfRFHB2NGX7a5DmG81Em"   # Phoenix XRP-PERP splines (Suite 7)
-
 [[test.validator.clone]]
-address = "GQS3qn9EjKYpqoLwpvPVbeW9o1bjFYhc1SRMZYw4iNru"   # Phoenix SUI-PERP market orderbook (Suite 7)
+address = "Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8"   # xStock token mint (Token-2022)
 
+# ── Position pool DEX programs (USDC↔xStock 1-hop routes) ────────────────────────
+# USDC→xStock: Byreal 1-hop  |  xStock→USDC: Byreal 1-hop  |  SOL→USDC: BisonFi 1-hop
 [[test.validator.clone]]
-address = "7PNzQtPd1EjVEs9ixAqPb9ynRcNiK27tJ8qpTwjJYYme"   # Phoenix SUI-PERP splines (Suite 7)
+address = "REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2"   # Byreal program
 
 [[test.validator.clone]]
-address = "csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu"    # Phoenix globalVault (PhUSD token account)
+address = "SCoRcH8c2dpjvcJD6FiPbCSQyQgu3PcUAWj2Xxx3mqn"   # Scorch program
 
 [[test.validator.clone]]
-address = "3c3NTwpg7yW91FxijkHBXwVH1xUifun3Z8TC5eW5Si3K"   # Phoenix withdrawQueue
+address = "ojh19ojaKduoJZuaJADhcVGp4xt1TcdAvZmpVsCorch"   # Scorch program (alt)
 
 [[test.validator.clone]]
-address = "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A"   # Phoenix canonicalMint (PhUSD token mint)
+address = "BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi"   # BisonFi program
 
+# Byreal USDC↔xStock pool accounts
 [[test.validator.clone]]
-address = "GPgADQrhzGoUgLqxsZMKvSpwcLaJFVTq6gEixKhmcwpm"   # Phoenix rootAuthority
+address = "G37RVgCrjfeUttKfPB6ivQVAhwMQNUA1xPojfjomkqPu"
 
 [[test.validator.clone]]
-address = "8wTcJdg4Xw3wnvmBu7Sokn3c2UnnHUhuB5g9sfeCMidR"   # Phoenix riskAuthority / marketAuthority / oracleAuthority
+address = "LVcDubF4BFsEw8qmxupmw74bbZfiya99kor5c3Hh24r"
 
 [[test.validator.clone]]
-address = "pDCif8ciTpF9KNUnLWq78i8cRpb9LVbNJqBUwefi4TC"   # Phoenix adlAuthority
+address = "HC6tghmJ9WNHi75PN7WsJip7UEimouaD4JezzajSU8nd"
 
 [[test.validator.clone]]
-address = "DKkunAPfdJAf7vuQrh6gvY5tF9JMXFJKev7CGtUffdkp"   # Phoenix cancelAuthority
+address = "2UbS3CBQpxYxq9FnCoC9RMu5MHZ4c4BNfF9ymBbMsVfy"
 
 [[test.validator.clone]]
-address = "GF1sYSqqt2v7sKojPejdGrm4rWZBKCFpP4sFznu4yMF1"   # Phoenix backstopAuthority
+address = "F5RXMszfuqrfBBVdZ15UYuTj2dWkTP8mbagLTXffBPed"
 
 [[test.validator.clone]]
-address = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"
+address = "6GYNR3NikNtTw53VTSqrwPo8zyPP7MqnhNb6zEGAxTor"
 
 [[test.validator.clone]]
-address = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"
+address = "5d45QMCiYZmSDZNecwu9x6BktjQj4nr3ibL123s9QAdu"
 
 [[test.validator.clone]]
-address = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"
+address = "Ezo6sY7eAYTMhs3kUP3cRUsAF6haxnfW1CeSvpXeb3u5"
 
+# Scorch xStock↔USDC pool accounts
 [[test.validator.clone]]
-address = "HmiHHzq4Fym9e1D4qzLS6LDDM3tNsCTBPDWHTLZ763jY"
+address = "EHcege7dok1iYs7SxL2XzDPvhg6XzMVcx2V5SkMUurJP"
 
 [[test.validator.clone]]
-address = "CZza3Ej4Mc58MnxWA385itCC9jCo3L1D7zc3LKy1bZMR"
+address = "4qJGGCmc2EuZFEY5N9mYK52pVLPnFNjAeDkzYYkARDVC"
 
 [[test.validator.clone]]
-address = "DQyrAcCrDXQ7NeoqGgDCZwBvWDcYmFCjSb9JtteuvPpz"
+address = "34WpFzQ1WE2nDLLEKJuvCXxapL7ak6CigJS8Ks5NDo5K"
 
 [[test.validator.clone]]
-address = "HLmqeL62xR1QoZ1HKKbXRrdN1p3phKpxRMb2VVopvBBz"
+address = "HLixVmXdBqzP1sXT9au4BHcvUjDgx5ev16cEJdd9tUSM"
 
 [[test.validator.clone]]
-address = "8BnEgHoWFysVcuFFX7QztDmzuH8r5ZFvyP3sYwn1XTh6"
+address = "CUmkAhoMJKKkKzb9cELye6fBsLMhLM2B85W8qYxhk6Nd"
 
 [[test.validator.clone]]
-address = "5jWUncPNBMZJ3sTHKmMLszypVkoRK6bfEQMQUHweeQnh"
+address = "DmocjvFXp75asezCDKVNH2qaXbjrV7VeQk4aLZaPF88E"
 
 [[test.validator.clone]]
-address = "EaXdHx7x3mdGA38j5RSmKYSXMzAFzzUXCLNBEDXDn1d5"
+address = "ESnmANEpQdBexSBSDL3LPNSxKbiA2jWTkm6SDP7xrt3V"
 
-[[test.validator.clone]]
-address = "8CvwxZ9Db6XbLD46NZwwmVDZZRDy7eydFcAGkXKh9axa"
-
-[[test.validator.clone]]
-address = "CKxTHwM9fPMRRvZmFnFoqKNd9pQR21c5Aq9bh5h9oghX"
-
-[[test.validator.clone]]
-address = "6A5NHCj1yF6urc9wZNe6Bcjj4LVszQNj5DwAWG97yzMu"
-
-[[test.validator.clone]]
-address = "7XawhbbxtsRcQA8KTkHT9f9nc6d69UwqCDh6U5EEbEmX"
-
-[[test.validator.clone]]
-address = "3oWQRLewGsUMA2pebcpGPPGrzyRNfbs7fQEMUxPAGgff"
-
-[[test.validator.clone]]
-address = "9x4knb3nuNAzxsV7YFuGLgnYqKArGemY54r2vFExM1dp"
-
-[[test.validator.clone]]
-address = "876Z9waBygfzUrwwKFfnRcc7cfY4EQf6Kz1w7GRgbVYW"
-
-[[test.validator.clone]]
-address = "CB86HtaqpXbNWbq67L18y5x2RhqoJ6smb7xHUcyWdQAQ"
-
-[[test.validator.clone]]
-address = "2AdaV97p6SfkuMQJdu8DHhBhmJe7oWdvbm52MJfYQmfA"
-
-[[test.validator.clone]]
-address = "F4LnU7SarP7nLmGPnDHxnCqZ8gRwiFRgbo5seifyicfo"
-
-[[test.validator.clone]]
-address = "BKgZNz8tqJFoZ9gEHKR6k33wBMeXKAaSWpW5zMhSRhr3"
+# Byreal global / shared accounts (used by all Byreal routes)
 
-[[test.validator.clone]]
-address = "9zw6ztEpHfcKccahzTKgPkQNYhJMPwL4iJJc8BAztNYY"
 
+# Byreal CLMM tick-array bands (±3 arrays around current price for both pools).
+# CLMM tick arrays drift with price; cloning a band keeps the swap routable across runs.
+# SOL↔USDC pool (9GTj99g9):
 [[test.validator.clone]]
-address = "4zVFCGJVQhSvsJ625qTH4WKgvfPQpNpAVUfjpgCxbKh8"
+address = "BfyC67kpUH8iuJsKtzF5pHEoU8NqbFxPkLtXHjEcRGXY"
 
 [[test.validator.clone]]
-address = "9aoqhYjXBqWsTVCEjwtxrotx6sVPGVLmbpVSpSRzTv54"
+address = "3Rqyhhf4fHzMr8n3znWQdAuC8M7LHjs6TxsFQwD3Yxy7"
 
 [[test.validator.clone]]
-address = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+address = "B497Fods3pKkCMTjUqCwRWnJP5ZDDFaXFaokNZJEzb4k"
 
 [[test.validator.clone]]
-address = "5Qtn7FFKmVH4Brx3V1cR8E4mot2V3eSmvFRBpmKjNy35"
+address = "JAwS52DPJu7bB1Kbpkio2z68ShMJMZEoPhAp4WsqBQ28"
 
 [[test.validator.clone]]
-address = "Acwf28DzuSVX6eYVWMNuPaD5378twu17NafazqF5PH89"
+address = "DdJR6NsW8nRJBpFM9aJUS4Uj7HSKoMJXyeZ4vaMLgDHS"
 
+# USDC↔xStock pool (LVcDubF4):
 [[test.validator.clone]]
-address = "BegAFgvdVAkdvZv6G8tTjpuGxd1m6TagyBR26APSt5su"
+address = "FZkhmBnVpLg79u1JZZMG9724y23kukvGdfNx3SA65vdf"
 
 [[test.validator.clone]]
-address = "6YZhHwBtcZee8gUWP9Q5UAo45ZTWq4fbmcuzZavDCTqr"
+address = "Akoiq29JTXxCh6SDaeVwpzfWqzNrzF5CJLHmx7TEC1Rc"
 
 [[test.validator.clone]]
-address = "GbW9b9kPYZJSfgk1VzkdZ8qymGHpnpTSjYUtk7fa1pKr"
+address = "5LYS6fvSi2MjenHbZXZu2DAd3mUPuwfn1yoghgXevsxt"
 
 [[test.validator.clone]]
-address = "73Wb3iipqsS3Na1wQmv76sQ6LFKojKF6mXUKgU42HG3Y"
+address = "9ZUDLrmXAUdw5GgyUpcyxxWwGZmPgFLEhSZLNWn2SwVt"
 
+# Byreal SOL↔USDC pool accounts (for SOL→USDC funding swap)
 [[test.validator.clone]]
-address = "HNM57UFT38WnKLYBQwFp2Mnm8GHriqZ891Eqe86GMvYu"
+address = "9GTj99g9tbz9U6UYDsX6YeRTgUnkYG6GTnHv3qLa5aXq"
 
-[[test.validator.clone]]
-address = "GXeHADffqCk4ziHW4eeKv1rk3E2ruJ13C6L8k8DP1D27"
 
 [[test.validator.clone]]
-address = "C4GnNz9hVznyC2KX7YNGSwKwCTUU5Ho1LYp3FXhptxui"
+address = "4E6xP73xzTs4aCvY92hbXRwWkYptNwvViPZmLcZEBUk4"
 
 [[test.validator.clone]]
-address = "A3gx7w2p9miYq2wEUtqyCbViBQe8Fm6CJpsBjNP8t1fW"
+address = "5BzogZvHNEuwstR4iwTWdd7jknFBZqJQWVjxPsDfEUD6"
 
 [[test.validator.clone]]
-address = "6hcq3n5hFhwVVLXL7gZTybeYVBck4U8HmjCepJtmcGbN"
+address = "HL8turx8hJEEPVH4ivxzxwfdxVA1PH3LeYbSmh3hYfzz"
 
 [[test.validator.clone]]
-address = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"
+address = "3T6qNbQqWYDfSTew1ifsNedtoeDP8LRuCegmUH27ykEZ"
 
 [[test.validator.clone]]
-address = "FaDoeere161VKUFqcrQEM8it6kSCHKrLyq7wWyPvBkPq"
+address = "GuDQwyNv6g6jtZg13VNcDnK9mb6q8pTj534BDehqvtzF"
 
 [[test.validator.clone]]
-address = "3U9HB8KNHXmAmiGMbDsj6fBxzM63dfX5JbaYs5oTHbtu"
+address = "AWW7hxp3gnnsYor9kNrgsXtqbibwCtSFnHSDGuFGweEa"
 
-# ── EMBER Protocol + PhUSD ──────────────────────────────────────────────────────
 [[test.validator.clone]]
-address = "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy"   # EMBER program (USDC ↔ PhUSD 1:1 wrapper)
+address = "GRceETgvtkDEMsucAjjqKcYsMcigCJFLQT8UaJptXdgi"
 
 [[test.validator.clone]]
-address = "PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A"   # PhUSD mint (Phoenix Eternal canonical collateral)
+address = "9pRT6omDYMgmwGwHGKsVqpKoATEEGMgrYQQqA1tw67yn"
 
 [[test.validator.clone]]
-address = "6ur7v6AXNpnHeEb6xuk7PyezvZ1i5GrgYyWZkNCpzbRz"   # PhUSD mint authority PDA (EMBER-controlled)
+address = "6KjSMWrMxsEi67f551oBtq9PzRGy2ifLS4UjBiPnbqH"
 
+# ── Raydium CLMM CARDS↔USDC pool (CARDS position route, legacy SPL) ──────────────
 [[test.validator.clone]]
-address = "FKcEb4TdPDTRuMnQDpSEPQBcrm15S73xiUD6Qf8ZLUkq"   # EMBER USDC reserve (backs PhUSD supply)
+address = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"   # Raydium CLMM program
 
 [[test.validator.clone]]
-address = "GLx7TdT66CPKYJBn3Pzc9khrfXEx6mXtAiE8uskGBQJq"
+address = "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp"   # CARDS token mint
 
 [[test.validator.clone]]
-address = "HLgEs2cgaQPS4TN81dCHM8b213jbu14PefveN9GH6Q1t"
+address = "F3DAAusn8mob9swWaX4ehaRrhi2Q3XJScKkuUpXdvn2i"   # CARDS/USDC pool
 
 [[test.validator.clone]]
-address = "AYUAXXi12y86wkPQUdJCwGjsJorANtztDq2wqi9FZQCN"
+address = "3h2e43PunVA5K34vwKCLHWhZF4aZpyaC9RmxvshGAQpL"   # amm config
 
 [[test.validator.clone]]
-address = "CV2sfgbG8eM6dJe3sozjtRoeRF2oCik5VhMhn7n2niWT"
+address = "GzxEr7YV5Yxgh6KDQiY2h2LC1rHB1KroWXGNYWCswLrk"   # observation
 
 [[test.validator.clone]]
-address = "5dHG6hwP2vXkk3QER3XsVfBbwvt3JJEkZccrBnFD3igx"
+address = "EfR9iLv5vVdhXnwAwRiMpXPvAYxo3SfMeo7bsVHDPrRJ"   # vault
 
 [[test.validator.clone]]
-address = "FHMCccPDnNzuA7Z7QvbLpu2CwCVEbuA1rcDmdkSfg2dU"
+address = "5vxvPuMFS5LfZBRP4SmRcfcZ6J8o9UTA8pCkfx5KuGvZ"   # vault
 
+# CARDS/USDC tick-array band + bitmap extension (CLMM, drifts with price)
 [[test.validator.clone]]
-address = "DdW7ZuAhAjTme8Kw1tsAxNpmAMiPAAQHfsCb72HaDPo5"
+address = "BbsV2EVGbZRxcsautaCboD1X9k15cFBNVXm6S6ANve9N"
 
 [[test.validator.clone]]
-address = "3hJQCCWHYSYVGS1S1vJEVHWLuw6R6xPZD4sXLRQkcsvB"
+address = "h1mqtYoqprtckac9cUo1Vh83mA1NuzTDVECREVRwYSq"
 
 [[test.validator.clone]]
-address = "5DKFA5wfP1HqLWkPa4weyRsdmikcm2Hr2hebUxkqZSMW"
+address = "HaDKJQJEuqYdkZ5u8TbGLstbeg7eSxso4iXfxWxu4b5H"
 
 [[test.validator.clone]]
-address = "7RJ5qmsgmvUKK5QtCLT9qHpQMegkiULppHRBNuWso12E"
+address = "A1BBtTYJd4i3xU8D6Tc2FzU6ZN4oXZWXKZnCxwbHXr8x"
 
 [[test.validator.clone]]
-address = "5ThYdrAwJEySRcszALMUGaCgjWwpRa7EU6HJa4X2UQQn"
+address = "5UUdSTWM1gv4emMEfARYYS7DTb3RPm9P5WUoYrcBimJP"
 
 [[test.validator.clone]]
-address = "7h3AAzTb6R9bnY4bhW2CTmGcwXRaGFtsxUpjmDR69ELh"
+address = "J4WgZDDVzmhN71LNMZ2XQMdUxTwRoxbPifT1QNfiwP1k"
 
 [[test.validator.clone]]
-address = "9AFJThS1MmP9iCVhToUdkyJUVicHWVkJvjgPeXvu7iLT"
+address = "6wsMx5nY662LPefsunWcQaADPVfgU7nCgPgxgdfj6HUC"
 
 [[test.validator.clone]]
-address = "5iUqQknJcKyfS64vAYsrivJ37fXkRBG7Jx6T7FhRr9Yw"
+address = "7YkyCeVEgneym3siQiMY4LotrYQGxEm622Ufb6tNDHjU"
 
 [[test.validator.clone]]
-address = "3DWa6Sz5frfSh5SedgWonf9qFjLL7xyyi9CsewoQNF2Q"
+address = "A93dhWDGLSvFGUP2WHecsbK8cxua1jGm8cmAe5nTCd3e"
 
 [[test.validator.clone]]
-address = "7GGRdCvomRyFBVFmm5MF5efDom2uFPJMnXrx1pZruxTQ"
-
+address = "DYP18qVXnFWBUkrfcnPGrbtDoj4gE5nBU8uatPTYXQbs"

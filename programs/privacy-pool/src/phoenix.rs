@@ -1121,7 +1121,8 @@ pub fn phoenix_queue_withdraw<'info>(
     {
         let slot_info = ctx.accounts.phoenix_slot.to_account_info();
         let mut slot_data = slot_info.data.borrow_mut();
-        let slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
+        let mut slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
+        require_keys_eq!(slot.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
         let new_withdrawn = slot.withdrawn
             .checked_add(amount)
             .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
@@ -1512,7 +1513,11 @@ pub fn phoenix_ember_unwrap<'info>(
         let slot_info = ctx.accounts.phoenix_slot.to_account_info();
         let slot_data = slot_info.data.borrow();
         let slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
+        require_keys_eq!(slot.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
         let pending = &ctx.accounts.pending_reissue;
+        if pending.claimant_pubkey != Pubkey::default() {
+            require_keys_eq!(pending.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
+        }
         let new_pending = pending.amount
             .checked_add(amount)
             .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
@@ -1648,6 +1653,10 @@ pub fn phoenix_ember_unwrap<'info>(
     // and is blocked from minting more than Phoenix actually returned.
     let pending = &mut ctx.accounts.pending_reissue;
     pending.bump = ctx.bumps.pending_reissue;
+    if pending.claimant_pubkey == Pubkey::default() {
+        pending.claimant_pubkey = claimant;
+    }
+    require_keys_eq!(pending.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
     pending.amount = pending.amount
         .checked_add(amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
@@ -1748,6 +1757,11 @@ pub fn phoenix_reissue_notes(
     // Prevents double-minting the same proceeds and blocks stale repeat calls.
     let pending = &mut ctx.accounts.pending_reissue;
     pending.bump = ctx.bumps.pending_reissue;
+    require_keys_eq!(
+        pending.claimant_pubkey,
+        ctx.accounts.claimant.key(),
+        PrivacyError::InvalidClaimant
+    );
     require!(pending.amount >= amount, PrivacyError::InsufficientFundsForWithdrawal);
     pending.amount = pending.amount
         .checked_sub(amount)
@@ -2106,6 +2120,187 @@ pub fn phoenix_place_position_conditional_order<'info>(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// **Atomically place a resting PostOnly limit order with attached TP/SL conditionals.**
+///
+/// Unlike `place_position_conditional_order` (which requires an existing filled position),
+/// this instruction places the limit order AND wires TP/SL to it in one Phoenix CPI.
+/// The conditionals become children of the parent order: they share its size while resting,
+/// become independent when the parent fully fills, and cancel automatically if the parent
+/// is cancelled.
+///
+/// `order_packet_bytes`: raw 38-byte Borsh bytes of `OrderPacketKind::PostOnly`
+///   (the full Veilo order-data buffer with the 8-byte disc prefix stripped).
+/// `slot`: pass 0 (used by Phoenix only for time-based order expiry).
+///
+/// `remaining_accounts` layout (11 accounts):
+/// ```text
+/// [0]  phoenixProgram          — readonly
+/// [1]  logAuthority            — readonly
+/// [2]  globalConfiguration     — writable  ← differs from place_position_conditional_order
+/// [3]  traderAccount           — writable
+/// [4]  perpAssetMap            — writable
+/// [5]  globalTraderIndex       — writable
+/// [6]  activeTraderBuffer      — writable
+/// [7]  orderbook               — writable
+/// [8]  splineCollection        — writable
+/// [9]  traderConditionalOrders — writable
+/// [10] systemProgram           — readonly
+/// ```
+/// executor (traderWallet) and relayer (payer) come from named Veilo accounts.
+pub fn phoenix_place_limit_order_with_conditionals<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::PhoenixPlaceLimitOrderWithConditionals<'info>>,
+    mint_address: Pubkey,
+    claimant: Pubkey,
+    order_packet_bytes: Vec<u8>,
+    slot: u64,
+    // TP (greaterTrigger) — fires when price rises above trigger
+    has_greater: bool,
+    greater_trigger_price: u64,
+    greater_execution_price: u64,
+    greater_trade_side: u8,
+    greater_order_kind: u8,
+    // SL (lessTrigger) — fires when price falls below trigger
+    has_less: bool,
+    less_trigger_price: u64,
+    less_execution_price: u64,
+    less_trade_side: u8,
+    less_order_kind: u8,
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(mint_address, PHOENIX_REQUIRED_MINT, PrivacyError::PhoenixInvalidPool);
+    require!(has_greater || has_less, PrivacyError::PhoenixInvalidAccounts); // at least one leg
+    require!(order_packet_bytes.len() == 38, PrivacyError::PhoenixInvalidAccounts);
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 11, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"phoenix_executor",
+        mint_address.as_ref(),
+        claimant.as_ref(),
+        &[executor_bump],
+    ];
+
+    let encode_trigger = |
+        direction: u8,
+        trade_side: u8,
+        order_kind: u8,
+        trigger_price: u64,
+        execution_price: u64
+    | -> Vec<u8> {
+        let mut v = Vec::with_capacity(19);
+        v.push(direction);
+        v.push(trade_side);
+        v.push(order_kind);
+        v.extend_from_slice(&trigger_price.to_le_bytes());
+        v.extend_from_slice(&execution_price.to_le_bytes());
+        v
+    };
+
+    // disc(8) + order_packet(38) + slot(8) + greaterOption(1|20) + lessOption(1|20)
+    let disc = phoenix_disc("place_limit_order_with_conditionals");
+    let mut data = Vec::with_capacity(96);
+    data.extend_from_slice(&disc);
+    data.extend_from_slice(&order_packet_bytes);
+    data.extend_from_slice(&slot.to_le_bytes());
+
+    // greaterTriggerOrder — Direction::GreaterThan = 0
+    if has_greater {
+        data.push(0x01);
+        data.extend_from_slice(
+            &encode_trigger(
+                0,
+                greater_trade_side,
+                greater_order_kind,
+                greater_trigger_price,
+                greater_execution_price
+            )
+        );
+    } else {
+        data.push(0x00);
+    }
+
+    // lessTriggerOrder — Direction::LessThan = 1
+    if has_less {
+        data.push(0x01);
+        data.extend_from_slice(
+            &encode_trigger(
+                1,
+                less_trade_side,
+                less_order_kind,
+                less_trigger_price,
+                less_execution_price
+            )
+        );
+    } else {
+        data.push(0x00);
+    }
+
+    // Phoenix account order for place_limit_order_with_conditionals:
+    //   [3]=traderWallet(executor, signer), [10]=payer(relayer, writable signer)
+    // This is the REVERSE of place_position_conditional_order.
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false), // phoenixProgram
+        AccountMeta::new_readonly(remaining[1].key(), false), // logAuthority
+        AccountMeta::new(remaining[2].key(), false),          // globalConfiguration (writable!)
+        AccountMeta::new_readonly(executor_key, true),        // traderWallet (executor, signer)
+        AccountMeta::new(remaining[3].key(), false),          // traderAccount
+        AccountMeta::new(remaining[4].key(), false),          // perpAssetMap
+        AccountMeta::new(remaining[5].key(), false),          // globalTraderIndex
+        AccountMeta::new(remaining[6].key(), false),          // activeTraderBuffer
+        AccountMeta::new(remaining[7].key(), false),          // orderbook
+        AccountMeta::new(remaining[8].key(), false),          // splineCollection
+        AccountMeta::new(ctx.accounts.relayer.key(), true),   // payer (relayer, writable signer)
+        AccountMeta::new(remaining[9].key(), false),          // traderConditionalOrders
+        AccountMeta::new_readonly(remaining[10].key(), false), // systemProgram
+    ];
+
+    let ix = Instruction {
+        program_id: PHOENIX_PROGRAM_ID,
+        accounts: account_metas,
+        data,
+    };
+
+    let cpi_infos = vec![
+        remaining[1].to_account_info(), // logAuthority
+        remaining[2].to_account_info(), // globalConfiguration
+        ctx.accounts.executor.to_account_info(), // traderWallet (executor, signer via PDA)
+        remaining[3].to_account_info(), // traderAccount
+        remaining[4].to_account_info(), // perpAssetMap
+        remaining[5].to_account_info(), // globalTraderIndex
+        remaining[6].to_account_info(), // activeTraderBuffer
+        remaining[7].to_account_info(), // orderbook
+        remaining[8].to_account_info(), // splineCollection
+        ctx.accounts.relayer.to_account_info(), // payer (relayer)
+        remaining[9].to_account_info(), // traderConditionalOrders
+        remaining[10].to_account_info(), // systemProgram
+        remaining[0].to_account_info(), // phoenixProgram (last = program invoked)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    emit!(PhoenixPlaceLimitOrderWithConditionalsEvent {
+        mint_address,
+        has_greater,
+        greater_trigger_price,
+        greater_execution_price,
+        has_less,
+        less_trigger_price,
+        less_execution_price,
+        relayer: ctx.accounts.relayer.key(),
+        timestamp: Clock::get()?.unix_timestamp,
+    });
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// **Cancel a conditional order by index from the conditional-orders collection.**
 ///
 /// Calls Phoenix's `CancelConditionalOrder` instruction. The `conditional_order_index`
@@ -2300,6 +2495,20 @@ pub struct PhoenixCancelConditionalOrderEvent {
     pub conditional_order_index: u8,
     pub disable_first: bool,
     pub disable_second: bool,
+    pub relayer: Pubkey,
+    pub timestamp: i64,
+}
+
+/// Emitted when a limit order with attached TP/SL conditionals is placed atomically.
+#[event]
+pub struct PhoenixPlaceLimitOrderWithConditionalsEvent {
+    pub mint_address: Pubkey,
+    pub has_greater: bool,
+    pub greater_trigger_price: u64,
+    pub greater_execution_price: u64,
+    pub has_less: bool,
+    pub less_trigger_price: u64,
+    pub less_execution_price: u64,
     pub relayer: Pubkey,
     pub timestamp: i64,
 }

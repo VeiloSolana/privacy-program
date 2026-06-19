@@ -49,22 +49,29 @@ export class JupiterSwapService {
     outputMint: PublicKey,
     amount: number,
     slippageBps: number = 50,
+    onlyDirectRoutes: boolean = false,
+    dexes?: string,
   ): Promise<QuoteResponse> {
     const params = new URLSearchParams({
       inputMint: inputMint.toString(),
       outputMint: outputMint.toString(),
       amount: amount.toString(),
       slippageBps: slippageBps.toString(),
-      onlyDirectRoutes: "true", // Simple routes only (no ALTs)
-      dexes: "Raydium,Raydium CPMM,Raydium Clmm", // Include Raydium AMM V4, CPMM, and CLMM pools
+      ...(onlyDirectRoutes ? { onlyDirectRoutes: "true" } : {}),
+      ...(dexes ? { dexes } : {}),
     });
 
     const response = await fetch(`${this.apiUrl}/quote?${params}`);
     if (!response.ok) {
-      throw new Error(`Jupiter quote failed: ${response.statusText}`);
+      const body = await response.text();
+      throw new Error(`Jupiter quote failed: ${response.status} ${response.statusText} — ${body}`);
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(`Jupiter quote error: ${JSON.stringify(data.error)}`);
+    }
+    return data;
   }
 
   /**
@@ -74,6 +81,7 @@ export class JupiterSwapService {
     quote: QuoteResponse,
     userPublicKey: PublicKey,
     wrapUnwrapSOL: boolean = true,
+    useSharedAccounts: boolean = false,
   ): Promise<SwapInstructionsResponse> {
     const response = await fetch(`${this.apiUrl}/swap-instructions`, {
       method: "POST",
@@ -82,6 +90,7 @@ export class JupiterSwapService {
         quoteResponse: quote,
         userPublicKey: userPublicKey.toString(),
         wrapAndUnwrapSol: wrapUnwrapSOL,
+        useSharedAccounts,
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: "auto",
       }),

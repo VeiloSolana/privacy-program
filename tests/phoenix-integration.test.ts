@@ -88,6 +88,7 @@ import {
   buildWithdrawRemainingAccounts,
   buildConsumeWithdrawQueueAccounts,
   buildPositionConditionalOrderRemainingAccounts,
+  buildLimitOrderWithConditionalsRemainingAccounts,
   buildCancelConditionalOrderRemainingAccounts,
 } from "./utils/phoenix-markets";
 
@@ -907,6 +908,7 @@ describe("Phoenix Eternal Integration", () => {
             SystemProgram.programId,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 0)),
+            null,
           )
           .accounts({
             config,
@@ -1542,6 +1544,7 @@ describe("Phoenix Eternal Integration", () => {
             SystemProgram.programId,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 255)),
+            null,
           )
           .accounts({
             config: usdcConfig,
@@ -2717,6 +2720,125 @@ describe("Phoenix Eternal Integration", () => {
       }
     });
 
+    it("place_limit_order_with_conditionals: CPI reaches Phoenix (PostOnly + atomic TP/SL)", async function () {
+      if (!suite4Ready) return this.skip();
+
+      // A far-OTM PostOnly bid (1 tick) — will be rejected by Phoenix on mainnet
+      // but the important thing is that the CPI is dispatched correctly from Veilo
+      // without tripping any Veilo pre-checks.
+      //
+      // PostOnly Borsh layout (38 bytes):
+      //   [0]     variant        = 0  (PostOnly)
+      //   [1]     side           = 0  (Bid)
+      //   [2..10] priceInTicks   = 1  (1 tick — far OTM so it won't cross)
+      //   [10..18] numBaseLots   = 1
+      //   [18..34] clientOrderId = all zeros
+      //   [34]    slide          = 0
+      //   [35]    lastValidSlot  = 0  (None)
+      //   [36]    orderFlags     = 0
+      //   [37]    cancelExisting = 0
+      const packetBytes = Buffer.alloc(38, 0);
+      packetBytes[0] = 0; // PostOnly
+      packetBytes[1] = 0; // Bid
+      packetBytes.writeBigUInt64LE(1n, 2);  // priceInTicks
+      packetBytes.writeBigUInt64LE(1n, 10); // numBaseLots
+
+      const condOrdersAccount = conditionalOrdersPda(
+        PHOENIX_PROGRAM_ID,
+        traderPda,
+      );
+      console.log(
+        `   traderConditionalOrders PDA: ${condOrdersAccount.toBase58()}`,
+      );
+
+      const before = await snapshotPhoenixBalances(
+        "place_limit_order_with_conditionals pre-state",
+      );
+
+      try {
+        const sig = await (program.methods as any)
+          .phoenixPlaceLimitOrderWithConditionals(
+            USDC_MAINNET,
+            s4ClaimKey.publicKey,  // claimant
+            Array.from(packetBytes), // order_packet_bytes (38 bytes)
+            new BN(0),               // slot = 0 (no expiry)
+            false,                   // hasGreater — no TP leg
+            new BN(0),               // greaterTriggerPriceTicks
+            new BN(0),               // greaterExecutionPriceTicks
+            1,                       // greaterTradeSide (Ask)
+            0,                       // greaterOrderKind (IOC)
+            true,                    // hasLess — SL leg only
+            new BN(1),               // lessTriggerPriceTicks — 1 tick far-OTM
+            new BN(1),               // lessExecutionPriceTicks
+            1,                       // lessTradeSide (Ask — close a long)
+            0,                       // lessOrderKind (IOC)
+          )
+          .accounts({
+            config: s4UsdcConfig,
+            executor: executorPda,
+            relayer: s4Relayer.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            buildLimitOrderWithConditionalsRemainingAccounts(
+              PHOENIX_EXCHANGE,
+              PHOENIX_SOL,
+              traderPda,
+            ),
+          )
+          .signers([s4Relayer])
+          .rpc();
+
+        const tx = await provider.connection.getTransaction(sig, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        });
+        printProgramLogs(
+          tx?.meta?.logMessages ?? [],
+          "place_limit_order_with_conditionals",
+        );
+        console.log(
+          "   ✅ place_limit_order_with_conditionals CPI succeeded:",
+          sig,
+        );
+      } catch (e: any) {
+        console.log(e);
+        const logs: string[] =
+          e instanceof SendTransactionError
+            ? (await e.getLogs(provider.connection)) ?? []
+            : e.logs ?? [];
+        printProgramLogs(logs, "place_limit_order_with_conditionals CPI logs");
+        const haystack = [...logs, e.message ?? ""].join("\n");
+
+        // Veilo pre-check failures mean wrong accounts/params — hard fail.
+        if (
+          haystack.includes("RelayerNotAllowed") ||
+          haystack.includes("PhoenixInvalidPool") ||
+          haystack.includes("PhoenixInvalidAccounts") ||
+          haystack.includes("InvalidSwapProgram")
+        ) {
+          throw new Error(
+            "place_limit_order_with_conditionals failed at Veilo pre-check (wrong accounts?): " +
+              e.message,
+          );
+        }
+        // Phoenix-level error (account not initialised, OTM rejection, etc.) is
+        // acceptable — it confirms the CPI was dispatched correctly from Veilo.
+        console.log(
+          "   ✅ place_limit_order_with_conditionals: CPI reached Phoenix (Phoenix-level response as expected)",
+        );
+      } finally {
+        const after = await snapshotPhoenixBalances(
+          "place_limit_order_with_conditionals post-state",
+        );
+        printSnapshotDelta(
+          "place_limit_order_with_conditionals",
+          before,
+          after,
+        );
+      }
+    });
+
     it("close_position: vault places a market close order via CPI", async function () {
       if (!suite4Ready) return this.skip();
 
@@ -2803,6 +2925,7 @@ describe("Phoenix Eternal Integration", () => {
             s4ClaimKey.publicKey, // claimant
             withdrawAmount,
             Array.from(WITHDRAWAL_ID_0),
+            null,
           )
           .accounts({
             config: s4UsdcConfig,
@@ -4664,6 +4787,7 @@ describe("Phoenix Eternal Integration", () => {
             s4ClaimKey.publicKey, // claimant
             new BN(1_000_000),
             Array.from(WITHDRAWAL_ID_0),
+            null,
           )
           .accounts({
             config: s4UsdcConfig,
@@ -5907,6 +6031,7 @@ describe("Phoenix Eternal Integration", () => {
             amount: S6_WITHDRAW,
             withdrawalId: WITHDRAWAL_ID_0,
             executorPhUsdAta,
+            maxSlotAmount: S6_WITHDRAW, // actual collateral; bumps slot cap when PnL grew it
           });
           const tx = await provider.connection.getTransaction(sig, {
             commitment: "confirmed",
@@ -7611,6 +7736,7 @@ describe("Phoenix Eternal Integration", () => {
             amount: S7_WITHDRAW,
             withdrawalId: WITHDRAWAL_ID_7,
             executorPhUsdAta,
+            maxSlotAmount: S7_WITHDRAW, // actual collateral; bumps slot cap when PnL grew it
           });
           const tx = await provider.connection.getTransaction(sig, {
             commitment: "confirmed",
@@ -9057,6 +9183,7 @@ describe("Phoenix Eternal Integration", () => {
             amount: S8_WITHDRAW,
             withdrawalId: WITHDRAWAL_ID_8,
             executorPhUsdAta,
+            maxSlotAmount: S8_WITHDRAW, // actual collateral; bumps slot cap when PnL grew it
           });
           const tx = await provider.connection.getTransaction(sig, {
             commitment: "confirmed",

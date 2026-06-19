@@ -717,6 +717,47 @@ export function buildPositionConditionalOrderRemainingAccounts(
 }
 
 /**
+ * Build the `remainingAccounts` for `phoenix_place_limit_order_with_conditionals` CPI.
+ * Same layout as `buildPositionConditionalOrderRemainingAccounts` except
+ * `globalConfig` is **writable**.
+ *
+ *   [0]  phoenixProgram          (readonly)
+ *   [1]  logAuthority            (readonly)
+ *   [2]  globalConfig            (writable)  ← differs from place_position_conditional_order
+ *   [3]  traderAccount           (writable)
+ *   [4]  perpAssetMap            (writable)
+ *   [5]  globalTraderIndex       (writable)
+ *   [6]  activeTraderBuffer      (writable)
+ *   [7]  orderbook               (writable)
+ *   [8]  splines                 (writable)
+ *   [9]  traderConditionalOrders (writable)
+ *   [10] systemProgram           (readonly)
+ */
+export function buildLimitOrderWithConditionalsRemainingAccounts(
+  exchange: PhoenixExchangeAccounts,
+  market: PhoenixMarket,
+  traderPda: PublicKey,
+): AccountMeta[] {
+  const conditionalOrdersAccount = conditionalOrdersPda(
+    exchange.program,
+    traderPda,
+  );
+  return [
+    { pubkey: exchange.program, isSigner: false, isWritable: false },
+    { pubkey: exchange.logAuthority, isSigner: false, isWritable: false },
+    { pubkey: exchange.globalConfig, isSigner: false, isWritable: true }, // writable!
+    { pubkey: traderPda, isSigner: false, isWritable: true },
+    { pubkey: exchange.perpAssetMap, isSigner: false, isWritable: true },
+    { pubkey: exchange.globalTraderIndex, isSigner: false, isWritable: true },
+    { pubkey: exchange.activeTraderBuffer, isSigner: false, isWritable: true },
+    { pubkey: market.orderbook, isSigner: false, isWritable: true },
+    { pubkey: market.splines, isSigner: false, isWritable: true },
+    { pubkey: conditionalOrdersAccount, isSigner: false, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+}
+
+/**
  * Build the `remainingAccounts` for `phoenix_cancel_conditional_order` CPI.
  *
  *   [0] phoenixProgram          (readonly)

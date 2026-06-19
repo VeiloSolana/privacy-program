@@ -286,17 +286,19 @@ export function derivePoolVault(
 
 /**
  * Derive the phoenix-slot PDA that records a specific deposit/withdrawal round-trip.
- * Seeds: ["phoenix_slot_v1", mint, withdrawalId (32 bytes)]
+ * Seeds: ["phoenix_slot_v1", mint, claimant, withdrawalId (32 bytes)]
  */
 export function derivePhoenixSlotPda(
   veiloProgramId: PublicKey,
   mint: PublicKey,
+  claimant: PublicKey,
   withdrawalId: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("phoenix_slot_v1"),
       mint.toBuffer(),
+      claimant.toBuffer(),
       Buffer.from(withdrawalId),
     ],
     veiloProgramId,
@@ -306,17 +308,19 @@ export function derivePhoenixSlotPda(
 
 /**
  * Derive the pending-reissue PDA that tracks the amount pending reissuance.
- * Seeds: ["phoenix_pending_v1", mint, withdrawalId (32 bytes)]
+ * Seeds: ["phoenix_pending_v1", mint, claimant, withdrawalId (32 bytes)]
  */
 export function derivePendingReissuePda(
   veiloProgramId: PublicKey,
   mint: PublicKey,
+  claimant: PublicKey,
   withdrawalId: Uint8Array,
 ): PublicKey {
   const [pda] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("phoenix_pending_v1"),
       mint.toBuffer(),
+      claimant.toBuffer(),
       Buffer.from(withdrawalId),
     ],
     veiloProgramId,
@@ -1268,6 +1272,7 @@ export class PositionsManager {
     const phoenixSlot = derivePhoenixSlotPda(
       this.program.programId,
       this.mint,
+      this.claimant,
       opts.withdrawalId,
     );
     return this.program.methods
@@ -1322,11 +1327,13 @@ export class PositionsManager {
     const phoenixSlot = derivePhoenixSlotPda(
       this.program.programId,
       this.mint,
+      this.claimant,
       opts.withdrawalId,
     );
     const pendingReissue = derivePendingReissuePda(
       this.program.programId,
       this.mint,
+      this.claimant,
       opts.withdrawalId,
     );
     return this.program.methods
@@ -1370,24 +1377,26 @@ export class PositionsManager {
 
   /**
    * Derive the phoenix-slot PDA for a given withdrawal nonce.
-   * Shorthand for `derivePhoenixSlotPda(program.programId, mint, withdrawalId)`.
+   * Shorthand for `derivePhoenixSlotPda(program.programId, mint, claimant, withdrawalId)`.
    */
   phoenixSlotPda(withdrawalId: Uint8Array): PublicKey {
     return derivePhoenixSlotPda(
       this.program.programId,
       this.mint,
+      this.claimant,
       withdrawalId,
     );
   }
 
   /**
    * Derive the pending-reissue PDA for a given withdrawal nonce.
-   * Shorthand for `derivePendingReissuePda(program.programId, mint, withdrawalId)`.
+   * Shorthand for `derivePendingReissuePda(program.programId, mint, claimant, withdrawalId)`.
    */
   pendingReissuePda(withdrawalId: Uint8Array): PublicKey {
     return derivePendingReissuePda(
       this.program.programId,
       this.mint,
+      this.claimant,
       withdrawalId,
     );
   }
