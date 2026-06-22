@@ -28,8 +28,11 @@
 ///
 /// ## Account roles
 ///
-/// - `JupiterPerpExecutor` PDA (`[b"jperp_executor", mint, claimant]`): signs all
-///   Jupiter Perps CPIs as the position owner. The user's wallet is never exposed.
+/// - `JupiterPerpExecutor` PDA (`[b"jperp_executor", mint, claimant, withdrawal_id]`):
+///   signs all Jupiter Perps CPIs as the position owner. The user's wallet is never
+///   exposed. Including `withdrawal_id` makes the executor unique **per open**, so each
+///   position gets its own executor/ATA/Jupiter-position and positions are mutually
+///   unlinkable on-chain (and same-market opens don't aggregate into one position).
 /// - `JupiterPerpSlot` PDA (`[b"jperp_slot_v1", mint, withdrawal_id]`): created at
 ///   deposit time; tracks deposited amount and the claimant key for anti-theft protection.
 ///
@@ -86,7 +89,11 @@
 /// ```
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{ instruction::Instruction, program::invoke_signed };
+use anchor_lang::solana_program::{
+    instruction::Instruction,
+    program::{ invoke, invoke_signed },
+    system_instruction,
+};
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token;
 
@@ -121,6 +128,16 @@ pub const SIDE_SHORT: u8 = 2;
 /// RequestType enum discriminants (Market=0, Trigger=1)
 pub const REQUEST_TYPE_MARKET: u8 = 0;
 pub const REQUEST_TYPE_TRIGGER: u8 = 1;
+
+/// SOL transferred from the relayer into the executor PDA before the Jupiter CPI.
+///
+/// Jupiter's `createIncreasePositionMarketRequest` funds the `positionRequest`
+/// account + its ATA rent via `system_program::transfer(from = owner)`, where
+/// `owner` is our executor PDA. The executor is a SYSTEM-OWNED PDA (no data) so
+/// that transfer is legal — but it must hold enough lamports. 0.02 SOL comfortably
+/// covers the positionRequest account + 165-byte ATA rent; Jupiter refunds the
+/// rent to the executor when the request settles, so the excess is reclaimable.
+pub const EXECUTOR_JUPITER_RENT_FUNDING: u64 = 20_000_000; // 0.02 SOL
 
 // ── Discriminator helper ──────────────────────────────────────────────────────
 
@@ -242,26 +259,29 @@ pub fn jperp_open_position<'info>(
 
     let cfg = &mut ctx.accounts.config;
 
-    // ── 1. Side validation ────────────────────────────────────────────────────
     require!(
         side == SIDE_LONG || side == SIDE_SHORT,
         PrivacyError::JperpInvalidSide
     );
     require!(deposit_amount > 0, PrivacyError::InvalidPublicAmount);
     require!(size_usd_delta > 0, PrivacyError::InvalidPublicAmount);
+    // collateral_token_delta is encoded directly into the Jupiter CPI; without this
+    // check a relayer could open a zero-size position while keeping deposit_amount in
+    // the executor ATA and immediately reissue it — making jperp a fee-free note split.
+    require!(
+        collateral_token_delta == deposit_amount,
+        PrivacyError::JperpCollateralMismatch
+    );
 
-    // ── 2. Pool and tree bounds ───────────────────────────────────────────────
     require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
     require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
 
-    // ── 3. Relayer and deadline ───────────────────────────────────────────────
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
     require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
 
-    // ── 4. Recipient must be executor PDA ─────────────────────────────────────
     require_keys_eq!(
         ext_data.recipient,
         ctx.accounts.executor.key(),
@@ -269,7 +289,6 @@ pub fn jperp_open_position<'info>(
     );
     require_keys_eq!(claimant, ext_data.claimant, PrivacyError::InvalidClaimant);
 
-    // ── 5. Nullifier sanity ───────────────────────────────────────────────────
     let zero = [0u8; 32];
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
@@ -285,11 +304,9 @@ pub fn jperp_open_position<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    // ── 6. ext_data hash ──────────────────────────────────────────────────────
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    // ── 7. Vault token account and balance check ──────────────────────────────
     let expected_vault_ata = get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
     require!(
         ctx.accounts.vault_token_account.key() == expected_vault_ata,
@@ -306,7 +323,6 @@ pub fn jperp_open_position<'info>(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // ── 8. ZK proof (withdrawal: public_amount negative) ─────────────────────
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: -(deposit_amount as i64),
@@ -317,17 +333,14 @@ pub fn jperp_open_position<'info>(
     };
     verify_transaction_groth16(proof, &public_inputs)?;
 
-    // ── 9. Known root ─────────────────────────────────────────────────────────
     {
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // ── 10. Nullifiers not already spent ─────────────────────────────────────
     require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
     require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
-    // ── 11. Mark nullifiers spent ─────────────────────────────────────────────
     mark_nullifier_spent(
         &mut ctx.accounts.nullifier_marker_0,
         &mut ctx.accounts.nullifiers,
@@ -345,7 +358,6 @@ pub fn jperp_open_position<'info>(
         input_tree_id,
     )?;
 
-    // ── 12. Insert output commitments ─────────────────────────────────────────
     let (leaf_index_0, leaf_index_1, new_root) = {
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
         let max_capacity = 1u64 << (output_tree.height as u64);
@@ -358,7 +370,6 @@ pub fn jperp_open_position<'info>(
         (idx0, idx1, output_tree.root)
     };
 
-    // ── 13. Transfer relayer fee: vault → relayer ─────────────────────────────
     let vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
         mint_address.as_ref(),
@@ -385,13 +396,13 @@ pub fn jperp_open_position<'info>(
         )?;
     }
 
-    // ── 14. Transfer collateral: vault → executor ATA ─────────────────────────
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
     let executor_seeds: &[&[u8]] = &[
         b"jperp_executor",
         mint_address.as_ref(),
         claimant.as_ref(),
+        withdrawal_id.as_ref(),
         &[executor_bump],
     ];
 
@@ -414,7 +425,23 @@ pub fn jperp_open_position<'info>(
         deposit_amount,
     )?;
 
-    // ── 15. CPI: createIncreasePositionMarketRequest ──────────────────────────
+    // Jupiter funds the positionRequest account + ATA via
+    // `system_program::transfer(from = owner = executor)`. The executor is a
+    // system-owned PDA (no Anchor data), so this transfer is legal — but it must
+    // hold enough lamports first. The relayer fronts this SOL (recovered via fee).
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.relayer.key(),
+            &executor_key,
+            EXECUTOR_JUPITER_RENT_FUNDING,
+        ),
+        &[
+            ctx.accounts.relayer.to_account_info(),
+            ctx.accounts.executor.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
     let remaining = ctx.remaining_accounts;
     require!(remaining.len() >= 14, PrivacyError::JperpInvalidAccounts);
     require_keys_eq!(
@@ -477,19 +504,16 @@ pub fn jperp_open_position<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    // ── 16. Init slot ─────────────────────────────────────────────────────────
     let slot = &mut ctx.accounts.jperp_slot;
     slot.bump = ctx.bumps.jperp_slot;
     slot.amount = deposit_amount;
     slot.reissued = 0;
     slot.claimant_pubkey = claimant;
 
-    // ── 17. TVL ───────────────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_sub(deposit_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 18. Emit events ───────────────────────────────────────────────────────
     emit!(NullifierSpent {
         nullifier: input_nullifiers[0],
         mint_address,
@@ -554,7 +578,7 @@ pub fn jperp_open_position<'info>(
 pub fn jperp_set_tpsl<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpSetTpsl<'info>>,
     mint_address: Pubkey,
-    claimant: Pubkey,
+    withdrawal_id: [u8; 32],
     collateral_usd_delta: u64,
     size_usd_delta: u64,
     trigger_price: u64,
@@ -565,12 +589,21 @@ pub fn jperp_set_tpsl<'info>(
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
+    // Claimant must be the ephemeral key committed at open time.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.jperp_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
     let executor_seeds: &[&[u8]] = &[
         b"jperp_executor",
         mint_address.as_ref(),
-        claimant.as_ref(),
+        claimant_key.as_ref(),
+        withdrawal_id.as_ref(),
         &[executor_bump],
     ];
 
@@ -608,6 +641,21 @@ pub fn jperp_set_tpsl<'info>(
         data: ix_data,
     };
 
+    // Fund executor PDA so Jupiter can pay the new positionRequest rent via
+    // system_program::transfer(from = executor). See jperp_open_position §14b.
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.relayer.key(),
+            &executor_key,
+            EXECUTOR_JUPITER_RENT_FUNDING,
+        ),
+        &[
+            ctx.accounts.relayer.to_account_info(),
+            ctx.accounts.executor.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
     invoke_signed(&ix, &build_decrease_request_infos(
         &ctx.accounts.executor,
         &ctx.accounts.executor_token_account,
@@ -637,19 +685,28 @@ pub fn jperp_set_tpsl<'info>(
 pub fn jperp_update_tpsl<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpUpdateTpsl<'info>>,
     mint_address: Pubkey,
-    claimant: Pubkey,
+    withdrawal_id: [u8; 32],
     size_usd_delta: u64,
     trigger_price: u64,
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
+    // Claimant must be the ephemeral key committed at open time.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.jperp_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
     let executor_seeds: &[&[u8]] = &[
         b"jperp_executor",
         mint_address.as_ref(),
-        claimant.as_ref(),
+        claimant_key.as_ref(),
+        withdrawal_id.as_ref(),
         &[executor_bump],
     ];
 
@@ -719,7 +776,7 @@ pub fn jperp_update_tpsl<'info>(
 pub fn jperp_close_position<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpClosePosition<'info>>,
     mint_address: Pubkey,
-    claimant: Pubkey,
+    withdrawal_id: [u8; 32],
     collateral_usd_delta: u64,
     size_usd_delta: u64,
     entire_position: bool,
@@ -729,12 +786,21 @@ pub fn jperp_close_position<'info>(
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
+    // Claimant must be the ephemeral key committed at open time.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.jperp_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
     let executor_seeds: &[&[u8]] = &[
         b"jperp_executor",
         mint_address.as_ref(),
-        claimant.as_ref(),
+        claimant_key.as_ref(),
+        withdrawal_id.as_ref(),
         &[executor_bump],
     ];
 
@@ -766,6 +832,20 @@ pub fn jperp_close_position<'info>(
         accounts: account_metas,
         data: ix_data,
     };
+
+    // Fund executor PDA for the new positionRequest rent (see jperp_open_position §14b).
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.relayer.key(),
+            &executor_key,
+            EXECUTOR_JUPITER_RENT_FUNDING,
+        ),
+        &[
+            ctx.accounts.relayer.to_account_info(),
+            ctx.accounts.executor.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
 
     invoke_signed(&ix, &build_decrease_request_infos(
         &ctx.accounts.executor,
@@ -806,7 +886,7 @@ pub fn jperp_reissue_notes(
     input_nullifier_1: [u8; 32],
     output_commitment_0: [u8; 32],
     output_commitment_1: [u8; 32],
-    _withdrawal_id: [u8; 32],
+    withdrawal_id: [u8; 32],
     deadline: i64,
     ext_data: ExtData,
     proof: TransactionProof,
@@ -822,28 +902,23 @@ pub fn jperp_reissue_notes(
 
     let cfg = &mut ctx.accounts.config;
 
-    // ── 1. Pool match ─────────────────────────────────────────────────────────
     require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
 
-    // ── 2. Tree bounds ────────────────────────────────────────────────────────
     require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(reissue_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // ── 3. Relayer and deadline ───────────────────────────────────────────────
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
     require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
 
-    // ── 4. Claimant co-signature ──────────────────────────────────────────────
     require_keys_eq!(
         ctx.accounts.claimant.key(),
         ctx.accounts.jperp_slot.claimant_pubkey,
         PrivacyError::InvalidClaimant
     );
 
-    // ── 5. Slot cap — cannot reissue more than was deposited ─────────────────
     let slot = &mut ctx.accounts.jperp_slot;
     let available = slot.amount
         .checked_sub(slot.reissued)
@@ -853,7 +928,6 @@ pub fn jperp_reissue_notes(
         .checked_add(reissue_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 6. Commitment / nullifier sanity ──────────────────────────────────────
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
     let zero = [0u8; 32];
@@ -864,11 +938,9 @@ pub fn jperp_reissue_notes(
         PrivacyError::ZeroCommitment
     );
 
-    // ── 7. ext_data hash ──────────────────────────────────────────────────────
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    // ── 8. ZK proof (deposit: public_amount positive) ─────────────────────────
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: reissue_amount as i64,
@@ -879,29 +951,22 @@ pub fn jperp_reissue_notes(
     };
     verify_transaction_groth16(proof, &public_inputs)?;
 
-    // ── 9. Known root ─────────────────────────────────────────────────────────
     {
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // ── 10. Transfer USDC: executor ATA → vault ATA ───────────────────────────
+    // Executor seeds are validated by the Accounts struct; sign the ATA→vault transfer with its bump.
     let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
-    let executor_bump = ctx.accounts.jperp_slot.bump; // slot has same seed bump? No — use executor account bump
-    // We need the executor PDA bump from the account. The executor account is passed
-    // as an UncheckedAccount; its bump was stored in jperp_slot at open time? No.
-    // We derive it via find_program_address.
-    let (_, executor_bump_derived) = Pubkey::find_program_address(
-        &[b"jperp_executor", mint_address.as_ref(), claimant_key.as_ref()],
-        &crate::ID,
-    );
+    let executor_bump = ctx.bumps.executor;
 
     let executor_seeds: &[&[u8]] = &[
         b"jperp_executor",
         mint_address.as_ref(),
         claimant_key.as_ref(),
-        &[executor_bump_derived],
+        withdrawal_id.as_ref(),
+        &[executor_bump],
     ];
 
     let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
@@ -937,7 +1002,6 @@ pub fn jperp_reissue_notes(
         reissue_amount,
     )?;
 
-    // ── 11. Insert output commitments into tree ───────────────────────────────
     let (leaf_index_0, leaf_index_1, new_root) = {
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
         let max_capacity = 1u64 << (output_tree.height as u64);
@@ -950,12 +1014,10 @@ pub fn jperp_reissue_notes(
         (idx0, idx1, output_tree.root)
     };
 
-    // ── 12. TVL ───────────────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_add(reissue_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 13. Emit events ───────────────────────────────────────────────────────
     emit!(CommitmentEvent {
         commitment: output_commitments[0],
         leaf_index: leaf_index_0,

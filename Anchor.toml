@@ -33,30 +33,31 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:position"
+test = "npm run test:pred-pool"
 
 [test]
-startup_wait = 60000
+startup_wait = 150000
 shutdown_wait = 2000
+upgradeable = false
+
+# Override the validator's bundled (older) spl-token builtin with mainnet's current Token program
+# binary (dumped via `solana program dump`). Jupiter's Pump.fun bonding-curve route uses a Token
+# instruction the old builtin rejects with "Invalid instruction" (0xc); the mainnet build supports
+# it. Loading at genesis (not clone) is what actually overrides the builtin at this address.
+[[test.genesis]]
+address = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+program = "localnet-programs/spl_token_mainnet.so"
 upgradeable = false
 
 [test.validator]
 bind_address = "0.0.0.0"
-url = "https://api.mainnet-beta.solana.com"
+url = "https://mainnet.helius-rpc.com/?api-key=a3016be0-c6e1-441f-b8df-2310eb026b66"
 ledger = ".anchor/test-ledger"
 rpc_port = 8899
 
-[[test.validator.clone]]
-address = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
-
-[[test.validator.clone]]
-address = "7JuwJuNU88gurFnyWeiyGKbFmExMWcmRZntn9imEzdny"
-
-[[test.validator.clone]]
-address = "7VLUXrnSSDo9BfCa4NWaQs68g7ddDY1sdXBKW6Xswj9Y"
-
-[[test.validator.clone]]
-address = "3rzbbW5Q8MA7sCaowf28hNgACNPecdS2zceWy7Ptzua9"
+# NOTE: Raydium CPMM/AMM + USDT/USD1 clones removed to stay under the RPC's 100-clone cap.
+# They were for the test:swap / test:amm / test:jupiter suites (not the position suite). Restore
+# them if running those suites.
 
 [[test.validator.clone]]
 address = "So11111111111111111111111111111111111111112"
@@ -70,43 +71,12 @@ address = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 [[test.validator.clone]]
 address = "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"
 
-
-[[test.validator.clone]]
-address = "Ff68JGeEiUEF859B2xEaPX82vuFeuwxqoxGNHTZPAuKR"
-
-[[test.validator.clone]]
-address = "D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2"
-
-[[test.validator.clone]]
-address = "4MYrPgjgFceyhtwhG1ZX8UVb4wn1aQB5wzMimtFqg7U8"
-
-[[test.validator.clone]]
-address = "CzQhTRhvonYcnCsWxX3M4etA5SzpxeMrM2WSnNCua3Q1"
-
-[[test.validator.clone]]
-address = "F8nKR5gxnpgcnJbX3BuG6fi1kfviAy9dfmKWYbRLuEUZ"
-
-[[test.validator.clone]]
-address = "43x9CiKXAg6KoQaEFarh9dmy97XNrmxCLstCarQK8YGQ"
-
-[[test.validator.clone]]
-address = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-
-[[test.validator.clone]]
-address = "3xsXc8c1D8v1sbSSrVKegbWMMbnZrMktosLFUCrumMrB"
-
-[[test.validator.clone]]
-address = "2fGXL8uhqxJ4tpgtosHZXT4zcQap6j62z3bMDxdkMvy5"
-
-[[test.validator.clone]]
-address = "G4VR2SGyUQCPxLJmj3Z5LF4YCzaoCr5FCETofe91ijTz"
-
-[[test.validator.clone]]
-address = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
-
 # ── Position pool tokens ─────────────────────────────────────────────────────────
 [[test.validator.clone]]
-address = "ACpzkGJV3DDU8HXy8yjab7RL9qNmDGym2GwLkzNppump"   # Meme token mint (pump.fun SPL)
+address = "73RFKrDBUCRv6ifvPYgEdiumnRMoRhaG7hpNZ43cpump"   # Meme token A mint (pump.fun bonding curve, Token-2022) — SOL→MEME direct
+
+[[test.validator.clone]]
+address = "EmcxFTNVDqyLHp11NvwvLZ4D7LKGbG9i7B8RF7dwpump"   # Meme token B mint (pump.fun, Token-2022) — USDC→MEME direct
 
 [[test.validator.clone]]
 address = "Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8"   # xStock token mint (Token-2022)
@@ -115,12 +85,6 @@ address = "Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8"   # xStock token mint (T
 # USDC→xStock: Byreal 1-hop  |  xStock→USDC: Byreal 1-hop  |  SOL→USDC: BisonFi 1-hop
 [[test.validator.clone]]
 address = "REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2"   # Byreal program
-
-[[test.validator.clone]]
-address = "SCoRcH8c2dpjvcJD6FiPbCSQyQgu3PcUAWj2Xxx3mqn"   # Scorch program
-
-[[test.validator.clone]]
-address = "ojh19ojaKduoJZuaJADhcVGp4xt1TcdAvZmpVsCorch"   # Scorch program (alt)
 
 [[test.validator.clone]]
 address = "BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi"   # BisonFi program
@@ -150,61 +114,45 @@ address = "5d45QMCiYZmSDZNecwu9x6BktjQj4nr3ibL123s9QAdu"
 [[test.validator.clone]]
 address = "Ezo6sY7eAYTMhs3kUP3cRUsAF6haxnfW1CeSvpXeb3u5"
 
-# Scorch xStock↔USDC pool accounts
-[[test.validator.clone]]
-address = "EHcege7dok1iYs7SxL2XzDPvhg6XzMVcx2V5SkMUurJP"
-
-[[test.validator.clone]]
-address = "4qJGGCmc2EuZFEY5N9mYK52pVLPnFNjAeDkzYYkARDVC"
-
-[[test.validator.clone]]
-address = "34WpFzQ1WE2nDLLEKJuvCXxapL7ak6CigJS8Ks5NDo5K"
-
-[[test.validator.clone]]
-address = "HLixVmXdBqzP1sXT9au4BHcvUjDgx5ev16cEJdd9tUSM"
-
-[[test.validator.clone]]
-address = "CUmkAhoMJKKkKzb9cELye6fBsLMhLM2B85W8qYxhk6Nd"
-
-[[test.validator.clone]]
-address = "DmocjvFXp75asezCDKVNH2qaXbjrV7VeQk4aLZaPF88E"
-
-[[test.validator.clone]]
-address = "ESnmANEpQdBexSBSDL3LPNSxKbiA2jWTkm6SDP7xrt3V"
+# (Scorch xStock↔USDC pool accounts removed — the position suite routes xStock via Byreal only.)
 
 # Byreal global / shared accounts (used by all Byreal routes)
 
 
 # Byreal CLMM tick-array bands (±3 arrays around current price for both pools).
 # CLMM tick arrays drift with price; cloning a band keeps the swap routable across runs.
-# SOL↔USDC pool (9GTj99g9):
+# SOL↔USDC pool (9GTj99g9) — band around tickCurrent≈-26046 (startIndex -26100). DRIFTS ~1 array/hr;
+# refresh if InvalidFirstTickArrayAccount recurs: re-derive per [[memory: anchor-toml-dex-clones]].
 [[test.validator.clone]]
-address = "BfyC67kpUH8iuJsKtzF5pHEoU8NqbFxPkLtXHjEcRGXY"
+address = "DFXKHAujr7B6kaZDkNzP9YwyQ9MbTz1kDSLrCingP4oV"   # -2 (start -26340)
 
 [[test.validator.clone]]
-address = "3Rqyhhf4fHzMr8n3znWQdAuC8M7LHjs6TxsFQwD3Yxy7"
+address = "9uHMTjKoKQ8Pw75RvsyZyjPiKZ7Vkpbtxz1N2omC6XAy"   # -1 (start -26280)
 
 [[test.validator.clone]]
-address = "B497Fods3pKkCMTjUqCwRWnJP5ZDDFaXFaokNZJEzb4k"
+address = "Anp72ZBwR5PhJmvTq4gwQZUtkzoCRVpBat24v8LPbetR"   # +0 (active, start -26220)
 
 [[test.validator.clone]]
-address = "JAwS52DPJu7bB1Kbpkio2z68ShMJMZEoPhAp4WsqBQ28"
+address = "2bMwwdtVHXni8V5bbyWQCNCWwZssqMCVZL1f1XbXeX1q"   # +1 (start -26160)
 
 [[test.validator.clone]]
-address = "DdJR6NsW8nRJBpFM9aJUS4Uj7HSKoMJXyeZ4vaMLgDHS"
+address = "7eFXfkv7vRrgdBYaQG6Yv3iokhj6m5DF4EfGyaoYA8vV"   # +2 (start -26100)
 
-# USDC↔xStock pool (LVcDubF4):
+# USDC↔xStock pool (LVcDubF4) — band around tickCurrent≈5912 (startIndex 5400, spacing 10):
 [[test.validator.clone]]
-address = "FZkhmBnVpLg79u1JZZMG9724y23kukvGdfNx3SA65vdf"
-
-[[test.validator.clone]]
-address = "Akoiq29JTXxCh6SDaeVwpzfWqzNrzF5CJLHmx7TEC1Rc"
+address = "Akoiq29JTXxCh6SDaeVwpzfWqzNrzF5CJLHmx7TEC1Rc"   # -2 (start 4200)
 
 [[test.validator.clone]]
-address = "5LYS6fvSi2MjenHbZXZu2DAd3mUPuwfn1yoghgXevsxt"
+address = "5LYS6fvSi2MjenHbZXZu2DAd3mUPuwfn1yoghgXevsxt"   # -1 (start 4800)
 
 [[test.validator.clone]]
-address = "9ZUDLrmXAUdw5GgyUpcyxxWwGZmPgFLEhSZLNWn2SwVt"
+address = "6GYNR3NikNtTw53VTSqrwPo8zyPP7MqnhNb6zEGAxTor"   # +0 (active, start 5400)
+
+[[test.validator.clone]]
+address = "5d45QMCiYZmSDZNecwu9x6BktjQj4nr3ibL123s9QAdu"   # +1 (start 6000)
+
+[[test.validator.clone]]
+address = "Ezo6sY7eAYTMhs3kUP3cRUsAF6haxnfW1CeSvpXeb3u5"   # +2 (start 6600)
 
 # Byreal SOL↔USDC pool accounts (for SOL→USDC funding swap)
 [[test.validator.clone]]
@@ -237,6 +185,131 @@ address = "9pRT6omDYMgmwGwHGKsVqpKoATEEGMgrYQQqA1tw67yn"
 
 [[test.validator.clone]]
 address = "6KjSMWrMxsEi67f551oBtq9PzRGy2ifLS4UjBiPnbqH"
+
+# ── Orca Whirlpool SOL↔CARDS pool (direct 1-hop SOL→CARDS position route) ──────────
+# Jupiter routes SOL→CARDS directly through this Whirlpool (dexes="Whirlpool" in the test),
+# avoiding multi-hop routes through oracle-based DEXs whose cloned state goes stale.
+[[test.validator.clone]]
+address = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"   # Orca Whirlpool program
+
+[[test.validator.clone]]
+address = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"   # Memo program (Whirlpool v2 swap)
+
+[[test.validator.clone]]
+address = "HNXTRVNoi63PZvBnVmZCUBouyF76zQbXHYtUpZcxKinc"   # SOL/CARDS whirlpool
+
+[[test.validator.clone]]
+address = "8BtWJRsn7ng6ekzkQE5mwceTZBfrcUTpUVviHUSFgWrz"   # token vault A
+
+[[test.validator.clone]]
+address = "7kx8gLMJmDzTBBvH1wrnuQygoVu2BDAQVHrthDLfbknK"   # token vault B
+
+[[test.validator.clone]]
+address = "8kZFZ6y96ATN7MuRz5fH5X1spAutJ3yzidQstWabCTtb"   # tick array
+
+[[test.validator.clone]]
+address = "7px1QDfBExCWLRkaZ5kbLfNnUfQPfgYU22rp1fdSWQNy"   # tick array
+
+[[test.validator.clone]]
+address = "BaFzTVCipUdsrrKuF5Vv362gujFedMgzvXx6LfYGoWhR"   # tick array
+
+[[test.validator.clone]]
+address = "BAo9hJuLQgZq8JuSYkfe43gLw7XTTZYHrXU3JpxBkyNK"   # oracle
+
+# ── Pump.fun AMM MEME pool (direct 1-hop USDC→MEME position route, native-SOL fee) ─────
+# Pump.fun charges a native-SOL protocol fee from the swap signer, so the position executor
+# must be a system-owned PDA (no Anchor data). Coin-creator-vault + per-user volume-accumulator
+# PDAs are created on-the-fly during the swap (paid from the executor's native fee buffer), so
+# they are NOT cloned. dexes="Pump.fun Amm" in the test. MEME = EmcxFTNV...pump (Token-2022).
+[[test.validator.clone]]
+address = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"   # Pump.fun AMM program
+
+[[test.validator.clone]]
+address = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"   # Pump.fun fee program
+
+[[test.validator.clone]]
+address = "GN9whJWrkgU8jBRpM5oa4iwSzYw1LivjB397DSyvbVG"   # USDC/MEME pool
+
+[[test.validator.clone]]
+address = "ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw"   # global config
+
+[[test.validator.clone]]
+address = "HkrXuFeGx1JkiTvwkuniZYR75tKxfVpLENHh2H5tEE9J"   # pool MEME reserve (Token-2022)
+
+[[test.validator.clone]]
+address = "DLxtrZH5Z1hVpM1jSRnuYDsLYK9uZHd4N9DeUBtuEaM"   # pool USDC reserve
+
+[[test.validator.clone]]
+address = "G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP"   # protocol fee recipient
+
+[[test.validator.clone]]
+address = "BMqY71czEnfwxTp7zTc3Wdkushpn8VfSJ6NGZX11djM1"   # protocol fee recipient ATA
+
+[[test.validator.clone]]
+address = "GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR"   # protocol fee recipient
+
+[[test.validator.clone]]
+address = "9FLiSF8v9KkokAZB99fS1BxsrmQNiMAycWYYVxK4JDnt"   # protocol fee recipient ATA
+
+[[test.validator.clone]]
+address = "C2aFPdENg4A2HQsmrd5rTw5TaYBX5Ku887cWjbFKtZpw"   # event authority / config
+
+[[test.validator.clone]]
+address = "5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"   # fee config
+
+[[test.validator.clone]]
+address = "5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6"   # fee config
+
+[[test.validator.clone]]
+address = "4EcDKGwpgYLVnMmjJCDrUN2DVLQKSpSKyMhqU1GbuMsv"   # fee recipient ATA
+
+# Pump.fun token A (73RFKrDB…pump) — SOL→MEME via the Pump.fun BONDING CURVE (program 6EF8…),
+# distinct from the migrated AMM (pAMMBay6…). dexes="Pump.fun" in the test. This curve trades with
+# pump's MINIMAL 13-account buy / 16-account sell. Native-SOL fee handled by the system-owned
+# executor + buffer. Creator-vault is cloned (sell needs it); the NULL sell wallet isn't cloned.
+[[test.validator.clone]]
+address = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"   # Pump.fun bonding-curve program
+
+[[test.validator.clone]]
+address = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"   # global config
+
+[[test.validator.clone]]
+address = "GW925tbn9XZYneWQH8gqbY2PfrSAAewaueSDD5MtgjQq"   # bonding curve account
+
+[[test.validator.clone]]
+address = "CUbdRtz6ZMh6zV479EqS6Ak33NQrPjVJDdypbh1poq1b"   # bonding curve MEME reserve (Token-2022)
+
+[[test.validator.clone]]
+address = "FMm1v24vH2F4E5JjfSVn8avkiHcnC6z7JfQikLfUktKT"   # creator vault (sell)
+
+[[test.validator.clone]]
+address = "GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS"   # active fee recipient
+
+[[test.validator.clone]]
+address = "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"   # event authority
+
+[[test.validator.clone]]
+address = "8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt"   # fee config
+
+[[test.validator.clone]]
+address = "A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW"   # sell fee-program record
+
+[[test.validator.clone]]
+address = "Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y"   # global volume accumulator (buy)
+
+[[test.validator.clone]]
+address = "5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6"   # buy fee-program record
+
+# Jupiter Pump.fun-route accounts the Route reads/writes (SOL→MEME_A bonding-curve open via
+# the ephemeral-cosigner legs). Missing → Route fails with legacy-Token 0xc on localnet.
+[[test.validator.clone]]
+address = "8sNeir4QsLsJdYpc9RZacohhK1Y5FLU3nC5LXgYB4aa6"   # pump route config (owner MAyhSmz…)
+
+[[test.validator.clone]]
+address = "21L1QB6DJ9HBvePgwN6jFuK3UT9mq2SgTq1oJ7D6cNiV"   # legacy-Token WSOL acct (route)
+
+[[test.validator.clone]]
+address = "GYH1Gae1wJytMSvMvw8JVcv7nuAbxi8i9erNVbERnzXd"   # legacy-Token WSOL acct (route)
 
 # ── Raydium CLMM CARDS↔USDC pool (CARDS position route, legacy SPL) ──────────────
 [[test.validator.clone]]
@@ -290,3 +363,60 @@ address = "A93dhWDGLSvFGUP2WHecsbK8cxua1jGm8cmAe5nTCd3e"
 
 [[test.validator.clone]]
 address = "DYP18qVXnFWBUkrfcnPGrbtDoj4gE5nBU8uatPTYXQbs"
+
+# ── Jupiter Perpetuals (Suite 3 full integration) ─────────────────────────────
+# Cloning these enables Suite 3 tests to run end-to-end.
+[[test.validator.clone]]
+address = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"   # Jupiter Perps program
+
+[[test.validator.clone]]
+address = "5BUwFW4nRbftYTDMbgxykoFWqWHPzahFSNAaaaJtVKsq"   # JLP pool
+
+[[test.validator.clone]]
+address = "7xS2gz2bTp3fwCC7knJvUWTEU9Tycczu6VhJYKgi1wdz"   # SOL custody
+
+[[test.validator.clone]]
+address = "G18jKKXQwBbrHeiK3C9MRXhkHsLHf7XgCSisykV46EZa"   # USDC custody
+
+[[test.validator.clone]]
+address = "H4ND9aYttUVLFmNypZqLjZ52FYiGvdEB45GmwNoKEjTj"   # perpetuals PDA
+
+# SOL custody's Doves price oracle (custody offset 384). createDecreasePositionRequest2
+# validates remaining[7] (custodyDovesPriceAccount) against this. Loaded as a genesis
+# account with the publish timestamp pinned to year ~2049 (offset 177) so it never
+# reads as stale on localnet (the cloned oracle is frozen while the localnet clock
+# advances; Jupiter's staleness check at oracle.rs:265 allows future-dated prices).
+[[test.validator.account]]
+address = "FYq2BWQ1V5P1WFBqr3qB2Kb5yHVvSv7upzKodgQE5zXh"   # SOL Doves oracle (fresh ts)
+filename = "test-accounts/jperp-sol-doves-oracle.json"
+
+# Clone the live USDC vault ATA so localnet inherits real USDC balance (~186 USDC).
+# Vault PDA seeds: ["privacy_vault_v3", USDC_MINT] on our program → 892BBWT3...
+# Vault ATA      : getAssociatedTokenAddress(USDC_MINT, vault_pda)   → 6TVfaAU1...
+[[test.validator.clone]]
+address = "6TVfaAU1DuJCfbqyXypNtz5Uzyo2tH2UF5smnNUyv2h4"   # USDC vault ATA (~186 USDC)
+
+# Pre-load a spendable USDC account for the provider wallet (1000 USDC) at genesis.
+# Real USDC can't be minted on localnet (we lack mint authority) and Jupiter swaps
+# are flaky there, so Suite 3 makes a genuine `transact` deposit from this account
+# to set the pool's total_tvl before the perp-open withdrawal.
+# ATA = getAssociatedTokenAddress(USDC_MINT, H6QRuiRs...wallet). Regenerate via the
+# node snippet that produced test-accounts/jperp-wallet-usdc.json.
+[[test.validator.account]]
+address = "G1fQz1iUqk7GNG5QRVnxD2vb1wkN7ne8v2Vkqp4DTriL"   # wallet USDC ATA (1000 USDC)
+filename = "test-accounts/jperp-wallet-usdc.json"
+
+# Pre-load an OPEN Jupiter SOL-short position at genesis (imitates a keeper that
+# already executed the increase request — localnet has no keeper, and the keeper
+# authority can't be signed for). Cloned from a real mainnet position with `owner`
+# rewritten to our executor PDA and `bump` to our canonical position bump, so
+# Steps 2/3 (set_tpsl / close) operate on a position with sizeUsd > 0.
+# Requires the FIXED claimant keypair keys/jperp-claimant.json AND the FIXED
+# withdrawal_id keys/jperp-withdrawal-id.json (executor seeds now include withdrawal_id,
+# so the PDA is deterministic per open).
+#   deriveSpendingKey(jperp-spending-key.json) + withdrawal_id
+#     → claimant FyyWLZRz... (keys/jperp-claimant.json, deterministically derived)
+#     → executor 44mLYfqS... → position 7Jj1vvJS...
+[[test.validator.account]]
+address = "7Jj1vvJSSfE7C2jHbuRysLeBR9Y1MYXtm9zSHpHaN4MK"   # open SOL-short position
+filename = "test-accounts/jperp-position.json"

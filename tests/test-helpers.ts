@@ -6,6 +6,8 @@
 
 import { AnchorProvider, BN, Wallet } from "@coral-xyz/anchor";
 import { PublicKey, Keypair, Connection } from "@solana/web3.js";
+import nacl from "tweetnacl";
+import { createHash } from "crypto";
 import { getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import fs from "fs";
 import os from "os";
@@ -114,6 +116,35 @@ export async function airdropAndConfirm(
 
 export function randomBytes32(): Uint8Array {
   return Keypair.generate().publicKey.toBytes();
+}
+
+/**
+ * Derives a Veilo spending key from a Solana keypair and an account index.
+ * In production: called client-side by signing a fixed message — private key never leaves wallet.
+ *
+ * spending_key[index] = sha256( Ed25519Sign(keypair, "veilo_spending_key_v1" || LE32(index)) )
+ *
+ * Ed25519 is deterministic. Index 0 is the primary account; higher indices give independent
+ * spending keys from the same wallet (separate prediction/position/perp vaults per user).
+ */
+export function deriveSpendingKey(keypair: Keypair, index = 0): Uint8Array {
+  const indexBuf = Buffer.alloc(4);
+  indexBuf.writeUInt32LE(index);
+  const message = Buffer.concat([Buffer.from("veilo_spending_key_v1"), indexBuf]);
+  const sig = nacl.sign.detached(message, keypair.secretKey);
+  return createHash("sha256").update(sig).digest();
+}
+
+/**
+ * Derives the position claimant keypair from the spending key and position PDA key.
+ * sha256("position_claimant" || spendingKey || positionPdaKeyBytes)
+ * Unique per position, recoverable from wallet key + position index.
+ */
+export function derivePositionClaimantKeypair(spendingKey: Uint8Array, positionPdaKeyBytes: Uint8Array): Keypair {
+  const seed = createHash("sha256")
+    .update(Buffer.concat([Buffer.from("position_claimant"), Buffer.from(spendingKey), Buffer.from(positionPdaKeyBytes)]))
+    .digest();
+  return Keypair.fromSeed(seed);
 }
 
 // Helper: Create and fund SPL token account
@@ -351,7 +382,6 @@ export class OffchainMerkleTree {
     // Precompute zero hashes
     let currentZero = new Uint8Array(32).fill(0);
     this.zeros.push(currentZero);
-    console.log(`Level 0 zero: ${bytesToBigIntBE(currentZero)}`);
 
     for (let i = 0; i < levels; i++) {
       const zeroField = poseidon.F.e(bytesToBigIntBE(currentZero));
@@ -359,7 +389,6 @@ export class OffchainMerkleTree {
       const hashBytes = poseidon.F.toString(hash, 16).padStart(64, "0");
       currentZero = Uint8Array.from(Buffer.from(hashBytes, "hex"));
       this.zeros.push(currentZero);
-      console.log(`Level ${i + 1} zero: ${bytesToBigIntBE(currentZero)}`);
     }
   }
 
@@ -565,11 +594,6 @@ export async function generateTransactionProof(inputs: {
     ),
   };
 
-  console.log(
-    "Generating proof with inputs:",
-    JSON.stringify(circuitInputs, null, 2),
-  );
-
   // Generate proof
   let proof, publicSignals;
   try {
@@ -592,13 +616,9 @@ export async function generateTransactionProof(inputs: {
     throw e;
   }
 
-  console.log("✓ Proof generated successfully");
-  console.log("Public signals:", publicSignals);
-
   // Verify proof off-chain
   const vKey = JSON.parse(fs.readFileSync(VK_PATH, "utf8"));
   const valid = await groth16.verify(vKey, publicSignals, proof);
-  console.log("Proof valid off-chain?", valid);
 
   if (!valid) {
     throw new Error("Generated proof is invalid!");

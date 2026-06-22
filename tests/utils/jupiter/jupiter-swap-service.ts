@@ -42,6 +42,34 @@ export class JupiterSwapService {
   }
 
   /**
+   * Jupiter Ultra order (Metis router) — reaches long-tail/multi-hop tokens (e.g. un-migrated
+   * Raydium LaunchLab) that the swap/v1 instructions API returns "not tradable" for. Returns a full
+   * `transaction` (base64) built for `taker`; decode it with `buildJupLegsFromUltra` to run via the
+   * staged-legs cosigner path. Pass the ephemeral cosigner as `taker`.
+   */
+  async getUltraOrder(
+    inputMint: PublicKey,
+    outputMint: PublicKey,
+    amount: number,
+    taker: PublicKey,
+  ): Promise<any> {
+    const ultraUrl = this.apiUrl.replace("/swap/v1", "/ultra/v1");
+    const params = new URLSearchParams({
+      inputMint: inputMint.toString(),
+      outputMint: outputMint.toString(),
+      amount: amount.toString(),
+      taker: taker.toString(),
+    });
+    const response = await fetch(`${ultraUrl}/order?${params}`);
+    if (!response.ok) {
+      throw new Error(`Jupiter Ultra order failed: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    if (data.error) throw new Error(`Jupiter Ultra order error: ${JSON.stringify(data.error)}`);
+    return data;
+  }
+
+  /**
    * Get quote from Jupiter API
    */
   async getQuote(
@@ -51,6 +79,7 @@ export class JupiterSwapService {
     slippageBps: number = 50,
     onlyDirectRoutes: boolean = false,
     dexes?: string,
+    maxAccounts?: number,
   ): Promise<QuoteResponse> {
     const params = new URLSearchParams({
       inputMint: inputMint.toString(),
@@ -59,6 +88,9 @@ export class JupiterSwapService {
       slippageBps: slippageBps.toString(),
       ...(onlyDirectRoutes ? { onlyDirectRoutes: "true" } : {}),
       ...(dexes ? { dexes } : {}),
+      // Multi-hop tokens (e.g. un-migrated Raydium LaunchLab) need a higher account budget or
+      // Jupiter returns "not tradable" with the restrictive defaults.
+      ...(maxAccounts ? { maxAccounts: maxAccounts.toString() } : {}),
     });
 
     const response = await fetch(`${this.apiUrl}/quote?${params}`);
@@ -82,6 +114,7 @@ export class JupiterSwapService {
     userPublicKey: PublicKey,
     wrapUnwrapSOL: boolean = true,
     useSharedAccounts: boolean = false,
+    destinationTokenAccount?: PublicKey,
   ): Promise<SwapInstructionsResponse> {
     const response = await fetch(`${this.apiUrl}/swap-instructions`, {
       method: "POST",
@@ -91,6 +124,7 @@ export class JupiterSwapService {
         userPublicKey: userPublicKey.toString(),
         wrapAndUnwrapSol: wrapUnwrapSOL,
         useSharedAccounts,
+        ...(destinationTokenAccount ? { destinationTokenAccount: destinationTokenAccount.toString() } : {}),
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: "auto",
       }),

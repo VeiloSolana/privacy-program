@@ -12,7 +12,10 @@ name = "privacy_pool"
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-default = []
+# custom-heap suppresses solana's default 32KB bump allocator so our 256KB allocator (in lib.rs)
+# is used — needed for the position-open path that runs Jupiter's multi-leg route in-program.
+custom-heap = []
+default = ["localnet", "custom-heap"]
 cpi = []
 # zk-verify feature is DEPRECATED and MUST NOT be used to disable ZK verification
 # ZK proof verification is unconditionally compiled in - this feature flag is kept for

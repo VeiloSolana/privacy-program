@@ -16,6 +16,8 @@
     "test:phoenix": "mocha -r ts-node/register -t 1000000 'tests/phoenix-integration.test.ts'",
     "test:position": "mocha -r ts-node/register -t 1000000 'tests/position-pool.test.ts'",
     "test:jperp": "mocha -r ts-node/register -t 1000000 'tests/jupiter-perp.test.ts'",
+    "test:prediction": "mocha -r ts-node/register -t 1000000 'tests/jupiter-prediction.test.ts'",
+    "test:pred-pool": "mocha -r ts-node/register -t 1000000 'tests/private-predictions.test.ts'",
     "deploy:devnet": "ts-node scripts/deploy-devnet.ts",
     "check-pool": "ts-node scripts/check-pool.ts",
     "init-global-config": "ts-node scripts/initialize-global-config.ts",

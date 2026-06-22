@@ -68,3 +68,6 @@ circuits/
 fixtures/
 claimant.ts
 test-output.txt
+test-logs/
+test-accounts/
+prediction/
