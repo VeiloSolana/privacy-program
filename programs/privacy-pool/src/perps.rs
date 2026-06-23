@@ -632,6 +632,15 @@ pub fn jperp_set_tpsl<'info>(
         PrivacyError::JperpInvalidAccounts
     );
 
+    // receivingAccount = executor's USDC ATA (proceeds land here when trigger fires).
+    // Bind it to the canonical executor ATA so a relayer cannot redirect trigger
+    // proceeds to an account that jperp_reissue_notes can never recover from.
+    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+    require!(
+        ctx.accounts.executor_token_account.key() == expected_executor_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
     let ix_data = encode_create_decrease_request(
         collateral_usd_delta,
         size_usd_delta,
@@ -643,7 +652,6 @@ pub fn jperp_set_tpsl<'info>(
         counter,
     );
 
-    // receivingAccount = executor's USDC ATA (proceeds land here when trigger fires)
     let receiving_account = ctx.accounts.executor_token_account.key();
 
     let account_metas = build_decrease_request_metas(
@@ -827,6 +835,15 @@ pub fn jperp_close_position<'info>(
         remaining[0].key(),
         JUPITER_PERP_PROGRAM_ID,
         PrivacyError::JperpInvalidAccounts
+    );
+
+    // receivingAccount = executor's USDC ATA (close proceeds land here). Bind it to
+    // the canonical executor ATA so a relayer cannot redirect proceeds to an account
+    // that jperp_reissue_notes can never recover from.
+    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+    require!(
+        ctx.accounts.executor_token_account.key() == expected_executor_ata,
+        PrivacyError::VaultTokenAccountNotATA
     );
 
     let ix_data = encode_create_decrease_request(
