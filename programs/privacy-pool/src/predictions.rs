@@ -150,10 +150,29 @@ pub fn prediction_open<'info>(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
+    // ── 7a. Relayer fee upper-bound (mirrors transact's max_fee cap) ──────────
+    // The fee is paid from the vault on top of deposit_amount and is bound into
+    // the ZK proof below (public_amount covers deposit_amount + fee). Without an
+    // upper cap, a relayer could set ext_data.fee to drain the entire vault. The
+    // fee is capped at fee_bps (+ margin) of deposit_amount, exactly as a normal
+    // withdrawal. fee == 0 remains valid (no minimum is imposed here).
+    let max_fee_u128 = (deposit_amount as u128)
+        .checked_mul(cfg.fee_bps as u128)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
+    require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+    let max_fee_with_margin = (max_fee_u128 as u64)
+        .checked_mul((10_000u64).saturating_add(cfg.fee_error_margin_bps as u64))
+        .map(|x| x / 10_000)
+        .unwrap_or(max_fee_u128 as u64);
+    require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
+
     // ── 8. ZK proof (withdrawal: public_amount negative) ─────────────────────
+    // public_amount binds the FULL outflow (deposit_amount + fee) so the consumed
+    // notes burn the fee too — it can no longer be drawn from other users' funds.
+    require!(total_outflow <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
     let public_inputs = TransactionPublicInputs {
         root,
-        public_amount: -(deposit_amount as i64),
+        public_amount: -(total_outflow as i64),
         ext_data_hash,
         mint_address,
         input_nullifiers,
@@ -204,7 +223,7 @@ pub fn prediction_open<'info>(
 
     // ── 13. TVL decrease ──────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
-        .checked_sub(deposit_amount)
+        .checked_sub(total_outflow)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
     // ── 14. Transfer relayer fee: vault → relayer ATA ─────────────────────────
