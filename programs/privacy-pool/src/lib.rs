@@ -2996,6 +2996,23 @@ pub mod privacy_pool {
         Ok(())
     }
 
+    pub fn remove_relayer(
+        ctx: Context<ConfigAdmin>,
+        _mint_address: Pubkey,
+        relayer: Pubkey
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        let n = cfg.num_relayers as usize;
+        let idx = cfg.relayers[..n].iter().position(|k| k == &relayer);
+        require!(idx.is_some(), PrivacyError::RelayerNotFound);
+        let idx = idx.unwrap();
+        // swap-remove: move the last entry into the removed slot, then clear the tail
+        cfg.relayers[idx] = cfg.relayers[n - 1];
+        cfg.relayers[n - 1] = Pubkey::default();
+        cfg.num_relayers -= 1;
+        Ok(())
+    }
+
     pub fn update_pool_config(
         ctx: Context<UpdatePoolConfig>,
         _mint_address: Pubkey,
@@ -3513,6 +3530,23 @@ pub mod privacy_pool {
         require!(n < MAX_RELAYERS, PrivacyError::TooManyRelayers);
         cfg.relayers[n] = new_relayer;
         cfg.num_relayers += 1;
+        Ok(())
+    }
+
+    /// Remove a whitelisted relayer from the position pool.
+    pub fn remove_position_relayer(
+        ctx: Context<PositionPoolAdmin>,
+        relayer: Pubkey
+    ) -> Result<()> {
+        let cfg = &mut ctx.accounts.config;
+        let n = cfg.num_relayers as usize;
+        let idx = cfg.relayers[..n].iter().position(|k| k == &relayer);
+        require!(idx.is_some(), PrivacyError::RelayerNotFound);
+        let idx = idx.unwrap();
+        // swap-remove: move the last entry into the removed slot, then clear the tail
+        cfg.relayers[idx] = cfg.relayers[n - 1];
+        cfg.relayers[n - 1] = Pubkey::default();
+        cfg.num_relayers -= 1;
         Ok(())
     }
 
@@ -4684,6 +4718,8 @@ pub struct NullifierSpent {
 pub enum PrivacyError {
     #[msg("Pool is paused")]
     Paused,
+    #[msg("Relayer not found")]
+    RelayerNotFound,
     #[msg("No denominations configured")]
     NoDenoms,
     #[msg("Too many denominations")]
