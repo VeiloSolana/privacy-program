@@ -51,7 +51,7 @@ upgradeable = false
 
 [test.validator]
 bind_address = "0.0.0.0"
-url = "https://mainnet.helius-rpc.com/?api-key="
+url = "https://mainnet.helius-rpc.com/?api-key=a3016be0-c6e1-441f-b8df-2310eb026b66"
 ledger = ".anchor/test-ledger"
 rpc_port = 8899
 
