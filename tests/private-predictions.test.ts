@@ -318,7 +318,7 @@ describe("Private Predictions (pool integration)", () => {
       log(`Generated ${atas.length} unique ephemeral ATAs`);
     });
 
-    it("prediction_open account layout: 15 accounts in correct order", () => {
+    it("prediction_open account layout: 16 accounts in correct order", () => {
       // Verify IDL account order matches expectations
       const idl = (program as any).idl;
       const ix = idl.instructions.find((i: any) => i.name === "predictionOpen" || i.name === "prediction_open");
@@ -329,7 +329,7 @@ describe("Private Predictions (pool integration)", () => {
         "config", "globalConfig", "vault",
         "inputTree", "outputTree", "nullifiers",
         "nullifierMarker0", "nullifierMarker1",
-        "relayer",
+        "relayer", "predictionSlot",
         "vaultTokenAccount", "ephemeralWallet",
         "ephemeralTokenAccount", "relayerTokenAccount",
         "tokenProgram", "systemProgram",
@@ -341,7 +341,7 @@ describe("Private Predictions (pool integration)", () => {
       }
     });
 
-    it("prediction_reissue account layout: 14 accounts with claimant signer", () => {
+    it("prediction_reissue account layout: 15 accounts with claimant signer", () => {
       const idl = (program as any).idl;
       const ix = idl.instructions.find((i: any) => i.name === "predictionReissue" || i.name === "prediction_reissue");
       if (!ix) throw new Error("prediction_reissue not found in IDL");
@@ -421,12 +421,18 @@ describe("Private Predictions (pool integration)", () => {
       depositAmount?: BN;
       n0?: Uint8Array;
       n1?: Uint8Array;
+      withdrawalId?: Uint8Array;
     } = {}) {
       const resolvedRelayer  = overrides.relayerKey ?? relayer;
       const claimantPubkey   = overrides.claimant ?? ephemeral.publicKey;
       const recipientPubkey  = overrides.recipient ?? claimantPubkey;
       const ephemeralAta     = overrides.ephemeralTokenAccount
         ?? await getAssociatedTokenAddress(testMint, claimantPubkey, false);
+      const withdrawalId     = overrides.withdrawalId ?? new Uint8Array(32).fill(0xcc);
+      const [predictionSlot] = PublicKey.findProgramAddressSync(
+        [Buffer.from("prediction_slot_v1"), testMint.toBuffer(), Buffer.from(withdrawalId)],
+        program.programId,
+      );
 
       const extData = {
         recipient: recipientPubkey,
@@ -454,7 +460,7 @@ describe("Private Predictions (pool integration)", () => {
           Array.from(nullifier1),
           Array.from(c0),
           Array.from(c1),
-          Array.from(new Uint8Array(32).fill(0xcc)), // withdrawal_id
+          Array.from(withdrawalId), // withdrawal_id
           overrides.deadline ?? new BN(Math.floor(Date.now() / 1000) + 3600),
           extData,
           tinyProof(),
@@ -471,6 +477,7 @@ describe("Private Predictions (pool integration)", () => {
           nullifierMarker0: marker0,
           nullifierMarker1: marker1,
           relayer: resolvedRelayer.publicKey,
+          predictionSlot,
           vaultTokenAccount,
           ephemeralWallet: claimantPubkey,
           ephemeralTokenAccount: ephemeralAta,
@@ -564,6 +571,10 @@ describe("Private Predictions (pool integration)", () => {
       // but the config PDA is still WSOL → ConstraintSeeds on config.
       const marker0 = nullifierMarkerPDA(program.programId, wrongMint, nm0);
       const marker1 = nullifierMarkerPDA(program.programId, wrongMint, nm1);
+      const [wrongSlot] = PublicKey.findProgramAddressSync(
+        [Buffer.from("prediction_slot_v1"), wrongMint.toBuffer(), new Uint8Array(32).fill(0xdd)],
+        program.programId,
+      );
 
       const ix = await (program.methods as any)
         .predictionOpen(
@@ -592,6 +603,7 @@ describe("Private Predictions (pool integration)", () => {
           nullifierMarker0: marker0,
           nullifierMarker1: marker1,
           relayer: relayer.publicKey,
+          predictionSlot: wrongSlot,
           vaultTokenAccount,
           ephemeralWallet: claimantPubkey,
           ephemeralTokenAccount: await getAssociatedTokenAddress(wrongMint, claimantPubkey, false),
@@ -618,6 +630,7 @@ describe("Private Predictions (pool integration)", () => {
       n1?: Uint8Array;
       oc0?: Uint8Array;
       oc1?: Uint8Array;
+      withdrawalId?: Uint8Array;
     } = {}) {
       const resolvedRelayer  = overrides.relayerKey ?? relayer;
       const resolvedClaimant = overrides.claimantKp ?? ephemeral;
@@ -625,6 +638,11 @@ describe("Private Predictions (pool integration)", () => {
       const nm1 = overrides.n1 ?? randomBytes32();
       const rc0 = overrides.oc0 ?? randomBytes32();
       const rc1 = overrides.oc1 ?? randomBytes32();
+      const withdrawalId = overrides.withdrawalId ?? new Uint8Array(32).fill(0xcc);
+      const [predictionSlot] = PublicKey.findProgramAddressSync(
+        [Buffer.from("prediction_slot_v1"), testMint.toBuffer(), Buffer.from(withdrawalId)],
+        program.programId,
+      );
 
       const extData = {
         recipient: PublicKey.default,
@@ -649,6 +667,7 @@ describe("Private Predictions (pool integration)", () => {
           testMint,
           Array.from(nm0), Array.from(nm1),
           Array.from(rc0), Array.from(rc1),
+          Array.from(withdrawalId), // withdrawal_id
           overrides.deadline ?? new BN(Math.floor(Date.now() / 1000) + 3600),
           extData,
           tinyProof(),
@@ -665,6 +684,7 @@ describe("Private Predictions (pool integration)", () => {
           nullifierMarker1:      marker1,
           relayer:               resolvedRelayer.publicKey,
           claimant:              resolvedClaimant.publicKey,
+          predictionSlot,
           ephemeralTokenAccount: claimantAta,
           vaultTokenAccount,
           tokenProgram:          TOKEN_PROGRAM_ID,
@@ -689,6 +709,11 @@ describe("Private Predictions (pool integration)", () => {
         claimant: fakeClaimant.publicKey,
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
+      const withdrawalId = new Uint8Array(32).fill(0xcc);
+      const [predictionSlot] = PublicKey.findProgramAddressSync(
+        [Buffer.from("prediction_slot_v1"), testMint.toBuffer(), Buffer.from(withdrawalId)],
+        program.programId,
+      );
 
       const ix = await (program.methods as any)
         .predictionReissue(
@@ -699,6 +724,7 @@ describe("Private Predictions (pool integration)", () => {
           testMint,
           Array.from(nm0), Array.from(nm1),
           Array.from(c0), Array.from(c1),
+          Array.from(withdrawalId), // withdrawal_id
           new BN(Math.floor(Date.now() / 1000) + 3600),
           extData,
           tinyProof(),
@@ -715,6 +741,7 @@ describe("Private Predictions (pool integration)", () => {
           nullifierMarker1: nullifierMarkerPDA(program.programId, testMint, nm1),
           relayer: relayer.publicKey,
           claimant: fakeClaimant.publicKey,
+          predictionSlot,
           ephemeralTokenAccount: ephemeralAta,
           vaultTokenAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -860,9 +887,14 @@ describe("Private Predictions (pool integration)", () => {
     let openExtHash: Uint8Array;
     let openMarker0: PublicKey;
     let openMarker1: PublicKey;
+    let s3PredictionSlot: PublicKey;
 
+    const S3_WITHDRAWAL_ID = new Uint8Array(32).fill(0xee);
     const DEPOSIT_AMOUNT  = new BN(10_000_000); // 10 USDC — funded via genesis wallet ATA
     const WITHDRAW_AMOUNT = new BN(5_000_000);  // 5 USDC — prediction stake
+    // Relayer fee on open (paid vault → relayer ATA). Capped at fee_bps of deposit_amount
+    // (= WITHDRAW_AMOUNT); $0.01 is well within 0.5% of 5 USDC.
+    const PRED_OPEN_FEE   = new BN(10_000);     // $0.01 USDC
 
     before(async function () {
       this.timeout(300_000); // proof generation can take ~60–90s
@@ -1008,7 +1040,8 @@ describe("Private Predictions (pool integration)", () => {
       openN0 = computeNullifier(s3Poseidon, noteCommitment, noteLeafIndex, notePriv);
       openN1 = computeNullifier(s3Poseidon, ob0Commit, 0, ob0Priv);  // 0-value dummy
 
-      const changeAmount = BigInt(DEPOSIT_AMOUNT.toString()) - BigInt(WITHDRAW_AMOUNT.toString());
+      // Withdrawal burns WITHDRAW_AMOUNT (→ ephemeral) + PRED_OPEN_FEE (→ relayer).
+      const changeAmount = BigInt(DEPOSIT_AMOUNT.toString()) - BigInt(WITHDRAW_AMOUNT.toString()) - BigInt(PRED_OPEN_FEE.toString());
       const oc0Priv = randomBytes32(); const oc0Pub = derivePublicKey(s3Poseidon, oc0Priv); const oc0Blind = randomBytes32();
       openC0 = computeCommitment(s3Poseidon, changeAmount, oc0Pub, oc0Blind, USDC_MINT); // change
       const oc1Priv = randomBytes32(); const oc1Pub = derivePublicKey(s3Poseidon, oc1Priv); const oc1Blind = randomBytes32();
@@ -1017,7 +1050,7 @@ describe("Private Predictions (pool integration)", () => {
       openExtData = {
         recipient: ephemeralKp.publicKey,
         relayer: s3Relayer.publicKey,
-        fee: new BN(0), refund: new BN(0),
+        fee: PRED_OPEN_FEE, refund: new BN(0),
         claimant: ephemeralKp.publicKey,
       };
       openExtHash = computeExtDataHash(s3Poseidon, openExtData);
@@ -1025,7 +1058,7 @@ describe("Private Predictions (pool integration)", () => {
       try {
         openProof = await generateTransactionProof({
           root: depositRoot,
-          publicAmount: -BigInt(WITHDRAW_AMOUNT.toString()),
+          publicAmount: -(BigInt(WITHDRAW_AMOUNT.toString()) + BigInt(PRED_OPEN_FEE.toString())),
           extDataHash: openExtHash, mintAddress: USDC_MINT,
           inputNullifiers: [openN0, openN1],
           outputCommitments: [openC0, openC1],
@@ -1046,13 +1079,17 @@ describe("Private Predictions (pool integration)", () => {
 
       openMarker0 = nullifierMarkerPDA(program.programId, USDC_MINT, openN0);
       openMarker1 = nullifierMarkerPDA(program.programId, USDC_MINT, openN1);
+      [s3PredictionSlot] = PublicKey.findProgramAddressSync(
+        [Buffer.from("prediction_slot_v1"), USDC_MINT.toBuffer(), Buffer.from(S3_WITHDRAWAL_ID)],
+        program.programId,
+      );
 
       // ── 7. Build ALT ────────────────────────────────────────────────────────
       suite3Lut = await buildAlt(provider, s3Relayer, [
         TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, SystemProgram.programId,
         globalConfig, usdcConfig, usdcVault, usdcNoteTree, usdcNullifiers, usdcVaultAta,
         ephemeralKp.publicKey, ephemeralAta, relayerAta,
-        openMarker0, openMarker1,
+        openMarker0, openMarker1, s3PredictionSlot,
       ]);
 
       suiteReady = true;
@@ -1071,7 +1108,8 @@ describe("Private Predictions (pool integration)", () => {
       const relayerAta = await getAssociatedTokenAddress(USDC_MINT, s3Relayer.publicKey, false);
       const vaultBefore = await tokenBal(provider, usdcVaultAta);
       const ephemeralBefore = await tokenBal(provider, ephemeralAta);
-      log(`vault before: ${usd(vaultBefore)}   ephemeral before: ${usd(ephemeralBefore)}`);
+      const relayerFeeBefore = await tokenBal(provider, relayerAta);
+      log(`vault before: ${usd(vaultBefore)}   ephemeral before: ${usd(ephemeralBefore)}   relayerFee: ${usd(relayerFeeBefore)}`);
 
       const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
       const openIx = await (program.methods as any)
@@ -1084,7 +1122,7 @@ describe("Private Predictions (pool integration)", () => {
           ephemeralKp.publicKey,
           Array.from(openN0), Array.from(openN1),
           Array.from(openC0), Array.from(openC1),
-          Array.from(new Uint8Array(32).fill(0xee)), // withdrawal_id (unused in handler)
+          Array.from(S3_WITHDRAWAL_ID), // withdrawal_id (binds the slot)
           new BN(Math.floor(Date.now() / 1000) + 3600),
           openExtData,
           openProof,
@@ -1096,6 +1134,7 @@ describe("Private Predictions (pool integration)", () => {
           inputTree: usdcNoteTree, outputTree: usdcNoteTree, nullifiers: usdcNullifiers,
           nullifierMarker0: openMarker0, nullifierMarker1: openMarker1,
           relayer: s3Relayer.publicKey,
+          predictionSlot: s3PredictionSlot,
           vaultTokenAccount: usdcVaultAta,
           ephemeralWallet: ephemeralKp.publicKey,
           ephemeralTokenAccount: ephemeralAta,
@@ -1114,13 +1153,23 @@ describe("Private Predictions (pool integration)", () => {
       log(`vault after: ${usd(vaultAfter)}   ephemeral after: ${usd(ephemeralAfter)}`);
       log(`ephemeral SOL: ${(ephemeralSol / LAMPORTS_PER_SOL).toFixed(5)} SOL`);
 
+      const relayerFeeAfter = await tokenBal(provider, relayerAta);
+      log(`relayerFee after: ${usd(relayerFeeAfter)}`);
+
+      // Vault pays WITHDRAW_AMOUNT (→ ephemeral) + PRED_OPEN_FEE (→ relayer).
       const withdrew = vaultBefore - vaultAfter;
-      if (withdrew !== Number(WITHDRAW_AMOUNT.toString())) {
-        throw new Error(`Vault should have decreased by ${usd(WITHDRAW_AMOUNT.toString())}, decreased by ${usd(withdrew)}`);
+      if (withdrew !== Number(WITHDRAW_AMOUNT.add(PRED_OPEN_FEE).toString())) {
+        throw new Error(`Vault should have decreased by ${usd(WITHDRAW_AMOUNT.add(PRED_OPEN_FEE))} (stake+fee), decreased by ${usd(withdrew)}`);
       }
       if (ephemeralAfter - ephemeralBefore !== Number(WITHDRAW_AMOUNT.toString())) {
         throw new Error(`Ephemeral ATA should have gained ${usd(WITHDRAW_AMOUNT.toString())}`);
       }
+      // FEE CHECK: relayer ATA must have gained exactly PRED_OPEN_FEE.
+      const feeReceived = relayerFeeAfter - relayerFeeBefore;
+      if (feeReceived !== Number(PRED_OPEN_FEE.toString())) {
+        throw new Error(`Relayer should have received ${usd(PRED_OPEN_FEE)} fee, got ${usd(feeReceived)}`);
+      }
+      log(`✓ fee check: relayer received ${usd(feeReceived)} on open`);
       if (ephemeralSol < 4_000_000) {
         throw new Error("Ephemeral wallet should have received SOL for tx fees");
       }
@@ -1214,6 +1263,7 @@ describe("Private Predictions (pool integration)", () => {
           Array.from(reissueRoot), 0, 0, reissueAmount,
           Array.from(reissueExtHash), USDC_MINT,
           Array.from(rn0), Array.from(rn1), Array.from(rc0), Array.from(rc1),
+          Array.from(S3_WITHDRAWAL_ID), // withdrawal_id (same slot as the open)
           new BN(Math.floor(Date.now() / 1000) + 3600),
           reissueExtData, reissueProof, null,
         )
@@ -1223,6 +1273,7 @@ describe("Private Predictions (pool integration)", () => {
           nullifierMarker0: rMarker0, nullifierMarker1: rMarker1,
           relayer: s3Relayer.publicKey,
           claimant: ephemeralKp.publicKey,
+          predictionSlot: s3PredictionSlot,
           ephemeralTokenAccount: ephemeralAta,
           vaultTokenAccount: usdcVaultAta,
           tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
@@ -1232,7 +1283,7 @@ describe("Private Predictions (pool integration)", () => {
       const reissueLut = await buildAlt(provider, s3Relayer, [
         TOKEN_PROGRAM_ID, SystemProgram.programId, globalConfig,
         usdcConfig, usdcVault, usdcNoteTree, usdcNullifiers, usdcVaultAta,
-        ephemeralKp.publicKey, ephemeralAta, rMarker0, rMarker1,
+        ephemeralKp.publicKey, ephemeralAta, rMarker0, rMarker1, s3PredictionSlot,
       ]);
 
       const reissueSig = await sendVersionedTx(

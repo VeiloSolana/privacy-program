@@ -906,7 +906,9 @@ pub fn jperp_close_position<'info>(
 /// and proceeds have arrived in the executor's USDC ATA.
 ///
 /// The claimant must co-sign to prevent a malicious relayer from stealing proceeds.
-/// `reissue_amount` must not exceed `jperp_slot.amount - jperp_slot.reissued`.
+/// `reissue_amount` is bounded only by the executor ATA's actual balance — proceeds that
+/// exceed the original deposit (a winning position) reissue fully, since each note minted
+/// is backed by the real USDC moved into the vault.
 #[allow(clippy::too_many_arguments)]
 pub fn jperp_reissue_notes(
     ctx: Context<crate::JperpReissueNotes>,
@@ -953,11 +955,10 @@ pub fn jperp_reissue_notes(
         PrivacyError::InvalidClaimant
     );
 
+    // No profit cap: each reissue is backed by the executor-ATA→vault transfer (below) +
+    // matching TVL bump, so winning positions reissue fully. The ATA balance check blocks
+    // double-mint; `slot.reissued` is now just a cumulative audit counter.
     let slot = &mut ctx.accounts.jperp_slot;
-    let available = slot.amount
-        .checked_sub(slot.reissued)
-        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
-    require!(reissue_amount <= available, PrivacyError::JperpSlotOverdraft);
     slot.reissued = slot.reissued
         .checked_add(reissue_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;

@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:pred-pool"
+test = "npm run test:jperp"
 
 [test]
 startup_wait = 150000
@@ -51,7 +51,7 @@ upgradeable = false
 
 [test.validator]
 bind_address = "0.0.0.0"
-url = "https://mainnet.helius-rpc.com/?api-key=a3016be0-c6e1-441f-b8df-2310eb026b66"
+url = "https://mainnet.helius-rpc.com/?api-key="
 ledger = ".anchor/test-ledger"
 rpc_port = 8899
 
@@ -420,3 +420,14 @@ filename = "test-accounts/jperp-wallet-usdc.json"
 [[test.validator.account]]
 address = "7Jj1vvJSSfE7C2jHbuRysLeBR9Y1MYXtm9zSHpHaN4MK"   # open SOL-short position
 filename = "test-accounts/jperp-position.json"
+
+# Pre-load an OPEN Jupiter SOL-LONG position at genesis (Suite 3b). A long is collateralised
+# in SOL, so the long suite funds it from a WSOL pool (collateral mint == pool mint == input
+# mint → no swap). Baked from the same real mainnet position bytes: executor seeded by the
+# WSOL pool mint + a LONG-specific withdrawal_id (keys/jperp-withdrawal-id-long.json),
+# collateralCustody patched → SOL, side → Long, canonical long-position bump.
+# Regenerate with: node scripts/bake-jperp-long-fixture.mjs
+#   executor EtFZomn6... → long position ECLth6ao...
+[[test.validator.account]]
+address = "ECLth6aoA99qCbSXSgf6xs4LK9cvAykhKDSH8vr5EXsz"   # open SOL-long position
+filename = "test-accounts/jperp-position-long.json"

@@ -339,10 +339,14 @@ impl JupiterPerpExecutor {
 /// Per-deposit slot for Jupiter Perps — created at `jperp_open_position`,
 /// consumed across one or more `jperp_reissue_notes` calls.
 ///
-/// Enforces two invariants:
-/// 1. `reissued <= amount` — a user can never re-mint more than they deposited.
-/// 2. Only the holder of `claimant_pubkey` (the ephemeral key committed in the ZK proof)
+/// Enforces:
+/// 1. Only the holder of `claimant_pubkey` (the ephemeral key committed in the ZK proof)
 ///    can sign `jperp_reissue_notes`, preventing relayer theft.
+///
+/// `reissued` is a cumulative audit counter of USDC re-minted across partial reissues.
+/// It is NOT an enforced ceiling: a winning position legitimately reissues more than was
+/// deposited, and each note minted is fully backed by the real USDC transferred into the
+/// vault during reissue (double-minting is blocked by the executor ATA balance check).
 ///
 /// Seeds: [b"jperp_slot_v1", mint_address, withdrawal_id]
 #[account]
@@ -357,6 +361,34 @@ pub struct JupiterPerpSlot {
 }
 
 impl JupiterPerpSlot {
+    pub const LEN: usize = 8 + 8 + 8 + 32 + 1; // 57 bytes
+}
+
+/// Per-deposit slot for Jupiter Predictions — created at `prediction_open`,
+/// consumed across one or more `prediction_reissue` calls. Mirrors `JupiterPerpSlot`.
+///
+/// Enforces: only the holder of `claimant_pubkey` (the ephemeral key committed in the
+/// ZK proof) can sign `prediction_reissue`, preventing relayer theft. It also pairs every
+/// open to its reissue(s) on-chain (via `withdrawal_id` in the seeds) for reconciliation
+/// and blocks reissuing against a non-existent open.
+///
+/// `reissued` is a cumulative audit counter of USDC re-minted across partial reissues —
+/// NOT an enforced ceiling, since a winning bet legitimately reissues more than was staked
+/// and each note minted is backed by the real USDC transferred into the vault.
+///
+/// Seeds: [b"prediction_slot_v1", mint_address, withdrawal_id]
+#[account]
+pub struct PredictionSlot {
+    /// USDC staked into the prediction position via this slot.
+    pub amount: u64,
+    /// USDC already re-minted as private notes (cumulative across partial reissues).
+    pub reissued: u64,
+    /// Ephemeral keypair committed in the ZK proof at deposit time.
+    pub claimant_pubkey: Pubkey,
+    pub bump: u8,
+}
+
+impl PredictionSlot {
     pub const LEN: usize = 8 + 8 + 8 + 32 + 1; // 57 bytes
 }
 
@@ -2755,6 +2787,16 @@ pub struct PredictionOpen<'info> {
     #[account(mut)]
     pub relayer: Signer<'info>,
 
+    /// Per-deposit slot — records staked amount + claimant for reissue reconciliation.
+    #[account(
+        init,
+        payer = relayer,
+        seeds = [b"prediction_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
+        bump,
+        space = PredictionSlot::LEN
+    )]
+    pub prediction_slot: Box<Account<'info, PredictionSlot>>,
+
     /// Vault's USDC ATA — source of funds.
     /// CHECK: Validated as ATA(vault, mint_address) in handler.
     #[account(mut)]
@@ -2795,7 +2837,8 @@ pub struct PredictionOpen<'info> {
     input_nullifier_0: [u8; 32],
     input_nullifier_1: [u8; 32],
     output_commitment_0: [u8; 32],
-    output_commitment_1: [u8; 32]
+    output_commitment_1: [u8; 32],
+    withdrawal_id: [u8; 32]
 )]
 pub struct PredictionReissue<'info> {
     #[account(
@@ -2858,6 +2901,17 @@ pub struct PredictionReissue<'info> {
 
     /// Ephemeral keypair — co-signs as USDC ATA authority. Must match ext_data.claimant.
     pub claimant: Signer<'info>,
+
+    /// Per-deposit slot — claimant binding + cumulative reissue audit counter.
+    /// CHECK: PDA address validated by seeds; existence, owner, and claimant are verified
+    /// in the handler AFTER the ZK proof (mirrors the ephemeral-ATA check) so cheaper
+    /// validations and the proof run first.
+    #[account(
+        mut,
+        seeds = [b"prediction_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
+        bump
+    )]
+    pub prediction_slot: UncheckedAccount<'info>,
 
     /// Ephemeral wallet's USDC ATA — source of proceeds.
     /// CHECK: Validated as ATA(claimant, mint_address) in handler.
@@ -4250,7 +4304,8 @@ pub mod privacy_pool {
     ///
     /// The claimant (ephemeral key from the original deposit) must co-sign to
     /// prevent relayer theft. Supports partial reissues across multiple calls;
-    /// total reissued amount is capped at the original deposit amount.
+    /// reissued totals may exceed the original deposit when the position profits,
+    /// since each reissue is backed by real USDC moved into the vault.
     ///
     /// See `jupiter_perp::jperp_reissue_notes` for full documentation.
     #[inline(never)]
@@ -4365,6 +4420,7 @@ pub mod privacy_pool {
         input_nullifier_1: [u8; 32],
         output_commitment_0: [u8; 32],
         output_commitment_1: [u8; 32],
+        withdrawal_id: [u8; 32],
         deadline: i64,
         ext_data: ExtData,
         proof: zk::TransactionProof,
@@ -4382,6 +4438,7 @@ pub mod privacy_pool {
             input_nullifier_1,
             output_commitment_0,
             output_commitment_1,
+            withdrawal_id,
             deadline,
             ext_data,
             proof,

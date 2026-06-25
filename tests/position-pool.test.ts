@@ -1312,9 +1312,14 @@ describe("Position Pool", () => {
       console.log("  Getting Jupiter quote CARDS→USDC (Raydium CLMM direct), amount:", swapAmount.toString());
       const quote = await jupiterService.getQuote(CARDS_MINT, USDC_MINT, Number(swapAmount), 100, true, "Raydium CLMM");
       const expectedOut = BigInt(quote.outAmount);
-      const usdcDestAmount = (expectedOut * 90n) / 100n;
-      const minAmountOut = usdcDestAmount;
-      console.log("  Expected USDC output:", expectedOut.toString());
+      // FEE CHECK: charge a relayer swap fee on close. `dest_amount` (the privately-minted
+      // note) is conservative; the fee is paid from the swap output and the program enforces
+      // received - fee >= dest_amount. Setting minAmountOut = dest_amount + fee guarantees
+      // that invariant holds regardless of the live swap output.
+      const usdcDestAmount = (expectedOut * 80n) / 100n; // note credited privately
+      const closeFee = (expectedOut * 5n) / 100n;        // relayer fee (sits in the buffer)
+      const minAmountOut = usdcDestAmount + closeFee;     // received floor → received-fee >= dest
+      console.log("  Expected USDC output:", expectedOut.toString(), " closeFee:", closeFee.toString());
 
       const positionPdaAddr = derivePositionPda(program.programId, ps.positionPdaKeyBytes);
       const positionVaultRecord = derivePositionVaultRecord(program.programId, CARDS_MINT);
@@ -1352,7 +1357,7 @@ describe("Position Pool", () => {
 
       const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
       const swapParamsHash = computeSwapParamsHash(poseidon, CARDS_MINT, USDC_MINT, minAmountOut, deadline, swapDataHash, usdcDestAmount);
-      const extData3 = { recipient: payer.publicKey, relayer: payer.publicKey, fee: new BN(0), refund: new BN(0), claimant: SystemProgram.programId };
+      const extData3 = { recipient: payer.publicKey, relayer: payer.publicKey, fee: new BN(closeFee.toString()), refund: new BN(0), claimant: SystemProgram.programId };
       const extDataHash3 = computeExtDataHash(poseidon, extData3);
 
       const positionRoot = positionOffchainTree.getRoot();
@@ -1379,6 +1384,7 @@ describe("Position Pool", () => {
       const posNullMarker0 = derivePositionNullifierMarker(program.programId, CARDS_MINT, positionNullifier);
       const posNullMarker1 = derivePositionNullifierMarker(program.programId, CARDS_MINT, dummyXNull);
       const relayerUsdcAta = await getOrCreateAssociatedTokenAccount(connection, payer, USDC_MINT, payer.publicKey);
+      const relayerFeeBefore = BigInt((await connection.getTokenAccountBalance(relayerUsdcAta.address)).value.amount);
 
       // close_position deposits the swapped USDC into the USDC pool vault's ATA — ensure it exists.
       // (The USDC vault ATA is otherwise first created in the xStock block, which runs later.)
@@ -1439,6 +1445,14 @@ describe("Position Pool", () => {
       await connection.confirmTransaction(tx3, "confirmed");
       console.log("  ✅ close_position (CARDS) tx:", tx3);
       await logState("AFTER close CARDS");
+
+      // FEE CHECK: the relayer's USDC ATA must have gained exactly closeFee.
+      const relayerFeeAfter = BigInt((await connection.getTokenAccountBalance(relayerUsdcAta.address)).value.amount);
+      const feeReceived = relayerFeeAfter - relayerFeeBefore;
+      if (feeReceived !== closeFee) {
+        throw new Error(`relayer should have received ${closeFee} fee on close, got ${feeReceived}`);
+      }
+      console.log(`  ✅ fee check: relayer received ${feeReceived} µUSDC swap fee on close`);
 
       positionOffchainTree.insert(cChangeCommit);
       usdcOffchainTree.insert(usdcDestCommit);

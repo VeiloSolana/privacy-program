@@ -51,7 +51,9 @@ import {
   getAssociatedTokenAddress,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
+  createSyncNativeInstruction,
 } from "@solana/spl-token";
 import { buildPoseidon } from "circomlibjs";
 import * as crypto from "crypto";
@@ -999,6 +1001,7 @@ describe("Jupiter Perpetuals Integration", () => {
     let claimantKp: Keypair;
     let executor: PublicKey;
     let executorUsdcAta: PublicKey;
+    let s3RelayerUsdcAta: PublicKey;
     let jperpSlot: PublicKey;
     // Step-1 PDAs (derived from fixed inputs; included in the ALT)
     let s3Position: PublicKey;
@@ -1033,6 +1036,9 @@ describe("Jupiter Perpetuals Integration", () => {
     let openC1: Uint8Array;
     const openCounter = new BN(Math.floor(Math.random() * 1_000_000_000));
     const COLLATERAL = new BN(2_000_000); // $2 USDC
+    // Relayer fee charged on open (paid vault → relayer ATA). Capped at fee_bps (50 = 0.5%)
+    // of deposit_amount (= COLLATERAL): 2 USDC × 0.5% = $0.01 max; $0.005 is within cap.
+    const OPEN_FEE = new BN(5_000); // $0.005 USDC
 
     before(async function () {
       this.timeout(180_000); // generates real Groth16 proofs (deposit + open) in setup
@@ -1204,6 +1210,14 @@ describe("Jupiter Perpetuals Integration", () => {
       executor = executorPDA(program.programId, USDC_MINT, claimantKp.publicKey, withdrawalId);
       executorUsdcAta = await getAssociatedTokenAddress(USDC_MINT, executor, true);
       jperpSlot = slotPDA(program.programId, USDC_MINT, withdrawalId);
+
+      // Relayer's USDC ATA — receives the OPEN_FEE charged on jperp_open_position.
+      s3RelayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, s3Relayer.publicKey, false);
+      await provider.sendAndConfirm(
+        new Transaction().add(createAssociatedTokenAccountInstruction(
+          wallet.publicKey, s3RelayerUsdcAta, s3Relayer.publicKey, USDC_MINT)),
+        [],
+      ).catch(() => { /* already exists */ });
       log(`✓ setup: executor PDA ${shortKey(executor)} — owns the position; user wallet never appears on-chain`);
 
       // 7. Pre-create executor ATA (vault→executor transfer requires it to exist)
@@ -1226,7 +1240,8 @@ describe("Jupiter Perpetuals Integration", () => {
       const obCommit = computeCommitment(poseidon, 0n, obPub, obBlind, USDC_MINT);
       openN1 = computeNullifier(poseidon, obCommit, 0, obPriv);            // 0-value dummy input
 
-      const changeAmount = BigInt(depositAmount.sub(COLLATERAL).toString());
+      // Withdrawal burns COLLATERAL (→ executor) + OPEN_FEE (→ relayer); change = rest of noteA.
+      const changeAmount = BigInt(depositAmount.sub(COLLATERAL).sub(OPEN_FEE).toString());
       const oc0Priv = randomBytes32(); const oc0Pub = derivePublicKey(poseidon, oc0Priv); const oc0Blind = randomBytes32();
       openC0 = computeCommitment(poseidon, changeAmount, oc0Pub, oc0Blind, USDC_MINT); // change note
       const oc1Priv = randomBytes32(); const oc1Pub = derivePublicKey(poseidon, oc1Priv); const oc1Blind = randomBytes32();
@@ -1235,7 +1250,7 @@ describe("Jupiter Perpetuals Integration", () => {
       // ext_data the open commits to (must match Step 1's submission exactly).
       const openExtData = {
         recipient: executor, relayer: s3Relayer.publicKey,
-        fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey,
+        fee: OPEN_FEE, refund: new BN(0), claimant: claimantKp.publicKey,
       };
       const openExtHash = computeExtDataHash(poseidon, openExtData);
 
@@ -1245,7 +1260,7 @@ describe("Jupiter Perpetuals Integration", () => {
 
       openProof = await generateTransactionProof({
         root: openRoot,
-        publicAmount: -BigInt(COLLATERAL.toString()),
+        publicAmount: -BigInt(COLLATERAL.add(OPEN_FEE).toString()),
         extDataHash: openExtHash,
         mintAddress: USDC_MINT,
         inputNullifiers: [openN0, openN1],
@@ -1279,7 +1294,7 @@ describe("Jupiter Perpetuals Integration", () => {
         JUPITER_PERP_PROGRAM_ID, s3Perpetuals, JLP_POOL,
         s3Position, s3PositionRequest, s3PositionRequestAta,
         CUSTODIES.SOL, CUSTODIES.USDC, USDC_MINT, PERPS_EVENT_AUTHORITY,
-        s3Marker0, s3Marker1,
+        s3Marker0, s3Marker1, s3RelayerUsdcAta,
       ]);
       log(`✓ setup: position PDA ${shortKey(s3Position)} (genesis-cloned SOL-short, owner rewritten to executor)`);
       log(`✓ setup: ALT ${shortKey(suite3Lut.key)} built (${suite3Lut.state.addresses.length} addrs) — keeps the versioned tx < 1232 bytes`);
@@ -1297,12 +1312,13 @@ describe("Jupiter Perpetuals Integration", () => {
       log(`spends nullifiers ${shortKey(new PublicKey(openN0))}, ${shortKey(new PublicKey(openN1))}  → 14 Jupiter accounts, CU budget 600k`);
       const vaultBefore = await tokenBal(provider, usdcVaultAta);
       const execBefore = await tokenBal(provider, executorUsdcAta);
-      log(`balances before:  vault ${usd(vaultBefore)}   executor ${usd(execBefore)}`);
+      const relayerFeeBefore = await tokenBal(provider, s3RelayerUsdcAta);
+      log(`balances before:  vault ${usd(vaultBefore)}   executor ${usd(execBefore)}   relayerFee ${usd(relayerFeeBefore)}`);
 
       const extData = {
         recipient: executor,
         relayer: s3Relayer.publicKey,
-        fee: new BN(0),
+        fee: OPEN_FEE,
         refund: new BN(0),
         claimant: claimantKp.publicKey,
       };
@@ -1361,7 +1377,7 @@ describe("Jupiter Perpetuals Integration", () => {
           vaultTokenAccount: usdcVaultAta,
           executor,
           executorTokenAccount: executorUsdcAta,
-          relayerTokenAccount: s3Relayer.publicKey, // fee=0, not validated
+          relayerTokenAccount: s3RelayerUsdcAta,
           jperpSlot,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
@@ -1377,7 +1393,20 @@ describe("Jupiter Perpetuals Integration", () => {
 
       const vaultAfter = await tokenBal(provider, usdcVaultAta);
       const execAfter = await tokenBal(provider, executorUsdcAta);
-      log(`balances after:   vault ${usd(vaultAfter)}   executor ${usd(execAfter)}  (collateral routed into Jupiter's positionRequest)`);
+      const relayerFeeAfter = await tokenBal(provider, s3RelayerUsdcAta);
+      log(`balances after:   vault ${usd(vaultAfter)}   executor ${usd(execAfter)}   relayerFee ${usd(relayerFeeAfter)}`);
+
+      // FEE CHECK: the relayer ATA must have gained exactly OPEN_FEE, and the vault must
+      // have paid COLLATERAL (→ executor) + OPEN_FEE (→ relayer).
+      const feeReceived = relayerFeeAfter - relayerFeeBefore;
+      if (feeReceived !== Number(OPEN_FEE.toString())) {
+        throw new Error(`relayer should have received ${usd(OPEN_FEE)} fee, got ${usd(feeReceived)}`);
+      }
+      const vaultPaid = vaultBefore - vaultAfter;
+      if (vaultPaid !== Number(COLLATERAL.add(OPEN_FEE).toString())) {
+        throw new Error(`vault should have paid ${usd(COLLATERAL.add(OPEN_FEE))} (collateral+fee), paid ${usd(vaultPaid)}`);
+      }
+      log(`✓ fee check: relayer received ${usd(feeReceived)}; vault paid collateral+fee`);
       log(`positionRequest ${shortKey(s3PositionRequest)} created — Jupiter's keeper settles it into position ${shortKey(s3Position)}`);
       log(`slot ${shortKey(jperpSlot)} records ${usd(COLLATERAL)} reissuable, bound to claimant ${shortKey(claimantKp.publicKey)}`);
       log(`✓ tx ${sig.slice(0, 16)}…`);
@@ -1502,15 +1531,32 @@ describe("Jupiter Perpetuals Integration", () => {
       log(`✓ rejected with Missing signature — a relayer alone cannot drain settled proceeds`);
     });
 
-    it("jperp_reissue_notes: rejects over-reissue (JperpSlotOverdraft)", async function () {
+    it("jperp_reissue_notes: reissue is bounded by executor ATA balance (InsufficientFundsForWithdrawal)", async function () {
       if (!suiteReady || !step1Passed) return this.skip();
 
-      console.log("\n  ▶ GUARD — reissuing more than the slot recorded must be rejected");
-      log(`slot caps reissue at ${usd(COLLATERAL)}; attempting ${usd(COLLATERAL.add(new BN(1)))}`);
-      // slot.amount == COLLATERAL ($2). Trying $2 + 1 µUSDC triggers overdraft.
-      const tooMuch = COLLATERAL.add(new BN(1));
-      const n0 = randomBytes32();
-      const n1 = randomBytes32();
+      console.log("\n  ▶ GUARD — reissue is bounded by what the executor ATA physically holds");
+      // The old per-slot profit cap (reissued <= deposited) was removed: a winning
+      // position legitimately reissues more than its collateral. The real solvency guard
+      // is now physical — you can only re-mint notes backed by USDC actually sitting in
+      // the executor ATA. Here the ATA is empty (collateral is still in the Jupiter
+      // position, not yet settled), so any reissue must fail at the balance check.
+      const execBal = await tokenBal(provider, executorUsdcAta);
+      log(`executor ATA holds ${usd(execBal)} → reissuing ${usd(COLLATERAL)} must be rejected`);
+
+      // Real deposit-side proof (public_amount = +COLLATERAL) so we reach the balance
+      // check (which runs AFTER ZK verification), not bounce off InvalidProof.
+      const rp0 = randomBytes32(); const rpub0 = derivePublicKey(poseidon, rp0); const rb0 = randomBytes32();
+      const grc0 = computeCommitment(poseidon, 0n, rpub0, rb0, USDC_MINT);
+      const n0 = computeNullifier(poseidon, grc0, 0, rp0);
+      const rp1 = randomBytes32(); const rpub1 = derivePublicKey(poseidon, rp1); const rb1 = randomBytes32();
+      const grc1 = computeCommitment(poseidon, 0n, rpub1, rb1, USDC_MINT);
+      const n1 = computeNullifier(poseidon, grc1, 0, rp1);
+
+      const go0Priv = randomBytes32(); const go0Pub = derivePublicKey(poseidon, go0Priv); const go0Blind = randomBytes32();
+      const gc0 = computeCommitment(poseidon, BigInt(COLLATERAL.toString()), go0Pub, go0Blind, USDC_MINT);
+      const go1Priv = randomBytes32(); const go1Pub = derivePublicKey(poseidon, go1Priv); const go1Blind = randomBytes32();
+      const gc1 = computeCommitment(poseidon, 0n, go1Pub, go1Blind, USDC_MINT);
+
       const extData = {
         recipient: usdcVault,
         relayer: s3Relayer.publicKey,
@@ -1522,20 +1568,40 @@ describe("Jupiter Perpetuals Integration", () => {
       const marker0 = nullifierMarkerPDA(program.programId, USDC_MINT, n0);
       const marker1 = nullifierMarkerPDA(program.programId, USDC_MINT, n1);
 
-      // Versioned tx + ALT (see bad-relayer test). slot.amount == COLLATERAL, so
-      // reissue_amount = COLLATERAL+1 trips JperpSlotOverdraft in the handler — which
-      // fires before ZK verification, so dummyProof is fine.
+      const treeAcc: any = await (program.account as any).merkleTreeAccount.fetch(usdcNoteTree);
+      const gRoot = extractRootFromAccount(treeAcc);
+      const zerosG = offTree.getZeros();
+      const zeroPathG = zerosG.slice(0, 22).map((z) => bytesToBigIntBE(z));
+      const zeroMerklePathG = { pathElements: zeroPathG, pathIndices: new Array(22).fill(0) };
+
+      const guardProof = await generateTransactionProof({
+        root: gRoot,
+        publicAmount: BigInt(COLLATERAL.toString()),
+        extDataHash,
+        mintAddress: USDC_MINT,
+        inputNullifiers: [n0, n1],
+        outputCommitments: [gc0, gc1],
+        inputAmounts: [0n, 0n],
+        inputPrivateKeys: [rp0, rp1],
+        inputPublicKeys: [rpub0, rpub1],
+        inputBlindings: [rb0, rb1],
+        inputMerklePaths: [zeroMerklePathG, zeroMerklePathG],
+        outputAmounts: [BigInt(COLLATERAL.toString()), 0n],
+        outputOwners: [go0Pub, go1Pub],
+        outputBlindings: [go0Blind, go1Blind],
+      });
+
       const ix = await (program.methods as any)
         .jperpReissueNotes(
-          Array.from(new Uint8Array(32).fill(1)), 0, 0,
-          tooMuch,
+          Array.from(gRoot), 0, 0,
+          COLLATERAL,
           Array.from(extDataHash),
           USDC_MINT,
           Array.from(n0), Array.from(n1),
-          Array.from(randomBytes32()), Array.from(randomBytes32()),
+          Array.from(gc0), Array.from(gc1),
           Array.from(withdrawalId),
           new BN(Math.floor(Date.now() / 1000) + 3600),
-          extData, dummyProof(), null,
+          extData, guardProof, null,
         )
         .accounts({
           config: usdcConfig, globalConfig, vault: usdcVault,
@@ -1550,11 +1616,13 @@ describe("Jupiter Perpetuals Integration", () => {
         })
         .instruction();
 
+      // Groth16 verification exceeds the default 200k CU budget — raise it (as Step 4 does).
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
       await assertError(
-        sendVersionedTx(provider, [ix], [s3Relayer, claimantKp], [suite3Lut]),
-        "JperpSlotOverdraft",
+        sendVersionedTx(provider, [cuIx, ix], [s3Relayer, claimantKp], [suite3Lut]),
+        "InsufficientFundsForWithdrawal",
       );
-      log(`✓ rejected with JperpSlotOverdraft — cannot mint more notes than were deposited`);
+      log(`✓ rejected — reissue can never exceed the USDC physically held by the executor ATA`);
     });
 
     it("Step 2: jperp_set_tpsl — place SL trigger at $90", async function () {
@@ -1781,5 +1849,395 @@ describe("Jupiter Perpetuals Integration", () => {
       log(`✓ tx ${sig.slice(0, 16)}…`);
       console.log("\n  ✓ lifecycle complete: deposit → SHORT → SL → close → private notes, user never on-chain\n");
     });
+  });
+
+  // ── Suite 3b: Full Integration — LONG SOL lifecycle (WSOL pool) ─────────────
+  //
+  // A Jupiter LONG is collateralised in the index token (SOL), so we fund it from a
+  // WSOL pool: collateral mint == pool mint == inputMint == WSOL → no swap needed, exactly
+  // like the short (USDC pool, USDC collateral). The executor is funded in WSOL and Jupiter
+  // escrows WSOL into the position request. Uses a LONG-specific withdrawal_id → own
+  // claimant/executor/slot, a genesis-loaded SOL-long position baked for the WSOL executor
+  // (scripts/bake-jperp-long-fixture.mjs), and note tree #1 for an isolated Merkle mirror.
+  //
+  // Exercises: open(LONG) → set SL → set TP → market close → reissue.
+  describe("Full Integration — LONG SOL lifecycle (WSOL pool)", () => {
+    let ready = false;
+    let step1Passed = false;
+    let lut: import("@solana/web3.js").AddressLookupTableAccount;
+
+    let wsolConfig: PublicKey;
+    let wsolVault: PublicKey;
+    let noteTree1: PublicKey;
+    let wsolNullifiers: PublicKey;
+    let wsolVaultAta: PublicKey;
+    let walletWsolAta: PublicKey;
+    let relayer: Keypair;
+    let claimantKp: Keypair;
+    let executor: PublicKey;
+    let executorWsolAta: PublicKey;
+    let jperpSlot: PublicKey;
+    let lPosition: PublicKey;
+    let lPositionRequest: PublicKey;
+    let lPositionRequestAta: PublicKey;
+    let lPerpetuals: PublicKey;
+    let lMarker0: PublicKey;
+    let lMarker1: PublicKey;
+
+    let offTree: OffchainMerkleTree;
+    let openRoot: Uint8Array;
+    let openProof: any;
+    let openN0: Uint8Array, openN1: Uint8Array, openC0: Uint8Array, openC1: Uint8Array;
+
+    const TREE_ID = 1;
+    const openCounter = new BN(Math.floor(Math.random() * 1_000_000_000));
+    const DEPOSIT = new BN(500_000_000); // 0.5 SOL (WSOL, 9 decimals)
+    const COLLATERAL = new BN(100_000_000); // 0.1 SOL collateral
+    const sol = (n: number | string | BN) => `${(Number(n.toString()) / 1e9).toFixed(4)} SOL`;
+    const longWithdrawalId = new Uint8Array(
+      JSON.parse(require("fs").readFileSync("keys/jperp-withdrawal-id-long.json", "utf8")),
+    );
+
+    before(async function () {
+      this.timeout(180_000);
+
+      console.log("\n  ┌─ Suite 3b: Full private-perps LONG lifecycle (WSOL pool) ─────");
+      console.log("  │  open(LONG) → set SL → set TP → market close → reissue");
+      console.log("  └──────────────────────────────────────────────────────────────");
+
+      const perpInfo = await provider.connection.getAccountInfo(JUPITER_PERP_PROGRAM_ID);
+      if (!perpInfo?.executable) {
+        console.log("   ⚠️  Jupiter Perps not cloned — Suite 3b will be skipped");
+        return;
+      }
+
+      [wsolConfig] = PublicKey.findProgramAddressSync(
+        [Buffer.from("privacy_config_v3"), WSOL_MINT.toBuffer()], program.programId);
+      [wsolVault] = PublicKey.findProgramAddressSync(
+        [Buffer.from("privacy_vault_v3"), WSOL_MINT.toBuffer()], program.programId);
+      const [wsolTree0] = PublicKey.findProgramAddressSync(
+        [Buffer.from("privacy_note_tree_v3"), WSOL_MINT.toBuffer(), encodeTreeId(0)], program.programId);
+      [noteTree1] = PublicKey.findProgramAddressSync(
+        [Buffer.from("privacy_note_tree_v3"), WSOL_MINT.toBuffer(), encodeTreeId(TREE_ID)], program.programId);
+      [wsolNullifiers] = PublicKey.findProgramAddressSync(
+        [Buffer.from("privacy_nullifiers_v3"), WSOL_MINT.toBuffer()], program.programId);
+      wsolVaultAta = await getAssociatedTokenAddress(WSOL_MINT, wsolVault, true);
+
+      // Initialize the WSOL pool (idempotent).
+      try {
+        await (program.methods as any)
+          .initialize(50, WSOL_MINT, new BN(1_000_000), new BN(1_000_000_000_000),
+            new BN(1_000_000), new BN(1_000_000_000_000))
+          .accounts({
+            config: wsolConfig, vault: wsolVault, noteTree: wsolTree0,
+            nullifiers: wsolNullifiers, globalConfig,
+            admin: wallet.publicKey, payer: wallet.publicKey, systemProgram: SystemProgram.programId,
+          }).rpc();
+      } catch (_) { /* already initialized */ }
+
+      relayer = Keypair.generate();
+      await airdropAndConfirm(provider, relayer.publicKey, 5 * LAMPORTS_PER_SOL);
+      try {
+        await (program.methods as any).addRelayer(WSOL_MINT, relayer.publicKey)
+          .accounts({ config: wsolConfig, admin: wallet.publicKey }).rpc();
+      } catch (_) { /* already registered */ }
+
+      // Add note tree #1 (isolated Merkle mirror). Idempotent.
+      try {
+        await (program.methods as any).addMerkleTree(WSOL_MINT, TREE_ID)
+          .accounts({ config: wsolConfig, noteTree: noteTree1, relayer: relayer.publicKey, systemProgram: SystemProgram.programId })
+          .signers([relayer]).rpc();
+      } catch (_) { /* tree already added */ }
+
+      // Long claimant/executor/slot from the LONG-specific withdrawal_id (seeded by WSOL mint).
+      const spendingKey = deriveSpendingKey(
+        Keypair.fromSecretKey(new Uint8Array(
+          JSON.parse(require("fs").readFileSync("keys/jperp-spending-key.json", "utf8")))));
+      claimantKp = deriveJperpClaimantKeypair(spendingKey, longWithdrawalId);
+      executor = executorPDA(program.programId, WSOL_MINT, claimantKp.publicKey, longWithdrawalId);
+      executorWsolAta = await getAssociatedTokenAddress(WSOL_MINT, executor, true);
+      jperpSlot = slotPDA(program.programId, WSOL_MINT, longWithdrawalId);
+
+      // Wrap SOL → WSOL in the wallet (funds the deposit) and ensure the vault + executor
+      // WSOL ATAs exist.
+      walletWsolAta = await getAssociatedTokenAddress(WSOL_MINT, wallet.publicKey);
+      await provider.sendAndConfirm(new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, walletWsolAta, wallet.publicKey, WSOL_MINT),
+        SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: walletWsolAta, lamports: 1_000_000_000 }),
+        createSyncNativeInstruction(walletWsolAta),
+        createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, wsolVaultAta, wsolVault, WSOL_MINT),
+        createAssociatedTokenAccountIdempotentInstruction(wallet.publicKey, executorWsolAta, executor, WSOL_MINT),
+      ), []);
+
+      // Fresh off-chain mirror for tree #1 (empty).
+      offTree = new OffchainMerkleTree(22, poseidon);
+      const emptyRoot = offTree.getRoot();
+      const zeros = offTree.getZeros();
+      const zeroPath = zeros.slice(0, 22).map((z: Uint8Array) => bytesToBigIntBE(z));
+      const zeroMerklePath = { pathElements: zeroPath, pathIndices: new Array(22).fill(0) };
+
+      // Deposit DEPOSIT WSOL into tree #1 → spendable noteA.
+      const aPriv = randomBytes32(), aBlind = randomBytes32(), aPub = derivePublicKey(poseidon, aPriv);
+      const aCommitment = computeCommitment(poseidon, BigInt(DEPOSIT.toString()), aPub, aBlind, WSOL_MINT);
+      const ddPriv = randomBytes32(), ddPub = derivePublicKey(poseidon, ddPriv), ddBlind = randomBytes32();
+      const ddCommit = computeCommitment(poseidon, 0n, ddPub, ddBlind, WSOL_MINT);
+      const dp0 = randomBytes32(), dpub0 = derivePublicKey(poseidon, dp0), db0 = randomBytes32();
+      const dc0 = computeCommitment(poseidon, 0n, dpub0, db0, WSOL_MINT), dn0 = computeNullifier(poseidon, dc0, 0, dp0);
+      const dp1 = randomBytes32(), dpub1 = derivePublicKey(poseidon, dp1), db1 = randomBytes32();
+      const dc1 = computeCommitment(poseidon, 0n, dpub1, db1, WSOL_MINT), dn1 = computeNullifier(poseidon, dc1, 0, dp1);
+      const depExt = { recipient: wallet.publicKey, relayer: wallet.publicKey, fee: new BN(0), refund: new BN(0), claimant: SystemProgram.programId };
+      const depHash = computeExtDataHash(poseidon, depExt);
+      let aLeafIndex = 0;
+      try {
+        const depProof = await generateTransactionProof({
+          root: emptyRoot, publicAmount: BigInt(DEPOSIT.toString()), extDataHash: depHash,
+          mintAddress: WSOL_MINT, inputNullifiers: [dn0, dn1], outputCommitments: [aCommitment, ddCommit],
+          inputAmounts: [0n, 0n], inputPrivateKeys: [dp0, dp1], inputPublicKeys: [dpub0, dpub1],
+          inputBlindings: [db0, db1], inputMerklePaths: [zeroMerklePath, zeroMerklePath],
+          outputAmounts: [BigInt(DEPOSIT.toString()), 0n], outputOwners: [aPub, ddPub], outputBlindings: [aBlind, ddBlind],
+        });
+        await (program.methods as any)
+          .transact(Array.from(emptyRoot), TREE_ID, TREE_ID, DEPOSIT, Array.from(depHash),
+            WSOL_MINT, Array.from(dn0), Array.from(dn1), Array.from(aCommitment), Array.from(ddCommit),
+            new BN(999_999_999_999), depExt, depProof, null)
+          .accounts({
+            config: wsolConfig, globalConfig, vault: wsolVault,
+            inputTree: noteTree1, outputTree: noteTree1, nullifiers: wsolNullifiers,
+            nullifierMarker0: nullifierMarkerPDA(program.programId, WSOL_MINT, dn0),
+            nullifierMarker1: nullifierMarkerPDA(program.programId, WSOL_MINT, dn1),
+            relayer: wallet.publicKey, recipient: wallet.publicKey,
+            vaultTokenAccount: wsolVaultAta, userTokenAccount: walletWsolAta,
+            recipientTokenAccount: walletWsolAta, relayerTokenAccount: walletWsolAta,
+            tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
+          })
+          .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 })]).rpc();
+        aLeafIndex = offTree.insert(aCommitment);
+        offTree.insert(ddCommit);
+      } catch (e) {
+        console.log("   ⚠️  WSOL deposit (tree 1) failed — Suite 3b skipped:", (e as any)?.message ?? e);
+        return;
+      }
+
+      // Build the LONG open: spend noteA → withdraw COLLATERAL (WSOL) to executor, change note back.
+      const notePath = offTree.getMerkleProof(aLeafIndex);
+      openN0 = computeNullifier(poseidon, aCommitment, aLeafIndex, aPriv);
+      const obPriv = randomBytes32(), obPub = derivePublicKey(poseidon, obPriv), obBlind = randomBytes32();
+      const obCommit = computeCommitment(poseidon, 0n, obPub, obBlind, WSOL_MINT);
+      openN1 = computeNullifier(poseidon, obCommit, 0, obPriv);
+      const changeAmount = BigInt(DEPOSIT.sub(COLLATERAL).toString());
+      const oc0Priv = randomBytes32(), oc0Pub = derivePublicKey(poseidon, oc0Priv), oc0Blind = randomBytes32();
+      openC0 = computeCommitment(poseidon, changeAmount, oc0Pub, oc0Blind, WSOL_MINT);
+      const oc1Priv = randomBytes32(), oc1Pub = derivePublicKey(poseidon, oc1Priv), oc1Blind = randomBytes32();
+      openC1 = computeCommitment(poseidon, 0n, oc1Pub, oc1Blind, WSOL_MINT);
+      const openExt = { recipient: executor, relayer: relayer.publicKey, fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey };
+      const openHash = computeExtDataHash(poseidon, openExt);
+      const treeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      openRoot = extractRootFromAccount(treeAcc);
+      openProof = await generateTransactionProof({
+        root: openRoot, publicAmount: -BigInt(COLLATERAL.toString()), extDataHash: openHash,
+        mintAddress: WSOL_MINT, inputNullifiers: [openN0, openN1], outputCommitments: [openC0, openC1],
+        inputAmounts: [BigInt(DEPOSIT.toString()), 0n], inputPrivateKeys: [aPriv, obPriv],
+        inputPublicKeys: [aPub, obPub], inputBlindings: [aBlind, obBlind],
+        inputMerklePaths: [notePath, zeroMerklePath], outputAmounts: [changeAmount, 0n],
+        outputOwners: [oc0Pub, oc1Pub], outputBlindings: [oc0Blind, oc1Blind],
+      });
+      offTree.insert(openC0); offTree.insert(openC1);
+
+      // LONG position: custody = SOL, collateralCustody = SOL (must match the baked fixture).
+      lPerpetuals = perpetualsPDA();
+      lPosition = positionPDA(executor, CUSTODIES.SOL, CUSTODIES.SOL, SIDE_LONG);
+      lPositionRequest = positionRequestPDA(lPosition, openCounter, CHANGE_INCREASE);
+      lPositionRequestAta = await getAssociatedTokenAddress(WSOL_MINT, lPositionRequest, true);
+      lMarker0 = nullifierMarkerPDA(program.programId, WSOL_MINT, openN0);
+      lMarker1 = nullifierMarkerPDA(program.programId, WSOL_MINT, openN1);
+
+      lut = await buildAlt(provider, relayer, [
+        TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, SystemProgram.programId,
+        globalConfig, wsolConfig, wsolVault, noteTree1, wsolNullifiers, wsolVaultAta,
+        executor, executorWsolAta, jperpSlot,
+        JUPITER_PERP_PROGRAM_ID, lPerpetuals, JLP_POOL,
+        lPosition, lPositionRequest, lPositionRequestAta,
+        CUSTODIES.SOL, WSOL_MINT, PERPS_EVENT_AUTHORITY, lMarker0, lMarker1,
+      ]);
+
+      log(`✓ setup: LONG position ${shortKey(lPosition)} (genesis-cloned SOL-long, owner = executor)`);
+      ready = true;
+    });
+
+    it("Step 1: jperp_open_position — ZK withdrawal → LONG SOL position request", async function () {
+      if (!ready) return this.skip();
+      console.log("\n  ▶ STEP 1 — open LONG SOL (createIncreasePositionMarketRequest, side=Long)");
+      const extData = { recipient: executor, relayer: relayer.publicKey, fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      const remainingAccounts = [
+        { pubkey: JUPITER_PERP_PROGRAM_ID,     isSigner: false, isWritable: false }, // [0]
+        { pubkey: lPerpetuals,                 isSigner: false, isWritable: false }, // [1]
+        { pubkey: JLP_POOL,                    isSigner: false, isWritable: false }, // [2]
+        { pubkey: lPosition,                   isSigner: false, isWritable: true  }, // [3]
+        { pubkey: lPositionRequest,            isSigner: false, isWritable: true  }, // [4]
+        { pubkey: lPositionRequestAta,         isSigner: false, isWritable: true  }, // [5]
+        { pubkey: CUSTODIES.SOL,               isSigner: false, isWritable: false }, // [6] custody
+        { pubkey: CUSTODIES.SOL,               isSigner: false, isWritable: false }, // [7] collateralCustody (LONG → SOL)
+        { pubkey: WSOL_MINT,                   isSigner: false, isWritable: false }, // [8] inputMint (WSOL = collateral mint)
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false }, // [9] referral
+        { pubkey: TOKEN_PROGRAM_ID,            isSigner: false, isWritable: false }, // [10]
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // [11]
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false }, // [12]
+        { pubkey: PERPS_EVENT_AUTHORITY,       isSigner: false, isWritable: false }, // [13]
+      ];
+
+      const ix = await (program.methods as any)
+        .jperpOpenPosition(
+          Array.from(openRoot), TREE_ID, TREE_ID, COLLATERAL, Array.from(extDataHash),
+          WSOL_MINT, claimantKp.publicKey, Array.from(openN0), Array.from(openN1),
+          Array.from(openC0), Array.from(openC1), Array.from(longWithdrawalId),
+          new BN(Math.floor(Date.now() / 1000) + 3600), extData, openProof, null,
+          new BN(30_000_000), COLLATERAL, SIDE_LONG, new BN(0), openCounter, // size $30 USD (~2× on 0.1 SOL)
+        )
+        .accounts({
+          config: wsolConfig, globalConfig, vault: wsolVault,
+          inputTree: noteTree1, outputTree: noteTree1, nullifiers: wsolNullifiers,
+          nullifierMarker0: lMarker0, nullifierMarker1: lMarker1,
+          relayer: relayer.publicKey, vaultTokenAccount: wsolVaultAta,
+          executor, executorTokenAccount: executorWsolAta, relayerTokenAccount: relayer.publicKey,
+          jperpSlot, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(remainingAccounts).instruction();
+
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
+      const sig = await sendVersionedTx(provider, [cuIx, ix], [relayer], [lut]);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      const pos = await decodePosition(provider, lPosition);
+      if (pos) logPosition(pos, "open LONG position");
+      log(`✓ tx ${sig.slice(0, 16)}…  ${sol(COLLATERAL)} collateral → executor → LONG position request created`);
+      step1Passed = true;
+    });
+
+    it("Step 2: jperp_set_tpsl — stop-loss below entry (triggerAboveThreshold=false)", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 2 — set SL on the LONG (fires if SOL falls to $50)");
+      const counter = new BN(Math.floor(Math.random() * 1_000_000_000));
+      const positionRequest = positionRequestPDA(lPosition, counter, CHANGE_DECREASE);
+      const positionRequestAta = await getAssociatedTokenAddress(WSOL_MINT, positionRequest, true);
+      await (program.methods as any)
+        .jperpSetTpsl(WSOL_MINT, Array.from(longWithdrawalId), new BN(0), new BN(0),
+          new BN(50_000_000), false, true, counter)
+        .accounts({
+          config: wsolConfig, jperpSlot, claimant: claimantKp.publicKey,
+          executor, executorTokenAccount: executorWsolAta, relayer: relayer.publicKey, systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(longDecreaseAccounts(positionRequest, positionRequestAta))
+        .signers([relayer, claimantKp]).rpc();
+      log(`✓ SL trigger created (counter ${counter.toString()}) — keeper watches the oracle`);
+    });
+
+    it("Step 3: jperp_set_tpsl — take-profit above entry (triggerAboveThreshold=true)", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 3 — set TP on the LONG (fires if SOL rises to $90)");
+      const counter = new BN(Math.floor(Math.random() * 1_000_000_000));
+      const positionRequest = positionRequestPDA(lPosition, counter, CHANGE_DECREASE);
+      const positionRequestAta = await getAssociatedTokenAddress(WSOL_MINT, positionRequest, true);
+      await (program.methods as any)
+        .jperpSetTpsl(WSOL_MINT, Array.from(longWithdrawalId), new BN(0), new BN(0),
+          new BN(90_000_000), true, true, counter)
+        .accounts({
+          config: wsolConfig, jperpSlot, claimant: claimantKp.publicKey,
+          executor, executorTokenAccount: executorWsolAta, relayer: relayer.publicKey, systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(longDecreaseAccounts(positionRequest, positionRequestAta))
+        .signers([relayer, claimantKp]).rpc();
+      log(`✓ TP trigger created (counter ${counter.toString()})`);
+    });
+
+    it("Step 4: jperp_close_position — market close request (keeper settles async)", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 4 — market-close the LONG");
+      const counter = new BN(Math.floor(Math.random() * 1_000_000_000));
+      const positionRequest = positionRequestPDA(lPosition, counter, CHANGE_DECREASE);
+      const positionRequestAta = await getAssociatedTokenAddress(WSOL_MINT, positionRequest, true);
+      await (program.methods as any)
+        .jperpClosePosition(WSOL_MINT, Array.from(longWithdrawalId), new BN(0), new BN(0), true, new BN(0), counter)
+        .accounts({
+          config: wsolConfig, jperpSlot, claimant: claimantKp.publicKey,
+          executor, executorTokenAccount: executorWsolAta, relayer: relayer.publicKey, systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(longDecreaseAccounts(positionRequest, positionRequestAta))
+        .signers([relayer, claimantKp]).rpc();
+      log(`✓ market-close request submitted (counter ${counter.toString()})`);
+    });
+
+    it("Step 5: jperp_reissue_notes — re-mint notes from settled SOL (keeper imitated)", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 5 — reissue LONG proceeds → fresh private notes");
+      const reissueAmount = COLLATERAL;
+      // Keeper imitation: move WSOL into the executor ATA (the leftover wrapped WSOL in wallet).
+      await provider.sendAndConfirm(new Transaction().add(
+        createTransferInstruction(walletWsolAta, executorWsolAta, wallet.publicKey, BigInt(reissueAmount.toString()))), []);
+      const vaultBefore = await tokenBal(provider, wsolVaultAta);
+
+      const rp0 = randomBytes32(), rpub0 = derivePublicKey(poseidon, rp0), rb0 = randomBytes32();
+      const rc0 = computeCommitment(poseidon, 0n, rpub0, rb0, WSOL_MINT), n0 = computeNullifier(poseidon, rc0, 0, rp0);
+      const rp1 = randomBytes32(), rpub1 = derivePublicKey(poseidon, rp1), rb1 = randomBytes32();
+      const rc1 = computeCommitment(poseidon, 0n, rpub1, rb1, WSOL_MINT), n1 = computeNullifier(poseidon, rc1, 0, rp1);
+      const o0Priv = randomBytes32(), o0Pub = derivePublicKey(poseidon, o0Priv), o0Blind = randomBytes32();
+      const c0 = computeCommitment(poseidon, BigInt(reissueAmount.toString()), o0Pub, o0Blind, WSOL_MINT);
+      const o1Priv = randomBytes32(), o1Pub = derivePublicKey(poseidon, o1Priv), o1Blind = randomBytes32();
+      const c1 = computeCommitment(poseidon, 0n, o1Pub, o1Blind, WSOL_MINT);
+      const extData = { recipient: wsolVault, relayer: relayer.publicKey, fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+      const treeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      const reissueRoot = extractRootFromAccount(treeAcc);
+      const zeros = offTree.getZeros();
+      const zeroPath = zeros.slice(0, 22).map((z: Uint8Array) => bytesToBigIntBE(z));
+      const zeroMerklePath = { pathElements: zeroPath, pathIndices: new Array(22).fill(0) };
+      const reissueProof = await generateTransactionProof({
+        root: reissueRoot, publicAmount: BigInt(reissueAmount.toString()), extDataHash,
+        mintAddress: WSOL_MINT, inputNullifiers: [n0, n1], outputCommitments: [c0, c1],
+        inputAmounts: [0n, 0n], inputPrivateKeys: [rp0, rp1], inputPublicKeys: [rpub0, rpub1],
+        inputBlindings: [rb0, rb1], inputMerklePaths: [zeroMerklePath, zeroMerklePath],
+        outputAmounts: [BigInt(reissueAmount.toString()), 0n], outputOwners: [o0Pub, o1Pub], outputBlindings: [o0Blind, o1Blind],
+      });
+      const ix = await (program.methods as any)
+        .jperpReissueNotes(Array.from(reissueRoot), TREE_ID, TREE_ID, reissueAmount, Array.from(extDataHash),
+          WSOL_MINT, Array.from(n0), Array.from(n1), Array.from(c0), Array.from(c1),
+          Array.from(longWithdrawalId), new BN(Math.floor(Date.now() / 1000) + 3600), extData, reissueProof, null)
+        .accounts({
+          config: wsolConfig, globalConfig, vault: wsolVault, inputTree: noteTree1, outputTree: noteTree1,
+          nullifiers: wsolNullifiers, nullifierMarker0: nullifierMarkerPDA(program.programId, WSOL_MINT, n0),
+          nullifierMarker1: nullifierMarkerPDA(program.programId, WSOL_MINT, n1),
+          relayer: relayer.publicKey, jperpSlot, claimant: claimantKp.publicKey,
+          executor, executorTokenAccount: executorWsolAta, vaultTokenAccount: wsolVaultAta,
+          tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
+        }).instruction();
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
+      const sig = await sendVersionedTx(provider, [cuIx, ix], [relayer, claimantKp], [lut]);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      const vaultAfter = await tokenBal(provider, wsolVaultAta);
+      log(`✓ tx ${sig.slice(0, 16)}…  vault ${sol(vaultBefore)}→${sol(vaultAfter)}  (LONG proceeds swept to pool)`);
+      console.log("\n  ✓ LONG lifecycle complete: deposit → LONG → SL → TP → close → private notes\n");
+    });
+
+    /** 16 remaining_accounts for createDecreasePositionRequest2 on the LONG (collateralCustody = SOL). */
+    function longDecreaseAccounts(positionRequest: PublicKey, positionRequestAta: PublicKey) {
+      return [
+        { pubkey: JUPITER_PERP_PROGRAM_ID,     isSigner: false, isWritable: false },
+        { pubkey: lPerpetuals,                 isSigner: false, isWritable: false },
+        { pubkey: JLP_POOL,                    isSigner: false, isWritable: false },
+        { pubkey: lPosition,                   isSigner: false, isWritable: true  },
+        { pubkey: positionRequest,             isSigner: false, isWritable: true  },
+        { pubkey: positionRequestAta,          isSigner: false, isWritable: true  },
+        { pubkey: CUSTODIES.SOL,               isSigner: false, isWritable: false }, // [6] custody
+        { pubkey: SOL_DOVES_ORACLE,            isSigner: false, isWritable: false }, // [7] dovesPriceAccount
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false }, // [8] pythnetPriceAccount (unset)
+        { pubkey: CUSTODIES.SOL,               isSigner: false, isWritable: false }, // [9] collateralCustody (LONG → SOL)
+        { pubkey: WSOL_MINT,                   isSigner: false, isWritable: false }, // [10] desiredMint (proceeds in WSOL)
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false }, // [11] referral
+        { pubkey: TOKEN_PROGRAM_ID,            isSigner: false, isWritable: false },
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false },
+        { pubkey: PERPS_EVENT_AUTHORITY,       isSigner: false, isWritable: false },
+      ];
+    }
   });
 });

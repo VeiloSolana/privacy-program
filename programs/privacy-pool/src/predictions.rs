@@ -226,6 +226,13 @@ pub fn prediction_open<'info>(
         .checked_sub(total_outflow)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
+    // ── 13a. Record the per-deposit slot (pairs open↔reissue, binds claimant) ─
+    let slot = &mut ctx.accounts.prediction_slot;
+    slot.amount = deposit_amount;
+    slot.reissued = 0;
+    slot.claimant_pubkey = claimant;
+    slot.bump = ctx.bumps.prediction_slot;
+
     // ── 14. Transfer relayer fee: vault → relayer ATA ─────────────────────────
     let vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
@@ -342,6 +349,7 @@ pub fn prediction_reissue<'info>(
     input_nullifier_1: [u8; 32],
     output_commitment_0: [u8; 32],
     output_commitment_1: [u8; 32],
+    _withdrawal_id: [u8; 32],
     deadline: i64,
     ext_data: ExtData,
     proof: TransactionProof,
@@ -401,6 +409,27 @@ pub fn prediction_reissue<'info>(
     {
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
+    }
+
+    // ── 7a. Slot reconciliation (validated manually, post-proof) ──────────────
+    // The slot PDA address is enforced by the Accounts seeds; here we require it to
+    // actually exist (created only by `prediction_open` — can't reissue a non-existent
+    // deposit) and bind the committed claimant. No profit cap — see jperp_reissue_notes.
+    // Checked after the ZK proof so cheaper validations and the proof guard run first.
+    {
+        let slot_ai = ctx.accounts.prediction_slot.to_account_info();
+        require_keys_eq!(*slot_ai.owner, crate::ID, PrivacyError::InvalidClaimant);
+        let mut data = slot_ai.try_borrow_mut_data()?;
+        let mut slot = crate::PredictionSlot::try_deserialize(&mut &data[..])?;
+        require_keys_eq!(
+            ctx.accounts.claimant.key(),
+            slot.claimant_pubkey,
+            PrivacyError::InvalidClaimant
+        );
+        slot.reissued = slot.reissued
+            .checked_add(reissue_amount)
+            .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+        slot.try_serialize(&mut &mut data[..])?;
     }
 
     // ── 8. Validate ephemeral ATA and vault ATA ───────────────────────────────
