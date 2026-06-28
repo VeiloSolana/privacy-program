@@ -139,6 +139,31 @@ pub const REQUEST_TYPE_TRIGGER: u8 = 1;
 /// rent to the executor when the request settles, so the excess is reclaimable.
 pub const EXECUTOR_JUPITER_RENT_FUNDING: u64 = 20_000_000; // 0.02 SOL
 
+/// Native SOL positions (longs) use WSOL as the actual collateral token for Jupiter CPIs.
+pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
+
+// ── Lamport sweep helper ────────────────────────────────────────────────────
+
+/// Sweep the system-owned executor PDA's residual lamports (relayer-fronted positionRequest
+/// rent + Jupiter's rent refunds) back to the relayer. No-op when empty.
+fn sweep_jperp_executor_lamports<'info>(
+    system_program: &AccountInfo<'info>,
+    executor: &AccountInfo<'info>,
+    relayer: &AccountInfo<'info>,
+    executor_seeds: &[&[u8]],
+) -> Result<()> {
+    let residual = executor.lamports();
+    if residual == 0 {
+        return Ok(());
+    }
+    invoke_signed(
+        &system_instruction::transfer(&executor.key(), &relayer.key(), residual),
+        &[executor.clone(), relayer.clone(), system_program.clone()],
+        &[executor_seeds],
+    )?;
+    Ok(())
+}
+
 // ── Discriminator helper ──────────────────────────────────────────────────────
 
 fn jperp_disc(name: &str) -> [u8; 8] {
@@ -220,6 +245,65 @@ fn encode_update_decrease_request(size_usd_delta: u64, trigger_price: u64) -> Ve
 /// `createIncreasePositionMarketRequest` CPI (atomic).
 ///
 /// Consumes private notes, routes USDC to the executor PDA, and submits a
+// sha256("global:jperp_open_position")[..8]
+const JPERP_OPEN_POSITION_DISC: [u8; 8] = [115, 245, 185, 220, 121, 57, 231, 147];
+
+/// Pre-funding step for native SOL pool opens.
+///
+/// Moves `deposit_amount` lamports from the native-SOL vault into the executor's WSOL ATA.
+/// Must immediately precede `jperp_open_position` in the same transaction.
+/// `jperp_open_position` calls sync_native to materialise the WSOL balance.
+pub fn fund_native_jperp_open(
+    ctx: Context<crate::FundNativeJperpOpen>,
+    mint_address: Pubkey,
+    _claimant: Pubkey,
+    _withdrawal_id: [u8; 32],
+    deposit_amount: u64,
+) -> Result<()> {
+    use anchor_lang::solana_program::sysvar::instructions as ix_sysvar;
+
+    // Pairing guard: immediately-following instruction must be jperp_open_position.
+    let ixs = ctx.accounts.instructions_sysvar.to_account_info();
+    let current_idx = ix_sysvar::load_current_index_checked(&ixs)? as usize;
+    let next_ix = ix_sysvar::load_instruction_at_checked(current_idx + 1, &ixs)
+        .map_err(|_| error!(PrivacyError::Unauthorized))?;
+    require_keys_eq!(next_ix.program_id, crate::ID, PrivacyError::Unauthorized);
+    require!(
+        next_ix.data.len() >= 8 && next_ix.data[..8] == JPERP_OPEN_POSITION_DISC,
+        PrivacyError::Unauthorized
+    );
+    // Bind the funded executor to the paired jperp_open_position's executor — else a relayer could
+    // strand vault lamports in an unrelated executor's WSOL ATA. Index 10 = executor in JperpOpenPosition.
+    const JPERP_OPEN_EXECUTOR_IDX: usize = 10;
+    require!(
+        next_ix.accounts.len() > JPERP_OPEN_EXECUTOR_IDX
+            && next_ix.accounts[JPERP_OPEN_EXECUTOR_IDX].pubkey == ctx.accounts.executor.key(),
+        PrivacyError::Unauthorized
+    );
+
+    require!(!crate::is_token_mint(&mint_address), PrivacyError::InvalidMintAddress);
+    require!(
+        ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
+    require!(deposit_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    let vault_info = ctx.accounts.vault.to_account_info();
+    let rent_exempt_min = anchor_lang::solana_program::rent::Rent::get()?
+        .minimum_balance(vault_info.data_len());
+    require!(
+        vault_info.lamports() >= deposit_amount + rent_exempt_min,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
+
+    // vault → executor_wsol_ata: direct lamport transfer.
+    // sync_native is called in the following jperp_open_position to materialise the WSOL balance.
+    **vault_info.try_borrow_mut_lamports()? -= deposit_amount;
+    **ctx.accounts.executor_wsol_ata.to_account_info().try_borrow_mut_lamports()? += deposit_amount;
+
+    Ok(())
+}
+
 /// position-open request to Jupiter Perps. Jupiter's keeper settles the request
 /// off-chain; once settled the position is owned by the executor PDA.
 ///
@@ -256,6 +340,8 @@ pub fn jperp_open_position<'info>(
         ),
         None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
     };
+
+    let is_native_sol_pool = mint_address == Pubkey::default();
 
     let cfg = &mut ctx.accounts.config;
 
@@ -307,21 +393,33 @@ pub fn jperp_open_position<'info>(
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    let expected_vault_ata = get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
-    require!(
-        ctx.accounts.vault_token_account.key() == expected_vault_ata,
-        PrivacyError::VaultTokenAccountNotATA
-    );
-    let vault_token_data = deserialize_token_account(
-        &ctx.accounts.vault_token_account.to_account_info()
-    )?;
     let total_outflow = deposit_amount
         .checked_add(ext_data.fee)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
-    require!(
-        vault_token_data.amount >= total_outflow,
-        PrivacyError::InsufficientFundsForWithdrawal
-    );
+    if is_native_sol_pool {
+        require!(
+            ctx.accounts.vault_token_account.key() == ctx.accounts.vault.key(),
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        require!(
+            ctx.accounts.vault.to_account_info().lamports() >= total_outflow,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+    } else {
+        let expected_vault_ata =
+            get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
+        require!(
+            ctx.accounts.vault_token_account.key() == expected_vault_ata,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        let vault_token_data = deserialize_token_account(
+            &ctx.accounts.vault_token_account.to_account_info()
+        )?;
+        require!(
+            vault_token_data.amount >= total_outflow,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+    }
 
     // Relayer fee upper-bound (mirrors transact's max_fee cap). The fee is paid
     // from the vault on top of deposit_amount and is bound into the proof below
@@ -387,31 +485,48 @@ pub fn jperp_open_position<'info>(
         (idx0, idx1, output_tree.root)
     };
 
+    // Emit before the Jupiter Perps CPI — the keeper-request CPI generates enough
+    // logs that events emitted after it can be truncated (same root cause as positions.rs).
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[0],
+        mint_address,
+        tree_id: input_tree_id,
+        timestamp: clock.unix_timestamp,
+    });
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[1],
+        mint_address,
+        tree_id: input_tree_id,
+        timestamp: clock.unix_timestamp,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+        timestamp: clock.unix_timestamp,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+        timestamp: clock.unix_timestamp,
+    });
+
     let vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
         mint_address.as_ref(),
         &[cfg.vault_bump],
     ];
-    if ext_data.fee > 0 {
-        let expected_relayer_ata =
-            get_associated_token_address(&ctx.accounts.relayer.key(), &mint_address);
-        require!(
-            ctx.accounts.relayer_token_account.key() == expected_relayer_ata,
-            PrivacyError::RelayerTokenAccountMismatch
-        );
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                token::Transfer {
-                    from: ctx.accounts.vault_token_account.to_account_info(),
-                    to: ctx.accounts.relayer_token_account.to_account_info(),
-                    authority: ctx.accounts.vault.to_account_info(),
-                },
-                &[vault_seeds],
-            ),
-            ext_data.fee,
-        )?;
-    }
 
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
@@ -423,24 +538,57 @@ pub fn jperp_open_position<'info>(
         &[executor_bump],
     ];
 
-    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
-    require!(
-        ctx.accounts.executor_token_account.key() == expected_executor_ata,
-        PrivacyError::VaultTokenAccountNotATA
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 14, PrivacyError::JperpInvalidAccounts);
+    require_keys_eq!(
+        remaining[0].key(),
+        JUPITER_PERP_PROGRAM_ID,
+        PrivacyError::JperpInvalidAccounts
     );
 
-    token::transfer(
-        CpiContext::new_with_signer(
+    if is_native_sol_pool {
+        // remaining[8] is inputMint (WSOL for SOL longs), passed by the relayer.
+        let collateral_mint_key = remaining[8].key();
+        let expected_executor_ata =
+            get_associated_token_address(&executor_key, &collateral_mint_key);
+        require!(
+            ctx.accounts.executor_token_account.key() == expected_executor_ata,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        // The lamport transfer (vault → executor_wsol_ata) was already done by the preceding
+        // fund_native_jperp_open instruction. Call sync_native here to materialise the
+        // WSOL token balance from those lamports, then assert it covers deposit_amount.
+        token::sync_native(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
-            token::Transfer {
-                from: ctx.accounts.vault_token_account.to_account_info(),
-                to: ctx.accounts.executor_token_account.to_account_info(),
-                authority: ctx.accounts.vault.to_account_info(),
+            token::SyncNative {
+                account: ctx.accounts.executor_token_account.to_account_info(),
             },
-            &[vault_seeds],
-        ),
-        deposit_amount,
-    )?;
+            &[executor_seeds],
+        ))?;
+        let wsol_data = deserialize_token_account(&ctx.accounts.executor_token_account.to_account_info())?;
+        require!(
+            wsol_data.amount >= deposit_amount,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+    } else {
+        let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+        require!(
+            ctx.accounts.executor_token_account.key() == expected_executor_ata,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.executor_token_account.to_account_info(),
+                    authority: ctx.accounts.vault.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            deposit_amount,
+        )?;
+    }
 
     // Jupiter funds the positionRequest account + ATA via
     // `system_program::transfer(from = owner = executor)`. The executor is a
@@ -458,14 +606,6 @@ pub fn jperp_open_position<'info>(
             ctx.accounts.system_program.to_account_info(),
         ],
     )?;
-
-    let remaining = ctx.remaining_accounts;
-    require!(remaining.len() >= 14, PrivacyError::JperpInvalidAccounts);
-    require_keys_eq!(
-        remaining[0].key(),
-        JUPITER_PERP_PROGRAM_ID,
-        PrivacyError::JperpInvalidAccounts
-    );
 
     let ix_data = encode_create_increase_request(
         size_usd_delta,
@@ -521,6 +661,47 @@ pub fn jperp_open_position<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
+    // Relayer fee — paid AFTER every CPI. For native SOL the fee moves vault → relayer
+    // as raw lamports; doing this before the system-program rent-funding CPI (which spends
+    // from the relayer) would mix a direct lamport credit with a later CPI on the same
+    // account and break the runtime's lamport-balance invariant. SPL pools transfer from
+    // the vault's collateral ATA instead.
+    if ext_data.fee > 0 {
+        if is_native_sol_pool {
+            // Vault solvency is already guaranteed above (lamports >= total_outflow, which
+            // includes the fee); use checked math so an unexpected state can never wrap.
+            let vault_ai = ctx.accounts.vault.to_account_info();
+            let relayer_ai = ctx.accounts.relayer.to_account_info();
+            let mut vault_lamports = vault_ai.try_borrow_mut_lamports()?;
+            let mut relayer_lamports = relayer_ai.try_borrow_mut_lamports()?;
+            **vault_lamports = vault_lamports
+                .checked_sub(ext_data.fee)
+                .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+            **relayer_lamports = relayer_lamports
+                .checked_add(ext_data.fee)
+                .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+        } else {
+            let expected_relayer_ata =
+                get_associated_token_address(&ctx.accounts.relayer.key(), &mint_address);
+            require!(
+                ctx.accounts.relayer_token_account.key() == expected_relayer_ata,
+                PrivacyError::RelayerTokenAccountMismatch
+            );
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    token::Transfer {
+                        from: ctx.accounts.vault_token_account.to_account_info(),
+                        to: ctx.accounts.relayer_token_account.to_account_info(),
+                        authority: ctx.accounts.vault.to_account_info(),
+                    },
+                    &[vault_seeds],
+                ),
+                ext_data.fee,
+            )?;
+        }
+    }
+
     let slot = &mut ctx.accounts.jperp_slot;
     slot.bump = ctx.bumps.jperp_slot;
     slot.amount = deposit_amount;
@@ -530,51 +711,6 @@ pub fn jperp_open_position<'info>(
     cfg.total_tvl = cfg.total_tvl
         .checked_sub(total_outflow)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
-
-    emit!(NullifierSpent {
-        nullifier: input_nullifiers[0],
-        mint_address,
-        tree_id: input_tree_id,
-        timestamp: clock.unix_timestamp,
-    });
-    emit!(NullifierSpent {
-        nullifier: input_nullifiers[1],
-        mint_address,
-        tree_id: input_tree_id,
-        timestamp: clock.unix_timestamp,
-    });
-
-    emit!(CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_0,
-        tree_id: output_tree_id,
-        mint_address,
-        new_root,
-        ephemeral_public_key: note0_epk,
-        encrypted_blob: note0_enc,
-        view_tag: note0_vt,
-        timestamp: clock.unix_timestamp,
-    });
-    emit!(CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_1,
-        tree_id: output_tree_id,
-        mint_address,
-        new_root,
-        ephemeral_public_key: note1_epk,
-        encrypted_blob: note1_enc,
-        view_tag: note1_vt,
-        timestamp: clock.unix_timestamp,
-    });
-
-    emit!(JperpOpenPositionEvent {
-        deposit_amount,
-        size_usd_delta,
-        side,
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: clock.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -632,10 +768,10 @@ pub fn jperp_set_tpsl<'info>(
         PrivacyError::JperpInvalidAccounts
     );
 
-    // receivingAccount = executor's USDC ATA (proceeds land here when trigger fires).
-    // Bind it to the canonical executor ATA so a relayer cannot redirect trigger
-    // proceeds to an account that jperp_reissue_notes can never recover from.
-    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+    // receivingAccount = executor's collateral ATA (proceeds land here when trigger fires).
+    // For SOL pools the collateral is WSOL (not the all-zero native mint).
+    let collateral_mint = if mint_address == Pubkey::default() { WSOL_MINT } else { mint_address };
+    let expected_executor_ata = get_associated_token_address(&executor_key, &collateral_mint);
     require!(
         ctx.accounts.executor_token_account.key() == expected_executor_ata,
         PrivacyError::VaultTokenAccountNotATA
@@ -686,16 +822,6 @@ pub fn jperp_set_tpsl<'info>(
         &ctx.accounts.executor_token_account,
         remaining,
     ), &[executor_seeds])?;
-
-    emit!(JperpTpslSetEvent {
-        trigger_price,
-        trigger_above_threshold,
-        size_usd_delta,
-        entire_position,
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -776,14 +902,6 @@ pub fn jperp_update_tpsl<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    emit!(JperpTpslUpdatedEvent {
-        trigger_price,
-        size_usd_delta,
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -837,10 +955,10 @@ pub fn jperp_close_position<'info>(
         PrivacyError::JperpInvalidAccounts
     );
 
-    // receivingAccount = executor's USDC ATA (close proceeds land here). Bind it to
-    // the canonical executor ATA so a relayer cannot redirect proceeds to an account
-    // that jperp_reissue_notes can never recover from.
-    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+    // receivingAccount = executor's collateral ATA (close proceeds land here).
+    // For SOL pools the collateral is WSOL (not the all-zero native mint).
+    let collateral_mint = if mint_address == Pubkey::default() { WSOL_MINT } else { mint_address };
+    let expected_executor_ata = get_associated_token_address(&executor_key, &collateral_mint);
     require!(
         ctx.accounts.executor_token_account.key() == expected_executor_ata,
         PrivacyError::VaultTokenAccountNotATA
@@ -886,15 +1004,6 @@ pub fn jperp_close_position<'info>(
         &ctx.accounts.executor_token_account,
         remaining,
     ), &[executor_seeds])?;
-
-    emit!(JperpCloseRequestEvent {
-        entire_position,
-        size_usd_delta,
-        collateral_usd_delta,
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -976,6 +1085,22 @@ pub fn jperp_reissue_notes(
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
+    // Relayer fee upper-bound — mirrors jperp_open_position. SOL-pool reissues
+    // validate the fee here but skip the transfer: close_account sweeps the full
+    // WSOL ATA to vault, so partial extraction isn't possible.
+    let max_fee_u128 = (reissue_amount as u128)
+        .checked_mul(cfg.fee_bps as u128)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
+    require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+    let max_fee_with_margin = (max_fee_u128 as u64)
+        .checked_mul((10_000u64).saturating_add(cfg.fee_error_margin_bps as u64))
+        .map(|x| x / 10_000)
+        .unwrap_or(max_fee_u128 as u64);
+    require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
+    let gross_outflow = reissue_amount
+        .checked_add(ext_data.fee)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: reissue_amount as i64,
@@ -1004,37 +1129,98 @@ pub fn jperp_reissue_notes(
         &[executor_bump],
     ];
 
-    let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
-    require!(
-        ctx.accounts.executor_token_account.key() == expected_executor_ata,
-        PrivacyError::VaultTokenAccountNotATA
-    );
-    let expected_vault_ata = get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
-    require!(
-        ctx.accounts.vault_token_account.key() == expected_vault_ata,
-        PrivacyError::VaultTokenAccountNotATA
-    );
-
-    // Verify executor ATA has enough to cover reissue
-    let executor_ata_data = deserialize_token_account(
-        &ctx.accounts.executor_token_account.to_account_info()
-    )?;
-    require!(
-        executor_ata_data.amount >= reissue_amount,
-        PrivacyError::InsufficientFundsForWithdrawal
-    );
-
-    token::transfer(
-        CpiContext::new_with_signer(
+    let is_native_sol_pool = mint_address == Pubkey::default();
+    if is_native_sol_pool {
+        // SOL pool: vault_token_account must equal vault itself (no WSOL ATA exists).
+        // executor_token_account must be ATA(executor, WSOL_MINT) — proceeds land there
+        // as WSOL after the Jupiter keeper settles the position.
+        require!(
+            ctx.accounts.vault_token_account.key() == ctx.accounts.vault.key(),
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        let expected_executor_wsol = get_associated_token_address(&executor_key, &WSOL_MINT);
+        require!(
+            ctx.accounts.executor_token_account.key() == expected_executor_wsol,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        let executor_wsol_data = deserialize_token_account(
+            &ctx.accounts.executor_token_account.to_account_info()
+        )?;
+        require!(
+            executor_wsol_data.amount >= reissue_amount,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+        // Close executor WSOL ATA → vault: unwraps all WSOL as native SOL into the vault.
+        // close_account transfers all lamports (WSOL balance + rent) to destination.
+        token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
-            token::Transfer {
-                from: ctx.accounts.executor_token_account.to_account_info(),
-                to: ctx.accounts.vault_token_account.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.executor_token_account.to_account_info(),
+                destination: ctx.accounts.vault.to_account_info(),
                 authority: ctx.accounts.executor.to_account_info(),
             },
             &[executor_seeds],
-        ),
-        reissue_amount,
+        ))?;
+    } else {
+        let expected_executor_ata = get_associated_token_address(&executor_key, &mint_address);
+        require!(
+            ctx.accounts.executor_token_account.key() == expected_executor_ata,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        let expected_vault_ata =
+            get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
+        require!(
+            ctx.accounts.vault_token_account.key() == expected_vault_ata,
+            PrivacyError::VaultTokenAccountNotATA
+        );
+        let executor_ata_data = deserialize_token_account(
+            &ctx.accounts.executor_token_account.to_account_info()
+        )?;
+        require!(
+            executor_ata_data.amount >= gross_outflow,
+            PrivacyError::InsufficientFundsForWithdrawal
+        );
+        // Fee: executor → relayer ATA (before vault transfer so vault always gets reissue_amount).
+        if ext_data.fee > 0 {
+            let expected_relayer_ata =
+                get_associated_token_address(&ctx.accounts.relayer.key(), &mint_address);
+            require!(
+                ctx.accounts.relayer_token_account.key() == expected_relayer_ata,
+                PrivacyError::RelayerTokenAccountMismatch
+            );
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    token::Transfer {
+                        from: ctx.accounts.executor_token_account.to_account_info(),
+                        to: ctx.accounts.relayer_token_account.to_account_info(),
+                        authority: ctx.accounts.executor.to_account_info(),
+                    },
+                    &[executor_seeds],
+                ),
+                ext_data.fee,
+            )?;
+        }
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.executor_token_account.to_account_info(),
+                    to: ctx.accounts.vault_token_account.to_account_info(),
+                    authority: ctx.accounts.executor.to_account_info(),
+                },
+                &[executor_seeds],
+            ),
+            reissue_amount,
+        )?;
+    }
+
+    // Reclaim the relayer-fronted SOL now that proceeds are pulled (executor is per-withdrawal_id).
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
     )?;
 
     let (leaf_index_0, leaf_index_1, new_root) = {
@@ -1073,12 +1259,6 @@ pub fn jperp_reissue_notes(
         ephemeral_public_key: note1_epk,
         encrypted_blob: note1_enc,
         view_tag: note1_vt,
-        timestamp: clock.unix_timestamp,
-    });
-
-    emit!(JperpReissueEvent {
-        reissue_amount,
-        mint_address,
         timestamp: clock.unix_timestamp,
     });
 
@@ -1141,57 +1321,6 @@ fn build_decrease_request_infos<'info>(
     ]
 }
 
-// ── Events ────────────────────────────────────────────────────────────────────
-
-/// Emitted when a Jupiter Perps position request is submitted.
-#[event]
-pub struct JperpOpenPositionEvent {
-    pub deposit_amount: u64,
-    pub size_usd_delta: u64,
-    /// 1 = Long, 2 = Short
-    pub side: u8,
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a TP or SL trigger request is created.
-#[event]
-pub struct JperpTpslSetEvent {
-    pub trigger_price: u64,
-    pub trigger_above_threshold: bool,
-    pub size_usd_delta: u64,
-    pub entire_position: bool,
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a pending TP/SL trigger is updated.
-#[event]
-pub struct JperpTpslUpdatedEvent {
-    pub trigger_price: u64,
-    pub size_usd_delta: u64,
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a market close/decrease request is submitted.
-#[event]
-pub struct JperpCloseRequestEvent {
-    pub entire_position: bool,
-    pub size_usd_delta: u64,
-    pub collateral_usd_delta: u64,
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when settled proceeds are re-minted as private notes.
-#[event]
-pub struct JperpReissueEvent {
-    pub reissue_amount: u64,
-    pub mint_address: Pubkey,
-    pub timestamp: i64,
-}
+// Note-recovery/indexing events (NullifierSpent, CommitmentEvent) are emitted from the shared
+// crate types; the Jupiter-Perps-specific telemetry events were removed as redundant on-chain noise
+// (the relayer already has this data, and broadcasting position size/side/amount leaks metadata).

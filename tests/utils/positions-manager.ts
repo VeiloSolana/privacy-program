@@ -1268,6 +1268,8 @@ export class PositionsManager {
     amount: BN;
     withdrawalId: Uint8Array;
     executorPhUsdAta: PublicKey;
+    /** Reserved: slot cap override for PnL gains — not yet enforced on-chain. */
+    maxSlotAmount?: BN;
   }): Promise<string> {
     const phoenixSlot = derivePhoenixSlotPda(
       this.program.programId,

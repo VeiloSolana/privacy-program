@@ -2372,6 +2372,63 @@ pub struct PhoenixReissueNotes<'info> {
 
 // ---- Jupiter Perpetuals Instruction Contexts ----
 
+/// Pre-funding step for native SOL pool jperp opens.
+///
+/// Moves `deposit_amount` lamports from the native-SOL vault directly into the executor's
+/// WSOL ATA (creating it in the process). Must be sent as the instruction immediately
+/// before `jperp_open_position` in the same transaction — the pairing guard enforces this.
+///
+/// Separating the lamport move from `jperp_open_position` is required because Solana's
+/// SVM checks lamport conservation at the end of each instruction; wrapping (sync_native)
+/// in the same instruction as the lamport spend creates an apparent imbalance.
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, claimant: Pubkey, withdrawal_id: [u8; 32], deposit_amount: u64)]
+pub struct FundNativeJperpOpen<'info> {
+    /// Source vault (native SOL pool — holds raw lamports).
+    #[account(
+        mut,
+        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
+        bump = source_config.vault_bump
+    )]
+    pub vault: Box<Account<'info, Vault>>,
+
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = source_config.bump)]
+    pub source_config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Executor PDA — system-owned, no data; validated by the following jperp_open_position.
+    /// CHECK: seeds validated in handler; further validated by jperp_open_position.
+    #[account(
+        mut,
+        seeds = [b"jperp_executor", mint_address.as_ref(), claimant.as_ref(), withdrawal_id.as_ref()],
+        bump
+    )]
+    pub executor: UncheckedAccount<'info>,
+
+    /// Executor's WSOL ATA — created here, funded with deposit_amount lamports from vault.
+    #[account(
+        init,
+        payer = relayer,
+        associated_token::mint = wsol_mint,
+        associated_token::authority = executor
+    )]
+    pub executor_wsol_ata: Box<Account<'info, TokenAccount>>,
+
+    /// WSOL mint (So11111…1112).
+    #[account(address = crate::perps::WSOL_MINT @ PrivacyError::InvalidMintAddress)]
+    pub wsol_mint: Box<Account<'info, Mint>>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    /// CHECK: Instructions sysvar — used to verify this is paired with jperp_open_position.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID @ PrivacyError::Unauthorized)]
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+}
+
 /// ZK-verified USDC withdrawal → executor PDA funded → `createIncreasePositionMarketRequest`.
 #[derive(Accounts)]
 #[instruction(
@@ -2687,8 +2744,10 @@ pub struct JperpReissueNotes<'info> {
     pub claimant: Signer<'info>,
 
     /// Executor PDA — authority on the executor_token_account.
+    /// `mut` so its residual SOL can be swept back to the relayer at the end of the reissue.
     /// CHECK: Seeds validated as [b"jperp_executor", mint_address, claimant, withdrawal_id].
     #[account(
+        mut,
         seeds = [b"jperp_executor", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()],
         bump
     )]
@@ -2699,10 +2758,15 @@ pub struct JperpReissueNotes<'info> {
     #[account(mut)]
     pub executor_token_account: UncheckedAccount<'info>,
 
-    /// Vault's collateral ATA — destination for reissued USDC.
+    /// Vault's collateral ATA — destination for reissued tokens.
     /// CHECK: Validated as ATA(vault, mint_address) in handler.
     #[account(mut)]
     pub vault_token_account: UncheckedAccount<'info>,
+
+    /// Relayer's ATA for the reissue fee (SPL pools only; unused when fee = 0).
+    /// CHECK: Validated as ATA(relayer, mint_address) in handler when fee > 0.
+    #[account(mut)]
+    pub relayer_token_account: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2922,6 +2986,11 @@ pub struct PredictionReissue<'info> {
     /// CHECK: Validated as ATA(vault, mint_address) in handler.
     #[account(mut)]
     pub vault_token_account: UncheckedAccount<'info>,
+
+    /// Relayer's ATA for the reissue fee (unused when fee = 0).
+    /// CHECK: Validated as ATA(relayer, mint_address) in handler when fee > 0.
+    #[account(mut)]
+    pub relayer_token_account: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -3265,8 +3334,6 @@ pub mod privacy_pool {
         );
 
         // 4. Verify mint address matches config
-        msg!("DEBUG: mint_address param = {}", mint_address);
-        msg!("DEBUG: cfg.mint_address   = {}", cfg.mint_address);
         require_keys_eq!(mint_address, cfg.mint_address, PrivacyError::InvalidMintAddress);
 
         // 4a. mint_address has been verified to equal cfg.mint_address above (require_keys_eq),
@@ -3602,6 +3669,15 @@ pub mod privacy_pool {
         cfg.relayers[n - 1] = Pubkey::default();
         cfg.num_relayers -= 1;
         Ok(())
+    }
+
+    /// Update the position pool's swap fees (admin only). Pass `None` to leave a field unchanged.
+    pub fn update_position_pool(
+        ctx: Context<PositionPoolAdmin>,
+        min_swap_fee: Option<u64>,
+        swap_fee_bps: Option<u16>
+    ) -> Result<()> {
+        positions::update_position_pool(ctx, min_swap_fee, swap_fee_bps)
     }
 
     /// Open a private stock/meme position.
@@ -4166,6 +4242,18 @@ pub mod privacy_pool {
     /// ZK-verified USDC withdrawal → executor PDA funded →
     /// `createIncreasePositionMarketRequest` CPI (atomic).
     ///
+    /// Fund step for native SOL pool jperp opens.
+    /// Must immediately precede `jperp_open_position` in the same transaction.
+    pub fn fund_native_jperp_open(
+        ctx: Context<FundNativeJperpOpen>,
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        withdrawal_id: [u8; 32],
+        deposit_amount: u64,
+    ) -> Result<()> {
+        crate::perps::fund_native_jperp_open(ctx, mint_address, claimant, withdrawal_id, deposit_amount)
+    }
+
     /// The executor PDA becomes the Jupiter Perps position owner; the user's
     /// wallet never appears on-chain. Jupiter's keeper settles the request.
     ///

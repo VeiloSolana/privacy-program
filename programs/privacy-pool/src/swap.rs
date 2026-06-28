@@ -476,6 +476,50 @@ pub fn transact_swap<'info>(
         &[executor.bump],
     ];
 
+    // Append output commitments + emit events BEFORE the swap CPI. Jupiter/Raydium routes emit
+    // enough logs to hit Solana's truncation limit, silently dropping events emitted after the CPI.
+    // Commitments are ZK-proven and independent of the swap result; on failure the whole tx (and
+    // these appends) rolls back atomically. Mirrors open_position/close_position.
+    let (leaf_index_dest, dest_new_root) = {
+        let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
+        let cap = 1u64 << (dest_tree.height as u64);
+        require!(cap.saturating_sub(dest_tree.next_index) >= 1, PrivacyError::MerkleTreeFull);
+        let idx = dest_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *dest_tree)?;
+        (idx, dest_tree.root)
+    };
+    emit!(crate::CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_dest,
+        new_root: dest_new_root,
+        timestamp: clock.unix_timestamp,
+        mint_address: dest_mint,
+        tree_id: dest_tree_id,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+    });
+
+    let (leaf_index_change, source_new_root) = {
+        let mut source_tree = ctx.accounts.source_tree.load_mut()?;
+        let cap = 1u64 << (source_tree.height as u64);
+        require!(cap.saturating_sub(source_tree.next_index) >= 1, PrivacyError::MerkleTreeFull);
+        let idx = source_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *source_tree)?;
+        (idx, source_tree.root)
+    };
+    emit!(crate::CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_change,
+        new_root: source_new_root,
+        timestamp: clock.unix_timestamp,
+        mint_address: source_mint,
+        tree_id: source_tree_id,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+    });
+
     let remaining = &ctx.remaining_accounts;
 
     // Detect generic Swap Program type based on Instruction Discriminator
@@ -903,53 +947,7 @@ pub fn transact_swap<'info>(
         .checked_add(vault_amount)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    let mut dest_tree = ctx.accounts.dest_tree.load_mut()?;
-
-    let max_capacity = 1u64 << (dest_tree.height as u64);
-    let remaining = max_capacity.saturating_sub(dest_tree.next_index);
-    require!(remaining >= 1, PrivacyError::MerkleTreeFull);
-
-    let leaf_index_dest = dest_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *dest_tree)?;
-
-    let dest_new_root = dest_tree.root;
-    drop(dest_tree);
-
-    emit!(crate::CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_dest,
-        new_root: dest_new_root,
-        timestamp: clock.unix_timestamp,
-        mint_address: dest_mint,
-        tree_id: dest_tree_id,
-        ephemeral_public_key: note1_epk,
-        encrypted_blob: note1_enc,
-        view_tag: note1_vt,
-    });
-
-    let mut source_tree = ctx.accounts.source_tree.load_mut()?;
-
-    let max_capacity = 1u64 << (source_tree.height as u64);
-    let remaining = max_capacity.saturating_sub(source_tree.next_index);
-    require!(remaining >= 1, PrivacyError::MerkleTreeFull);
-
-    let leaf_index_change = source_tree.next_index;
-    MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *source_tree)?;
-
-    let source_new_root = source_tree.root;
-    drop(source_tree);
-
-    emit!(crate::CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_change,
-        new_root: source_new_root,
-        timestamp: clock.unix_timestamp,
-        mint_address: source_mint,
-        tree_id: source_tree_id,
-        ephemeral_public_key: note0_epk,
-        encrypted_blob: note0_enc,
-        view_tag: note0_vt,
-    });
+    // Commitments were appended + emitted before the swap CPI (see above) to survive log truncation.
 
     // Defense-in-depth: assert source token balance is zero before closing.
     // For WSOL, close_account transfers token balance + rent; any surplus would go to the relayer.

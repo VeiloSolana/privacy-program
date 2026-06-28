@@ -18,6 +18,7 @@ import {
   workspace,
 } from "@coral-xyz/anchor";
 import {
+  Connection,
   PublicKey,
   Keypair,
   SystemProgram,
@@ -81,7 +82,7 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqC
 // MEME_A: bonding-curve token (label "Pump.fun") — direct SOL→MEME (1-hop). Actively-trading token
 //         that uses pump's minimal 13-account buy / 16-account sell (no buyback fee pair).
 // MEME_B: migrated AMM token (label "Pump.fun Amm") — USDC→MEME (1-hop).
-const MEME_A_MINT = new PublicKey("73RFKrDBUCRv6ifvPYgEdiumnRMoRhaG7hpNZ43cpump");
+const MEME_A_MINT = new PublicKey("GExbmeCi1mTB8YbDud2USBnkSRFsVRH53Ujs6VNmpump");
 const MEME_B_MINT = new PublicKey("EmcxFTNVDqyLHp11NvwvLZ4D7LKGbG9i7B8RF7dwpump");
 // Bonding-curve meme trading goes through Jupiter (staged-legs cosigner route), not a direct pump
 // CPI — see docs/pumpfun-direct-cpi.md for the removed direct-CPI helpers/constants.
@@ -370,6 +371,7 @@ describe("Position Pool", () => {
   let xstockPositionState: PositionNoteState | undefined;
   let memeBPositionState: PositionNoteState | undefined; // PumpSwap/AMM meme (USDC→MEME), closed via Jupiter
   let memeAPositionState: PositionNoteState | undefined; // bonding-curve meme (SOL→MEME), closed MEME→SOL
+  let memeAUsdcPositionState: PositionNoteState | undefined; // bonding-curve meme opened from USDC (USDC→SOL→MEME)
 
   // Test wallet private key slice for position derivation
   let walletPrivkey: Uint8Array;
@@ -615,7 +617,11 @@ describe("Position Pool", () => {
   // Acquire USDC into the payer wallet via a direct Jupiter SOL→USDC swap (Byreal), then deposit
   // the full balance into the USDC privacy pool. Returns the spendable USDC note.
   async function depositUsdcNote(solForUsdc: number): Promise<DepositNote> {
-    const usdcQuote = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, solForUsdc, 100, true, "Byreal");
+    // BisonFi (constant-product, drift-free) instead of Byreal CLMM — Byreal's SOL/USDC tick-array
+    // band drifts out of the cloned range between runs (InvalidFirstTickArrayAccount). Same pool the
+    // USDC→MEME_A route uses; already cloned. See [[anchor-toml-dex-clones]].
+    const usdcQuote = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, solForUsdc, 5000, true, "Meteora");
+    console.log("  [pool-debug] depositUsdcNote route:", (usdcQuote.routePlan ?? []).map((r: any) => `${r.swapInfo?.label ?? "?"}@${r.swapInfo?.ammKey ?? "?"}`).join(" → "));
     const usdcSwapIxResp = await jupiterService.getSwapInstruction(usdcQuote, payer.publicKey, true);
     const directSwapIxs: TransactionInstruction[] = [
       ...(usdcSwapIxResp.setupInstructions ?? []).map(decodeJupIx),
@@ -1316,9 +1322,13 @@ describe("Position Pool", () => {
       // note) is conservative; the fee is paid from the swap output and the program enforces
       // received - fee >= dest_amount. Setting minAmountOut = dest_amount + fee guarantees
       // that invariant holds regardless of the live swap output.
-      const usdcDestAmount = (expectedOut * 80n) / 100n; // note credited privately
-      const closeFee = (expectedOut * 5n) / 100n;        // relayer fee (sits in the buffer)
-      const minAmountOut = usdcDestAmount + closeFee;     // received floor → received-fee >= dest
+      const usdcDestAmount = (expectedOut * 80n) / 100n; // note credited privately (conservative)
+      const closeFee = (expectedOut * 5n) / 100n;        // relayer fee, taken from the swap output
+      // The swap circuit constrains dest_amount >= min_amount_out (swap.circom:287), so min_amount_out
+      // must be <= dest_amount — NOT dest_amount+fee. The relayer fee is enforced separately on-chain
+      // (received - fee >= dest_amount, positions.rs:373), which holds with margin because the actual
+      // received (~expectedOut) far exceeds dest_amount (80%). Matches every other close's convention.
+      const minAmountOut = usdcDestAmount;
       console.log("  Expected USDC output:", expectedOut.toString(), " closeFee:", closeFee.toString());
 
       const positionPdaAddr = derivePositionPda(program.programId, ps.positionPdaKeyBytes);
@@ -1532,9 +1542,11 @@ describe("Position Pool", () => {
       await airdropAndConfirm(provider, payer.publicKey, 5 * LAMPORTS_PER_SOL);
 
       // ── Step 1: Direct Jupiter swap SOL→USDC (BisonFi 1-hop) ────────────────
-      console.log("  Swapping SOL→USDC via Jupiter (Byreal direct)...");
+      console.log("  Swapping SOL→USDC via Jupiter (Meteora)...");
       const solForUsdc = 50_000_000; // 0.05 SOL
-      const usdcQuote = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, solForUsdc, 100, true, "Byreal");
+      // Meteora constant-product pool (5yuefg/8Pnv6w, cloned as JSON). See [[anchor-toml-dex-clones]].
+      const usdcQuote = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, solForUsdc, 5000, true, "Meteora");
+      console.log("  [pool-debug] xStock SOL→USDC route:", (usdcQuote.routePlan ?? []).map((r: any) => `${r.swapInfo?.label ?? "?"}@${r.swapInfo?.ammKey ?? "?"}`).join(" → "));
       const usdcSwapIxResp = await jupiterService.getSwapInstruction(usdcQuote, payer.publicKey, true);
 
       const directSwapIxs: TransactionInstruction[] = [
@@ -1997,6 +2009,98 @@ describe("Position Pool", () => {
       return { swapData, remaining };
     }
 
+    // Build combined Jupiter legs for an SPL-source bonding-curve open (e.g. USDC→SOL→MEME_pump).
+    // The key problem: Jupiter's multi-hop RouteV2 for USDC→SOL→MEME runs the pump buy BEFORE its
+    // own WSOL cleanup, so pump finds 0 native SOL. Fix: split into two one-hop quotes and inject
+    // a SPL Token close_account instruction between them. The close converts the intermediate WSOL
+    // (Meteora/any-DEX output) to native lamports so Pump.fun's native-SOL pull succeeds.
+    // DEX-agnostic: close_account works regardless of which DEX Jupiter picks for the USDC→SOL hop.
+    async function buildJupLegsWithMidUnwrap(
+      usdcToSolQuote: any,
+      solToMemeQuote: any,
+      cosigner: PublicKey,
+    ): Promise<{ swapData: Buffer; remaining: any[] }> {
+      // Solana caps a tx's instruction trace at 64 (top-level + every nested CPI). USDC→SOL (Meteora,
+      // vault-layered) + close_account + SOL→MEME (pump, native buy) + the program's own ATA setup
+      // overruns it by a few. Each in-program ATA-create is ~5 CPIs, so we drop the REDUNDANT ones and
+      // pre-create those ATAs in the staging tx instead. Crucially we KEEP the WSOL wrap — the pump
+      // bonding curve pulls NATIVE SOL, so leg B must close→native (our close_account leg) then Jupiter
+      // re-wraps native→WSOL→(internal unwrap)→native for the buy; dropping that wrap fails Jupiter 0x1789.
+      const ataPid = ASSOCIATED_TOKEN_PROGRAM_ID.toBase58();
+      const destMintStr = solToMemeQuote.outputMint;
+
+      // USDC→SOL: drop leg A's setup (only the WSOL-ATA create — pre-created in staging). Keep swap.
+      const rA = await jupiterService.getSwapInstruction(usdcToSolQuote, cosigner, true, false, undefined);
+      const legsA = [rA.swapInstruction].filter(Boolean);
+
+      // SOL→MEME setup = [WSOL-ATA create, wrap Transfer, SyncNative, MEME-ATA create]. The WSOL ATA was
+      // just closed by our close_account leg, so KEEP its recreate + the wrap; DROP only the MEME-ATA
+      // create (pre-created in staging — identified by its mint at account index 3). Cleanup unwraps any
+      // WSOL dust back to the cosigner; keep it.
+      const rB = await jupiterService.getSwapInstruction(solToMemeQuote, cosigner, true, false, undefined);
+      const legBSetup = ((rB.setupInstructions ?? []) as any[]).filter(
+        (ix: any) => !(ix.programId === ataPid && ix.accounts?.[3]?.pubkey === destMintStr),
+      );
+      const legsB = [
+        ...legBSetup,
+        rB.swapInstruction,
+        ...(rB.cleanupInstruction ? [rB.cleanupInstruction] : []),
+      ].filter(Boolean);
+
+      // Unified remaining accounts for the combined leg set.
+      const idxMap = new Map<string, number>();
+      const remaining: any[] = [];
+      const addAcct = (key: string, isWritable: boolean) => {
+        if (!idxMap.has(key)) {
+          idxMap.set(key, remaining.length);
+          remaining.push({ pubkey: new PublicKey(key), isWritable, isSigner: false });
+        } else if (isWritable) {
+          remaining[idxMap.get(key)!].isWritable = true;
+        }
+      };
+      for (const leg of [...legsA, ...legsB]) {
+        for (const a of leg.accounts) addAcct(a.pubkey, !!a.isWritable);
+      }
+
+      // Ensure the cosigner's WSOL ATA and the cosigner itself are in the map (they appear in legsA
+      // from Jupiter's setup, but guarantee them here for the close_account leg below).
+      const cosignerWsolAta = await getAssociatedTokenAddress(NATIVE_MINT, cosigner, false);
+      addAcct(cosignerWsolAta.toBase58(), true);
+      addAcct(cosigner.toBase58(), true);
+
+      // Manual close_account leg: SPL Token instruction discriminant 9.
+      // Closes the cosigner's WSOL ATA, sending all lamports to the cosigner's native balance.
+      // account[0] = WSOL ATA (writable, source)
+      // account[1] = cosigner (writable, destination for lamports)
+      // account[2] = cosigner (signer, owner/authority) — same index as [1] after dedup
+      const closeLeg = {
+        programId: TOKEN_PROGRAM_ID.toBase58(),
+        accounts: [
+          { pubkey: cosignerWsolAta.toBase58(), isWritable: true },
+          { pubkey: cosigner.toBase58(), isWritable: true },
+          { pubkey: cosigner.toBase58(), isWritable: false },
+        ],
+        data: Buffer.from([9]).toString("base64"), // close_account discriminant
+      };
+
+      const rawLegs = [...legsA, closeLeg, ...legsB];
+
+      const u32 = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
+      const legBufs = rawLegs.map((leg: any) => {
+        const pid = new PublicKey(leg.programId).toBuffer();
+        const indices = Buffer.from(leg.accounts.map((a: any) => idxMap.get(a.pubkey)!));
+        const data = Buffer.from(leg.data, "base64");
+        return Buffer.concat([pid, u32(indices.length), indices, u32(data.length), data]);
+      });
+      const swapData = Buffer.concat([JUP_LEGS_SENTINEL, u32(rawLegs.length), ...legBufs]);
+      console.log(`  [jupLegsUnwrap] A=${legsA.length} + close_account(1) + B=${legsB.length} total=${rawLegs.length} blob=${swapData.length}B accts=${remaining.length}`);
+      rawLegs.forEach((leg: any, i: number) => {
+        const disc = Buffer.from(leg.data, "base64").subarray(0, 1).toString("hex");
+        console.log(`    leg[${i}] prog=${leg.programId} accts=${leg.accounts.length} dataLen=${Buffer.from(leg.data, "base64").length} disc=0x${disc}`);
+      });
+      return { swapData, remaining };
+    }
+
     // Build JupLegs from a Jupiter **Ultra** order — for tokens only routable via Ultra/Metis (e.g.
     // un-migrated Raydium LaunchLab / bonk.fun), which the swap/v1 instructions API reports as "not
     // tradable". The Ultra order's `transaction` is built for `taker` (pass the ephemeral cosigner);
@@ -2054,6 +2158,50 @@ describe("Position Pool", () => {
     }
     void buildJupLegsFromUltra; // helper for Ultra-only tokens (devnet); not exercised on localnet
 
+    // Localnet robustness for pump.fun's ROTATING fee recipient. Pump selects its active SOL fee
+    // recipient by slot, and a fresh `anchor test` validator boots at slot 0, so the recipient the
+    // buy/sell route picks can differ run-to-run. Any picked recipient that isn't cloned gets created
+    // fresh by the fee transfer with only the tiny fee → below the 890_880-lamport rent floor → the tx
+    // is rejected post-execution with "account (N) insufficient funds for rent". Rather than chase
+    // individual addresses in Anchor.toml (whack-a-mole — they rotate), fund any WRITABLE route account
+    // that is (a) missing on localnet AND (b) a system-owned 0-data account on mainnet — i.e. a SOL fee
+    // recipient, never an ephemeral cosigner ATA (absent on mainnet) or a data-carrying pool/vault
+    // (those must still be cloned). Mirrors mainnet, where these recipients already exist rent-exempt.
+    const MAINNET_RPC = "https://mainnet.helius-rpc.com/?api-key=a3016be0-c6e1-441f-b8df-2310eb026b66";
+    async function fundMissingRouteAccounts(
+      remaining: { pubkey: PublicKey; isWritable: boolean }[],
+      exclude?: Set<string>,
+    ) {
+      const mainnet = new Connection(MAINNET_RPC, "confirmed");
+      // Candidates: writable route accounts absent locally, minus known cosigner ATAs.
+      // We exclude cosigner ATAs because pre-funding a system account before ATA creation breaks
+      // the create_idempotent call (system_program::create_account requires the account at 0 lamports).
+      const candidates: PublicKey[] = [];
+      for (const a of remaining) {
+        if (!a.isWritable) continue;
+        if (exclude?.has(a.pubkey.toBase58())) continue;
+        if (await connection.getAccountInfo(a.pubkey)) continue;
+        candidates.push(a.pubkey);
+      }
+      if (!candidates.length) return;
+      // ONE batched mainnet read (getMultipleAccounts) with retry.
+      let infos: (any | null)[] = [];
+      for (let i = 0; i < 5; i++) {
+        try { infos = await mainnet.getMultipleAccountsInfo(candidates); break; }
+        catch { await new Promise((r) => setTimeout(r, 500 * (i + 1))); }
+      }
+      for (let i = 0; i < candidates.length; i++) {
+        const mn = infos[i];
+        // Fund if account exists on mainnet as a 0-byte system account (established fee recipient).
+        // Skip accounts absent from mainnet — they are ephemeral pump PDAs unique to this cosigner
+        // (init_if_needed in the swap instruction); pre-funding them as system accounts prevents
+        // pump from writing their initial data (create_account requires 0 lamports → tx dropped).
+        if (!mn || !mn.owner.equals(SystemProgram.programId) || mn.data.length !== 0) continue;
+        await airdropAndConfirm(provider, candidates[i], 50_000_000); // 0.05 SOL — rent-exempt backstop
+        console.log(`  [route-fund] funded missing pump fee recipient ${candidates[i].toBase58()}`);
+      }
+    }
+
     // Shared open flow. Source is SOL (fund_native + 2 tx) or USDC (single tx). Dest is the
     // Token-2022 meme mint. pumpDirect=true → direct Pump.fun bonding-curve CPI (native SOL);
     // otherwise routed via Jupiter (migrated AMM, WSOL).
@@ -2078,7 +2226,22 @@ describe("Position Pool", () => {
 
       console.log(`  Getting Jupiter quote ${label} (${dexes})...`);
       const swapAmount = srcNote.amount;
-      const quote = await jupiterService.getQuote(srcMintAccount, destMint, Number(swapAmount), 5000, false, dexes);
+      // For SPL-source bonding-curve opens, split into two quotes so we can inject a WSOL→native
+      // close_account leg between them. This avoids the relayer front (see buildJupLegsWithMidUnwrap).
+      let quote: any;
+      let usdcToSolQuote: any = null;
+      let solToMemeQuote: any = null;
+      if (pumpDirect && !srcIsNative) {
+        // USDC→SOL: use whatever DEX is left after stripping Pump. onlyDirectRoutes=true narrows to direct pools.
+        const intermediateDexes = dexes.split(",").map(d => d.trim()).filter(d => !d.toLowerCase().includes("pump")).join(",") || undefined;
+        usdcToSolQuote = await jupiterService.getQuote(srcMintAccount, NATIVE_MINT, Number(swapAmount), 5000, true, intermediateDexes);
+        console.log(`  [pool-debug] USDC→SOL route (dexes=${intermediateDexes}):`, (usdcToSolQuote.routePlan ?? []).map((r: any) => `${r.swapInfo?.label ?? "?"}@${r.swapInfo?.ammKey ?? "?"}`).join(" → "));
+        // SOL→MEME: Pump.fun bonding curve (pumpDirect always means bonding curve).
+        solToMemeQuote = await jupiterService.getQuote(NATIVE_MINT, destMint, Number(BigInt(usdcToSolQuote.outAmount)), 5000, false, "Pump.fun");
+        quote = solToMemeQuote;
+      } else {
+        quote = await jupiterService.getQuote(srcMintAccount, destMint, Number(swapAmount), 5000, false, dexes);
+      }
       const expectedOut = BigInt(quote.outAmount);
       // exact-out buy (pumpDirect) / lenient guard (Jupiter): take 50% so the cost stays under
       // max_sol_cost (= swapAmount) and tolerates cloned-pool divergence.
@@ -2114,9 +2277,20 @@ describe("Position Pool", () => {
         // accepts the signer; output is directed to the executor's meme ATA. The legs blob is staged
         // in a buffer PDA (remaining[0]); the cosigner is remaining[1]; leg accounts follow.
         swapSigner = Keypair.generate();
-        // Output goes to the cosigner's own ATA (no destinationTokenAccount) — the program then
-        // consolidates it into the executor's dest ATA. Same path works for Ultra-routed tokens.
-        const legs = await buildJupLegs(quote, swapSigner.publicKey);
+        // SPL source: use split-quote legs with injected WSOL→native unwrap between hops so the
+        // pump buy uses the user's own converted SOL, not a relayer float.
+        // Native source: single-quote direct pump route (cosigner is pre-funded with native SOL).
+        const legs = (usdcToSolQuote && solToMemeQuote)
+          ? await buildJupLegsWithMidUnwrap(usdcToSolQuote, solToMemeQuote, swapSigner.publicKey)
+          : await buildJupLegs(quote, swapSigner.publicKey);
+        // Exclude cosigner + its WSOL/MEME ATAs so we don't pre-fund them as system accounts
+        // (which would break create_idempotent when Jupiter's setup tries to initialize them).
+        const openExclude = new Set([
+          swapSigner.publicKey.toBase58(),
+          (await getAssociatedTokenAddress(NATIVE_MINT, swapSigner.publicKey, false)).toBase58(),
+          (await getAssociatedTokenAddress(destMint, swapSigner.publicKey, false, TOKEN_2022_PROGRAM_ID)).toBase58(),
+        ]);
+        await fundMissingRouteAccounts(legs.remaining, openExclude); // backstop pump's rotating SOL fee recipient
         stagedLegs = legs.swapData;
         swapDataHash = new Uint8Array(createHash("sha256").update(stagedLegs).digest());
         swapData = Buffer.from(JUP_LEGS_BUFFER_SENTINEL);
@@ -2209,9 +2383,33 @@ describe("Position Pool", () => {
 
       const tx2Ixs: TransactionInstruction[] = [];
 
+      // pumpDirect: stage the Jupiter-legs blob in its own tx first (it's an init account). Needed for
+      // BOTH source kinds — SOL→MEME (1-hop bonding curve) and USDC→MEME (2-hop BisonFi→bonding curve).
+      if (pumpDirect && stagedLegs) {
+        const stageIx = await (program.methods as any)
+          .stageSwapLegs(Array.from(srcNote.nullifier), stagedLegs)
+          .accounts({ buffer: legsBufferPda, relayer: payer.publicKey, systemProgram: SystemProgram.programId })
+          .instruction();
+        const stageTx = new Transaction().add(stageIx);
+        // SPL-source bonding-curve opens drop Jupiter's in-leg ATA creates (trace-budget); pre-create
+        // the cosigner's WSOL ATA (legacy, leg A output) + MEME ATA (Token-2022, leg B output) here so
+        // the swap legs find them ready. create_idempotent → no-op if Jupiter already made them.
+        if (swapSigner && !srcIsNative) {
+          const cosignerWsolAta = await getAssociatedTokenAddress(NATIVE_MINT, swapSigner.publicKey, false);
+          const cosignerMemeAta = await getAssociatedTokenAddress(destMint, swapSigner.publicKey, false, TOKEN_2022_PROGRAM_ID);
+          stageTx.add(
+            createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, cosignerWsolAta, swapSigner.publicKey, NATIVE_MINT),
+            createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, cosignerMemeAta, swapSigner.publicKey, destMint, TOKEN_2022_PROGRAM_ID),
+          );
+        }
+        const stageSig = await connection.sendTransaction(stageTx, [payer]);
+        await connection.confirmTransaction(stageSig, "confirmed");
+      }
+
       if (srcIsNative) {
         // Native SOL. pumpDirect → fund executor with native lamports (bonding curve pulls native);
         // otherwise fund the executor WSOL ATA (AMM/CLMM consume WSOL). Raw lamport move, no CPI.
+        // (USDC source needs no funding tx — open_position pulls USDC from the source vault directly.)
         const fundIx = await (program.methods as any)
           .fundNativeOpenPosition(srcMint, new BN(swapAmount.toString()), !!pumpDirect)
           .accounts({
@@ -2220,16 +2418,6 @@ describe("Position Pool", () => {
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
             tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId, associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           }).instruction();
-        // pumpDirect: stage the Jupiter-legs blob in a separate tx first (it's an init account).
-        if (pumpDirect && stagedLegs) {
-          const stageIx = await (program.methods as any)
-            .stageSwapLegs(Array.from(srcNote.nullifier), stagedLegs)
-            .accounts({ buffer: legsBufferPda, relayer: payer.publicKey, systemProgram: SystemProgram.programId })
-            .instruction();
-          const stageTx = new Transaction().add(stageIx);
-          const stageSig = await connection.sendTransaction(stageTx, [payer]);
-          await connection.confirmTransaction(stageSig, "confirmed");
-        }
         // Pairing guard: fundIx must be immediately before openIx in the same atomic tx.
         tx2Ixs.push(fundIx);
       }
@@ -2450,6 +2638,13 @@ describe("Position Pool", () => {
       const swapSigner = Keypair.generate();
       const legsBufferPda = deriveSwapLegsBufferPda(program.programId, positionNullifier);
       const legs = await buildJupLegs(sellQuote, swapSigner.publicKey); // sell → unwrap SOL to cosigner
+      // Exclude cosigner + its ATAs so we don't pre-fund them as system accounts (breaks ATA creation).
+      const sellExclude = new Set([
+        swapSigner.publicKey.toBase58(),
+        (await getAssociatedTokenAddress(NATIVE_MINT, swapSigner.publicKey, false)).toBase58(),
+        (await getAssociatedTokenAddress(ps.mint, swapSigner.publicKey, false, TOKEN_2022_PROGRAM_ID)).toBase58(),
+      ]);
+      await fundMissingRouteAccounts(legs.remaining, sellExclude); // backstop pump's rotating SOL fee recipient
       const stagedLegs = legs.swapData;
       const swapDataHash = new Uint8Array(createHash("sha256").update(stagedLegs).digest());
       const swapData = Buffer.from(JUP_LEGS_BUFFER_SENTINEL);
@@ -2611,6 +2806,29 @@ describe("Position Pool", () => {
       await closeMemeAmmPosition(memeBPositionState);
       await logState("AFTER close MEME_B");
     });
+
+    // SPL-token (USDC) source into a Pump.fun BONDING CURVE. Unlike MEME_B (migrated AMM, PDA path),
+    // GExbmeCi has no AMM pool, so Jupiter routes USDC→SOL (BisonFi) → SOL→MEME (bonding curve). The
+    // bonding-curve buy needs the ephemeral-cosigner real-wallet signer, and the cosigner must hold
+    // the input USDC — so open_position moves the source token executor→cosigner ATA (the SPL-source
+    // cosigner-funding path). This covers SPL→pump-bonding-curve and surfaces any missing route clones
+    // the same way the SOL→MEME sell did (e.g. the BisonFi USDC/SOL pool).
+    it("opens MEME_A position from USDC note (USDC→SOL→MEME via BisonFi + Pump.fun bonding curve)", async () => {
+      console.log("\n🐸 Opening USDC→MEME_A position (BisonFi → Pump.fun bonding curve)...");
+      await airdropAndConfirm(provider, payer.publicKey, 5 * LAMPORTS_PER_SOL);
+      await logState("BEFORE open MEME_A (USDC→MEME)");
+      const usdcNote = await depositUsdcNote(30_000_000); // 0.03 SOL worth of USDC
+      memeAUsdcPositionState = await openMemePosition({ label: "MEME_A USDC→MEME", srcMint: USDC_MINT, srcNote: usdcNote, destMint: MEME_A_MINT, posIndex: 9, dexes: "Meteora,Pump.fun", pumpDirect: true });
+      await logState("AFTER open MEME_A (USDC→MEME)");
+    });
+
+    it("closes USDC-opened MEME_A position (MEME→SOL via Pump.fun bonding curve)", async () => {
+      if (!memeAUsdcPositionState) return console.log("  ⚠️  skipping — no USDC-opened MEME_A position");
+      console.log("\n🔒 Closing USDC-opened MEME_A→SOL position (bonding curve sell)...");
+      await logState("BEFORE close MEME_A (USDC-opened)");
+      await closeMemeBondingCurvePosition(memeAUsdcPositionState);
+      await logState("AFTER close MEME_A (USDC-opened)");
+    });
   });
 
   // ===========================================================================
@@ -2698,6 +2916,7 @@ describe("Position Pool", () => {
         const posBlindBytes = bigIntToBytes32BE(posKeys.positionBlinding);
 
         const quote = await jupiterService.getQuote(USDC_MINT, CARDS_MINT, Number(usdcNote.amount), 5000, true, "Raydium CLMM");
+        console.log("  [pool-debug] USDC→CARDS route:", (quote.routePlan ?? []).map((r: any) => `${r.swapInfo?.label ?? "?"}@${r.swapInfo?.ammKey ?? "?"}`).join(" → "));
         const expectedOut = BigInt(quote.outAmount);
         const destAmount = (expectedOut * 50n) / 100n;
         const minAmountOut = destAmount;
@@ -2808,7 +3027,8 @@ describe("Position Pool", () => {
       // ── Open two CARDS positions (n=2 and n=3) ──────────────────────────────
       // Each position needs fresh USDC — swap SOL→USDC independently for each.
       async function swapSolToUsdc(lamports: number): Promise<bigint> {
-        const q = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, lamports, 100, true, "Byreal");
+        const q = await jupiterService.getQuote(NATIVE_MINT, USDC_MINT, lamports, 5000, true, "Meteora");
+        console.log("  [pool-debug] swapSolToUsdc route:", (q.routePlan ?? []).map((r: any) => `${r.swapInfo?.label ?? "?"}@${r.swapInfo?.ammKey ?? "?"}`).join(" → "));
         const ixResp = await jupiterService.getSwapInstruction(q, payer.publicKey, true);
         const ixs: TransactionInstruction[] = [
           ...(ixResp.setupInstructions ?? []).map(decodeJupIx),

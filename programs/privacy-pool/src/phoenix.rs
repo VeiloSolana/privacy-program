@@ -57,12 +57,12 @@ pub const PHOENIX_GLOBAL_SEED: &[u8] = b"global";
 /// Phoenix PDA seed prefix — trader accounts: `["trader", wallet, pda_idx, sub_idx]`
 pub const PHOENIX_TRADER_SEED: &[u8] = b"trader";
 
-/// USDC mainnet mint — the only accepted collateral on Phoenix Eternal.
-#[cfg(not(any(feature = "devnet", feature = "localnet")))]
+/// USDC mainnet mint — used on mainnet and localnet (localnet clones mainnet USDC).
+#[cfg(not(feature = "devnet"))]
 pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
-/// USDC devnet/localnet mint
-#[cfg(any(feature = "devnet", feature = "localnet"))]
+/// USDC devnet mint (Circle devnet only — localnet uses mainnet USDC clone)
+#[cfg(feature = "devnet")]
 pub const PHOENIX_REQUIRED_MINT: Pubkey = pubkey!("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
 
 // EMBER Protocol constants
@@ -284,7 +284,66 @@ pub fn phoenix_deposit_from_pool<'info>(
         input_tree_id
     )?;
 
-    // ── 12. CPI: EMBER wrap (USDC → PhUSD) + Phoenix depositFunds ────────────
+    // ── 12. Insert commitments and emit events BEFORE the EMBER/Phoenix CPIs ──
+    // EMBER + Phoenix generate enough log data to hit Solana's truncation limit;
+    // events emitted after them would be silently dropped (same as positions.rs).
+    let (leaf_index_0, leaf_index_1, new_root) = {
+        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
+        let max_capacity = 1u64 << (output_tree.height as u64);
+        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
+
+        let idx0 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
+        let idx1 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
+        (idx0, idx1, output_tree.root)
+    };
+
+    let timestamp = clock.unix_timestamp;
+
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[0],
+        timestamp,
+        mint_address,
+        tree_id: input_tree_id,
+    });
+    emit!(NullifierSpent {
+        nullifier: input_nullifiers[1],
+        timestamp,
+        mint_address,
+        tree_id: input_tree_id,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        new_root,
+        timestamp,
+        mint_address,
+        tree_id: output_tree_id,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+    });
+    emit!(PhoenixDepositEvent {
+        deposit_amount,
+        relayer_fee: ext_data.fee,
+        mint_address,
+        timestamp,
+    });
+
+    // ── 13. CPI: EMBER wrap (USDC → PhUSD) + Phoenix depositFunds ────────────
     // Phoenix Eternal uses PhUSD as canonical collateral, not USDC. EMBER (EMBERpYNE6...)
     // wraps USDC 1:1 into PhUSD before the Phoenix deposit in the same atomic transaction.
     //
@@ -458,66 +517,7 @@ pub fn phoenix_deposit_from_pool<'info>(
         .checked_sub(total_outflow)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 15. Insert output commitments (change notes) into Merkle tree ─────────
-    let (leaf_index_0, leaf_index_1, new_root) = {
-        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
-        let max_capacity = 1u64 << (output_tree.height as u64);
-        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
-        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
-
-        let idx0 = output_tree.next_index;
-        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
-        let idx1 = output_tree.next_index;
-        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
-        (idx0, idx1, output_tree.root)
-    };
-
-    // ── 16. Emit events ───────────────────────────────────────────────────────
-    let timestamp = clock.unix_timestamp;
-
-    emit!(NullifierSpent {
-        nullifier: input_nullifiers[0],
-        timestamp,
-        mint_address,
-        tree_id: input_tree_id,
-    });
-    emit!(NullifierSpent {
-        nullifier: input_nullifiers[1],
-        timestamp,
-        mint_address,
-        tree_id: input_tree_id,
-    });
-
-    emit!(CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_0,
-        new_root,
-        timestamp,
-        mint_address,
-        tree_id: output_tree_id,
-        ephemeral_public_key: note0_epk,
-        encrypted_blob: note0_enc,
-        view_tag: note0_vt,
-    });
-    emit!(CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_1,
-        new_root,
-        timestamp,
-        mint_address,
-        tree_id: output_tree_id,
-        ephemeral_public_key: note1_epk,
-        encrypted_blob: note1_enc,
-        view_tag: note1_vt,
-    });
-    emit!(PhoenixDepositEvent {
-        deposit_amount,
-        relayer_fee: ext_data.fee,
-        mint_address,
-        timestamp,
-    });
-
-    // ── 17. Initialize the per-deposit slot ───────────────────────────────────
+    // ── 15. Initialize the per-deposit slot ───────────────────────────────────
     // Records the deposited amount and claim key so the exit flow can enforce
     // per-user withdrawal caps and prevent relayer theft.
     // `claimant_pubkey` comes from `ext_data.claimant`, which is committed to by

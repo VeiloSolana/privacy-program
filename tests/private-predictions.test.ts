@@ -341,7 +341,7 @@ describe("Private Predictions (pool integration)", () => {
       }
     });
 
-    it("prediction_reissue account layout: 15 accounts with claimant signer", () => {
+    it("prediction_reissue account layout: 16 accounts with claimant signer", () => {
       const idl = (program as any).idl;
       const ix = idl.instructions.find((i: any) => i.name === "predictionReissue" || i.name === "prediction_reissue");
       if (!ix) throw new Error("prediction_reissue not found in IDL");
@@ -687,6 +687,7 @@ describe("Private Predictions (pool integration)", () => {
           predictionSlot,
           ephemeralTokenAccount: claimantAta,
           vaultTokenAccount,
+          relayerTokenAccount:   await getAssociatedTokenAddress(testMint, resolvedRelayer.publicKey, false), // fee=0, dummy
           tokenProgram:          TOKEN_PROGRAM_ID,
           systemProgram:         SystemProgram.programId,
         })
@@ -744,6 +745,7 @@ describe("Private Predictions (pool integration)", () => {
           predictionSlot,
           ephemeralTokenAccount: ephemeralAta,
           vaultTokenAccount,
+          relayerTokenAccount: await getAssociatedTokenAddress(testMint, relayer.publicKey, false), // fee=0, dummy
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
@@ -1276,6 +1278,7 @@ describe("Private Predictions (pool integration)", () => {
           predictionSlot: s3PredictionSlot,
           ephemeralTokenAccount: ephemeralAta,
           vaultTokenAccount: usdcVaultAta,
+          relayerTokenAccount: await getAssociatedTokenAddress(USDC_MINT, s3Relayer.publicKey, false), // fee=0
           tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
         })
         .instruction();

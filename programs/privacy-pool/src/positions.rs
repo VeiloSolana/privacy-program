@@ -25,6 +25,7 @@ use crate::{
     NoteCiphers,
     NullifierSpent,
     OpenPosition,
+    PositionPoolAdmin,
     PrivacyError,
     TransactionPublicInputs,
     MAX_RELAYERS,
@@ -207,6 +208,7 @@ fn sweep_executor_lamports<'info>(
 /// Rent buffer handed to the ephemeral cosigner on top of swap_amount (covers Jupiter's WSOL-ATA
 /// rent for createIdempotent; reclaimed by Jupiter's cleanup close + the post-swap cosigner sweep).
 const COSIGNER_RENT_BUFFER_LAMPORTS: u64 = 20_000_000;
+
 
 /// Move swap funds (swap_amount + rent buffer) from the executor PDA to the ephemeral cosigner so
 /// Jupiter's wrap leg (native→WSOL from the cosigner) and ATA creation are covered. invoke_signed
@@ -401,6 +403,25 @@ pub fn init_position_pool(
     tree.root_index = 0;
     MerkleTree::initialize::<PoseidonHasher>(&mut *tree)?;
 
+    Ok(())
+}
+
+/// Update the position pool's swap fees. Admin-gated via the `has_one = authority`
+/// constraint on `PositionPoolAdmin`. Each field is optional so callers can change
+/// one without disturbing the other.
+pub fn update_position_pool(
+    ctx: Context<PositionPoolAdmin>,
+    min_swap_fee: Option<u64>,
+    swap_fee_bps: Option<u16>
+) -> Result<()> {
+    let cfg = &mut ctx.accounts.config;
+    if let Some(val) = min_swap_fee {
+        cfg.min_swap_fee = val;
+    }
+    if let Some(val) = swap_fee_bps {
+        require!(val <= MAX_SWAP_FEE_BPS, PrivacyError::ExcessiveFeeBps);
+        cfg.swap_fee_bps = val;
+    }
     Ok(())
 }
 
@@ -650,6 +671,18 @@ pub fn open_position<'info>(
         &[ctx.bumps.executor],
     ];
 
+    // Emit commitment events before the swap. Jupiter+pump.fun generate enough logs to hit
+    // Solana's truncation limit, which silently drops events emitted after the swap CPI.
+    // Commitments are ZK-proven parameters and don't depend on the swap result.
+    let pos_leaf_idx = append_and_emit(
+        &ctx.accounts.position_tree, output_commitments[1], clock.unix_timestamp,
+        dest_mint, position_tree_id, note1_epk, note1_enc, note1_vt,
+    )?;
+    append_and_emit(
+        &ctx.accounts.source_tree, output_commitments[0], clock.unix_timestamp,
+        source_mint, source_tree_id, note0_epk, note0_enc, note0_vt,
+    )?;
+
     // Pre-fund the executor's native fee buffer (swept back after the swap); see helper.
     fund_executor_fee_buffer(
         &ctx.accounts.system_program,
@@ -658,20 +691,68 @@ pub fn open_position<'info>(
     )?;
 
     // Staged Jupiter-legs path: route through an ephemeral cosigner (remaining[1]) instead of the
-    // executor PDA (Jupiter's bonding-curve route rejects a PDA swap signer). Move the swap funds
-    // executor→cosigner so the cosigner's own wrap leg can run; swept back after the swap.
+    // executor PDA (Jupiter's bonding-curve route rejects a PDA swap signer). The cosigner runs the
+    // route, so it must hold the swap input; funds are swept back after the swap.
     let is_buffer_legs = swap_data.len() >= 8 && swap_data[0..8] == JUP_LEGS_BUFFER_SENTINEL;
     if is_buffer_legs {
         let cosigner = ctx.remaining_accounts
             .get(1)
-            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?;
-        fund_cosigner(
-            &ctx.accounts.system_program.to_account_info(),
-            &ctx.accounts.executor.to_account_info(),
-            cosigner,
-            executor_seeds,
-            swap_amount,
-        )?;
+            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+            .clone();
+        if source_is_native {
+            // Native SOL: the cosigner's own wrap leg consumes native lamports. Move swap_amount
+            // (+ rent buffer) executor→cosigner.
+            fund_cosigner(
+                &ctx.accounts.system_program.to_account_info(),
+                &ctx.accounts.executor.to_account_info(),
+                &cosigner,
+                executor_seeds,
+                swap_amount,
+            )?;
+        } else {
+            // SPL source (e.g. USDC→SOL→bonding-curve buy): the cosigner runs a multi-leg route whose
+            // first hop spends the input SPL token, so it must hold the input. Move swap_amount of the
+            // source token executor→cosigner's source ATA, and fund the cosigner with a native rent
+            // buffer for the intermediate ATAs Jupiter creates (WSOL/dest). Source-pool tokens (USDC)
+            // are always legacy SPL.
+            let src_token_program_id = anchor_spl::token::ID;
+            let cosigner_src_ata_key = get_ata_address(
+                &cosigner.key(),
+                &crate::effective_mint(&source_mint),
+                &src_token_program_id,
+            );
+            let cosigner_src_ata = ctx.remaining_accounts.iter()
+                .find(|a| a.key() == cosigner_src_ata_key)
+                .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+                .clone();
+            create_ata_idempotent(
+                ctx.accounts.relayer.to_account_info(),
+                cosigner.clone(),
+                ctx.accounts.source_mint_account.to_account_info(),
+                cosigner_src_ata.clone(),
+                src_token_program_id,
+                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.associated_token_program.to_account_info(),
+            )?;
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.executor_source_token.to_account_info(),
+                        to: cosigner_src_ata,
+                        authority: ctx.accounts.executor.to_account_info(),
+                    },
+                    &[executor_seeds],
+                ),
+                swap_amount,
+            )?;
+            // The staged legs include a SPL Token close_account instruction between the USDC→WSOL
+            // hop and the Pump.fun buy hop. That converts the cosigner's WSOL ATA balance to native
+            // lamports before the buy runs, so Pump.fun's native-SOL pull succeeds. No relayer
+            // front is needed — the user's own USDC (converted to WSOL then unwrapped) pays for
+            // the buy. Only the rent buffer above is needed for intermediate ATA creation.
+            fund_cosigner_rent(&ctx.accounts.system_program.to_account_info(), &ctx.accounts.relayer.to_account_info(), &cosigner)?;
+        }
     }
 
     execute_dex_swap(
@@ -857,16 +938,6 @@ pub fn open_position<'info>(
     vault_record.position_count = vault_record.position_count
         .checked_add(1)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
-
-    // Insert position note (output_commitment_1) into position tree, USDC change note into source tree.
-    let pos_leaf_idx = append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, position_tree_id, note1_epk, note1_enc, note1_vt,
-    )?;
-    append_and_emit(
-        &ctx.accounts.source_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, source_tree_id, note0_epk, note0_enc, note0_vt,
-    )?;
 
     // Init PositionPDA
     require!(ext_data.claimant != Pubkey::default(), PrivacyError::InvalidClaimant);
@@ -1187,6 +1258,16 @@ pub fn close_position<'info>(
         &[ctx.bumps.executor],
     ];
 
+    // Emit commitment events before the swap to survive log truncation (same reason as open_position).
+    append_and_emit(
+        &ctx.accounts.usdc_tree, output_commitments[1], clock.unix_timestamp,
+        dest_mint, usdc_tree_id, note1_epk, note1_enc, note1_vt,
+    )?;
+    append_and_emit(
+        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
+        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
+    )?;
+
     // Pre-fund the executor PDA with native SOL for DEXs that charge a native protocol fee from
     // the swap signer (e.g. Pump.fun). Swept back to the relayer after the swap. See open_position.
     fund_executor_fee_buffer(
@@ -1277,16 +1358,6 @@ pub fn close_position<'info>(
     ctx.accounts.usdc_config.total_tvl = ctx.accounts.usdc_config.total_tvl
         .checked_add(vault_usdc)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
-
-    // Insert USDC output note (commitment_1) into USDC tree, position change note (commitment_0) into position tree.
-    append_and_emit(
-        &ctx.accounts.usdc_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, usdc_tree_id, note1_epk, note1_enc, note1_vt,
-    )?;
-    append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
-    )?;
 
     // Update PositionVaultRecord
     let vault_record = &mut ctx.accounts.position_vault_record;
@@ -1474,6 +1545,16 @@ pub fn close_position_to_sol<'info>(
     ];
     let vault_pda_seeds: &[&[u8]] = &[b"position_vault_token_v1", source_mint.as_ref(), &[vault_pda_bump]];
 
+    // Emit commitment events before the swap to survive log truncation (same reason as open_position).
+    append_and_emit(
+        &ctx.accounts.sol_tree, output_commitments[1], clock.unix_timestamp,
+        dest_mint, sol_tree_id, note1_epk, note1_enc, note1_vt,
+    )?;
+    append_and_emit(
+        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
+        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
+    )?;
+
     // Bonding-curve sells route through Jupiter (staged-legs cosigner) — no direct pump CPI (see
     // docs/pumpfun-direct-cpi.md). Jupiter's route signer/source must be a real wallet, so the MEME
     // goes to the ephemeral cosigner's ATA (remaining[1]); the cosigner sells it and Jupiter unwraps
@@ -1545,16 +1626,6 @@ pub fn close_position_to_sol<'info>(
     sweep_cosigner_lamports(&ctx.accounts.system_program.to_account_info(), &cosigner, &ctx.accounts.relayer.to_account_info())?;
 
     ctx.accounts.sol_config.total_tvl = ctx.accounts.sol_config.total_tvl.checked_add(vault_sol).ok_or(PrivacyError::ArithmeticOverflow)?;
-
-    // Insert SOL output note (commitment_1) into the SOL tree, position change note (commitment_0) into the position tree.
-    append_and_emit(
-        &ctx.accounts.sol_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, sol_tree_id, note1_epk, note1_enc, note1_vt,
-    )?;
-    append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
-    )?;
 
     // Update vault record
     let vault_record = &mut ctx.accounts.position_vault_record;
@@ -2097,6 +2168,14 @@ pub fn fund_native_open_position(
         require_keys_eq!(next_ix.program_id, crate::ID, PrivacyError::Unauthorized);
         require!(
             next_ix.data.len() >= 8 && next_ix.data[..8] == OPEN_POSITION_DISCRIMINATOR,
+            PrivacyError::Unauthorized
+        );
+        // Bind the funded executor to the paired open_position's (seed-checked) executor — else a
+        // relayer could credit an arbitrary account from the vault. Index 15 = executor in OpenPosition.
+        const OPEN_POSITION_EXECUTOR_IDX: usize = 15;
+        require!(
+            next_ix.accounts.len() > OPEN_POSITION_EXECUTOR_IDX
+                && next_ix.accounts[OPEN_POSITION_EXECUTOR_IDX].pubkey == ctx.accounts.executor.key(),
             PrivacyError::Unauthorized
         );
     }

@@ -221,6 +221,30 @@ pub fn prediction_open<'info>(
         (idx0, idx1, output_tree.root)
     };
 
+    // Emit before the vault/ephemeral transfer CPIs so log truncation cannot drop them.
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+        timestamp: clock.unix_timestamp,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+        timestamp: clock.unix_timestamp,
+    });
+
     // ── 13. TVL decrease ──────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_sub(total_outflow)
@@ -297,29 +321,7 @@ pub fn prediction_open<'info>(
         )?;
     }
 
-    // ── 17. Emit events ───────────────────────────────────────────────────────
-    emit!(CommitmentEvent {
-        commitment: output_commitments[0],
-        leaf_index: leaf_index_0,
-        tree_id: output_tree_id,
-        mint_address,
-        new_root,
-        ephemeral_public_key: note0_epk,
-        encrypted_blob: note0_enc,
-        view_tag: note0_vt,
-        timestamp: clock.unix_timestamp,
-    });
-    emit!(CommitmentEvent {
-        commitment: output_commitments[1],
-        leaf_index: leaf_index_1,
-        tree_id: output_tree_id,
-        mint_address,
-        new_root,
-        ephemeral_public_key: note1_epk,
-        encrypted_blob: note1_enc,
-        view_tag: note1_vt,
-        timestamp: clock.unix_timestamp,
-    });
+    // ── 17. Emit summary event ────────────────────────────────────────────────
     emit!(PredictionOpenEvent {
         deposit_amount,
         mint_address,
@@ -394,6 +396,20 @@ pub fn prediction_reissue<'info>(
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
+    // ── 5a. Fee cap — mirrors prediction_open ────────────────────────────────
+    let max_fee_u128 = (reissue_amount as u128)
+        .checked_mul(cfg.fee_bps as u128)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
+    require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+    let max_fee_with_margin = (max_fee_u128 as u64)
+        .checked_mul((10_000u64).saturating_add(cfg.fee_error_margin_bps as u64))
+        .map(|x| x / 10_000)
+        .unwrap_or(max_fee_u128 as u64);
+    require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
+    let gross_outflow = reissue_amount
+        .checked_add(ext_data.fee)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
     // ── 6. ZK proof (deposit: public_amount positive) ─────────────────────────
     let public_inputs = TransactionPublicInputs {
         root,
@@ -450,11 +466,32 @@ pub fn prediction_reissue<'info>(
         &ctx.accounts.ephemeral_token_account.to_account_info()
     )?;
     require!(
-        ephemeral_ata_data.amount >= reissue_amount,
+        ephemeral_ata_data.amount >= gross_outflow,
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // ── 10. Transfer USDC: ephemeral ATA → vault ATA ─────────────────────────
+    // ── 10. Fee: ephemeral ATA → relayer ATA ─────────────────────────────────
+    if ext_data.fee > 0 {
+        let expected_relayer_ata =
+            get_associated_token_address(&ctx.accounts.relayer.key(), &mint_address);
+        require!(
+            ctx.accounts.relayer_token_account.key() == expected_relayer_ata,
+            PrivacyError::RelayerTokenAccountMismatch
+        );
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: ctx.accounts.ephemeral_token_account.to_account_info(),
+                    to: ctx.accounts.relayer_token_account.to_account_info(),
+                    authority: ctx.accounts.claimant.to_account_info(),
+                },
+            ),
+            ext_data.fee,
+        )?;
+    }
+
+    // ── 11. Transfer USDC: ephemeral ATA → vault ATA ─────────────────────────
     // claimant is a Signer and the ATA authority — no invoke_signed needed.
     token::transfer(
         CpiContext::new(
@@ -468,7 +505,7 @@ pub fn prediction_reissue<'info>(
         reissue_amount,
     )?;
 
-    // ── 11. Insert output commitments into tree ───────────────────────────────
+    // ── 12. Insert output commitments into tree ───────────────────────────────
     let (leaf_index_0, leaf_index_1, new_root) = {
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
         let max_capacity = 1u64 << (output_tree.height as u64);
@@ -481,12 +518,12 @@ pub fn prediction_reissue<'info>(
         (idx0, idx1, output_tree.root)
     };
 
-    // ── 12. TVL increase ──────────────────────────────────────────────────────
+    // ── 13. TVL increase ──────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_add(reissue_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 13. Emit events ───────────────────────────────────────────────────────
+    // ── 14. Emit events ───────────────────────────────────────────────────────
     emit!(CommitmentEvent {
         commitment: output_commitments[0],
         leaf_index: leaf_index_0,
