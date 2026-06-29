@@ -32,12 +32,8 @@ use crate::{
     zk::{ verify_transaction_groth16, TransactionProof },
 };
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
 /// SOL sent to the ephemeral wallet to cover Jupiter API tx fees (~3 txs with priority).
 pub const PREDICTION_EPHEMERAL_SOL_FUNDING: u64 = 5_000_000; // 0.005 SOL
-
-// ── Events ────────────────────────────────────────────────────────────────────
 
 #[event]
 pub struct PredictionOpenEvent {
@@ -56,8 +52,6 @@ pub struct PredictionReissueEvent {
     pub relayer: Pubkey,
     pub timestamp: i64,
 }
-
-// ── Instruction handlers ──────────────────────────────────────────────────────
 
 /// ZK withdrawal → ephemeral wallet funded.
 ///
@@ -95,25 +89,21 @@ pub fn prediction_open<'info>(
 
     let cfg = &mut ctx.accounts.config;
 
-    // ── 1. Pool match ─────────────────────────────────────────────────────────
     require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
 
-    // ── 2. Tree bounds ────────────────────────────────────────────────────────
     require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(deposit_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // ── 3. Relayer and deadline ───────────────────────────────────────────────
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
     require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
 
-    // ── 4. Recipient must be the ephemeral wallet (claimant) ─────────────────
+    // recipient must be the ephemeral wallet (claimant): binds the proof to this key.
     require_keys_eq!(ext_data.recipient, claimant, PrivacyError::PredictionRecipientMustBeClaimant);
     require_keys_eq!(claimant, ext_data.claimant, PrivacyError::InvalidClaimant);
 
-    // ── 5. Nullifier / commitment sanity ─────────────────────────────────────
     let zero = [0u8; 32];
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
@@ -129,11 +119,9 @@ pub fn prediction_open<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    // ── 6. ext_data hash ──────────────────────────────────────────────────────
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    // ── 7. Vault ATA and balance check ────────────────────────────────────────
     let expected_vault_ata = get_associated_token_address(&ctx.accounts.vault.key(), &mint_address);
     require!(
         ctx.accounts.vault_token_account.key() == expected_vault_ata,
@@ -150,12 +138,9 @@ pub fn prediction_open<'info>(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // ── 7a. Relayer fee upper-bound (mirrors transact's max_fee cap) ──────────
-    // The fee is paid from the vault on top of deposit_amount and is bound into
-    // the ZK proof below (public_amount covers deposit_amount + fee). Without an
-    // upper cap, a relayer could set ext_data.fee to drain the entire vault. The
-    // fee is capped at fee_bps (+ margin) of deposit_amount, exactly as a normal
-    // withdrawal. fee == 0 remains valid (no minimum is imposed here).
+    // Relayer fee upper-bound (mirrors transact's max_fee cap): without it a relayer
+    // could set ext_data.fee to drain the vault, since the fee is paid from the vault
+    // on top of deposit_amount. Capped at fee_bps (+ margin); fee == 0 stays valid.
     let max_fee_u128 = (deposit_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -166,7 +151,6 @@ pub fn prediction_open<'info>(
         .unwrap_or(max_fee_u128 as u64);
     require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
 
-    // ── 8. ZK proof (withdrawal: public_amount negative) ─────────────────────
     // public_amount binds the FULL outflow (deposit_amount + fee) so the consumed
     // notes burn the fee too — it can no longer be drawn from other users' funds.
     require!(total_outflow <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
@@ -180,17 +164,14 @@ pub fn prediction_open<'info>(
     };
     verify_transaction_groth16(proof, &public_inputs)?;
 
-    // ── 9. Known root ─────────────────────────────────────────────────────────
     {
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // ── 10. Nullifiers not already spent ─────────────────────────────────────
     require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
     require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
 
-    // ── 11. Mark nullifiers spent ─────────────────────────────────────────────
     mark_nullifier_spent(
         &mut ctx.accounts.nullifier_marker_0,
         &mut ctx.accounts.nullifiers,
@@ -208,7 +189,6 @@ pub fn prediction_open<'info>(
         input_tree_id,
     )?;
 
-    // ── 12. Insert change commitments into output tree ────────────────────────
     let (leaf_index_0, leaf_index_1, new_root) = {
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
         let max_capacity = 1u64 << (output_tree.height as u64);
@@ -245,19 +225,17 @@ pub fn prediction_open<'info>(
         timestamp: clock.unix_timestamp,
     });
 
-    // ── 13. TVL decrease ──────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_sub(total_outflow)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 13a. Record the per-deposit slot (pairs open↔reissue, binds claimant) ─
+    // Record the per-deposit slot: pairs open↔reissue and binds the claimant.
     let slot = &mut ctx.accounts.prediction_slot;
     slot.amount = deposit_amount;
     slot.reissued = 0;
     slot.claimant_pubkey = claimant;
     slot.bump = ctx.bumps.prediction_slot;
 
-    // ── 14. Transfer relayer fee: vault → relayer ATA ─────────────────────────
     let vault_seeds: &[&[u8]] = &[
         b"privacy_vault_v3",
         mint_address.as_ref(),
@@ -284,7 +262,6 @@ pub fn prediction_open<'info>(
         )?;
     }
 
-    // ── 15. Transfer USDC: vault → ephemeral ATA ──────────────────────────────
     let expected_ephemeral_ata = get_associated_token_address(&claimant, &mint_address);
     require!(
         ctx.accounts.ephemeral_token_account.key() == expected_ephemeral_ata,
@@ -304,7 +281,7 @@ pub fn prediction_open<'info>(
         deposit_amount,
     )?;
 
-    // ── 16. Fund ephemeral wallet with SOL ────────────────────────────────────
+    // Fund ephemeral wallet with SOL to cover Jupiter API tx fees.
     let sol_to_send = sol_funding.min(PREDICTION_EPHEMERAL_SOL_FUNDING);
     if sol_to_send > 0 {
         invoke(
@@ -321,7 +298,6 @@ pub fn prediction_open<'info>(
         )?;
     }
 
-    // ── 17. Emit summary event ────────────────────────────────────────────────
     emit!(PredictionOpenEvent {
         deposit_amount,
         mint_address,
@@ -367,21 +343,17 @@ pub fn prediction_reissue<'info>(
 
     let cfg = &mut ctx.accounts.config;
 
-    // ── 1. Pool match ─────────────────────────────────────────────────────────
     require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
 
-    // ── 2. Tree bounds ────────────────────────────────────────────────────────
     require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
     require!(reissue_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // ── 3. Relayer and deadline ───────────────────────────────────────────────
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
     require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
 
-    // ── 4. Commitment / nullifier sanity ─────────────────────────────────────
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
     let zero = [0u8; 32];
@@ -392,11 +364,10 @@ pub fn prediction_reissue<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    // ── 5. ext_data hash ──────────────────────────────────────────────────────
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    // ── 5a. Fee cap — mirrors prediction_open ────────────────────────────────
+    // Fee cap — mirrors prediction_open.
     let max_fee_u128 = (reissue_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -410,7 +381,6 @@ pub fn prediction_reissue<'info>(
         .checked_add(ext_data.fee)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 6. ZK proof (deposit: public_amount positive) ─────────────────────────
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: reissue_amount as i64,
@@ -421,17 +391,15 @@ pub fn prediction_reissue<'info>(
     };
     verify_transaction_groth16(proof, &public_inputs)?;
 
-    // ── 7. Known root ─────────────────────────────────────────────────────────
     {
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // ── 7a. Slot reconciliation (validated manually, post-proof) ──────────────
-    // The slot PDA address is enforced by the Accounts seeds; here we require it to
-    // actually exist (created only by `prediction_open` — can't reissue a non-existent
-    // deposit) and bind the committed claimant. No profit cap — see jperp_reissue_notes.
-    // Checked after the ZK proof so cheaper validations and the proof guard run first.
+    // Slot reconciliation: require the slot PDA to actually exist (created only by
+    // `prediction_open` — can't reissue a non-existent deposit) and bind the committed
+    // claimant. No profit cap — see jperp_reissue_notes. Checked after the ZK proof so
+    // cheaper validations and the proof guard run first.
     {
         let slot_ai = ctx.accounts.prediction_slot.to_account_info();
         require_keys_eq!(*slot_ai.owner, crate::ID, PrivacyError::InvalidClaimant);
@@ -448,7 +416,6 @@ pub fn prediction_reissue<'info>(
         slot.try_serialize(&mut &mut data[..])?;
     }
 
-    // ── 8. Validate ephemeral ATA and vault ATA ───────────────────────────────
     let claimant_key = ctx.accounts.claimant.key();
     let expected_ephemeral_ata = get_associated_token_address(&claimant_key, &mint_address);
     require!(
@@ -461,7 +428,6 @@ pub fn prediction_reissue<'info>(
         PrivacyError::VaultTokenAccountNotATA
     );
 
-    // ── 9. Ephemeral ATA balance check ────────────────────────────────────────
     let ephemeral_ata_data = deserialize_token_account(
         &ctx.accounts.ephemeral_token_account.to_account_info()
     )?;
@@ -470,7 +436,6 @@ pub fn prediction_reissue<'info>(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // ── 10. Fee: ephemeral ATA → relayer ATA ─────────────────────────────────
     if ext_data.fee > 0 {
         let expected_relayer_ata =
             get_associated_token_address(&ctx.accounts.relayer.key(), &mint_address);
@@ -491,7 +456,6 @@ pub fn prediction_reissue<'info>(
         )?;
     }
 
-    // ── 11. Transfer USDC: ephemeral ATA → vault ATA ─────────────────────────
     // claimant is a Signer and the ATA authority — no invoke_signed needed.
     token::transfer(
         CpiContext::new(
@@ -505,7 +469,21 @@ pub fn prediction_reissue<'info>(
         reissue_amount,
     )?;
 
-    // ── 12. Insert output commitments into tree ───────────────────────────────
+    // Close the fully-drained ephemeral ATA to reclaim its ~0.00204 SOL rent —
+    // it's per-claimant/one-shot and relayer-funded, so leaving it open strands the
+    // rent. A PARTIAL reissue leaves a balance, so we skip (close_account would reject
+    // a non-zero balance anyway). claimant is the ATA authority — no invoke_signed.
+    if ephemeral_ata_data.amount == gross_outflow {
+        token::close_account(CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.ephemeral_token_account.to_account_info(),
+                destination: ctx.accounts.relayer.to_account_info(),
+                authority: ctx.accounts.claimant.to_account_info(),
+            },
+        ))?;
+    }
+
     let (leaf_index_0, leaf_index_1, new_root) = {
         let mut output_tree = ctx.accounts.output_tree.load_mut()?;
         let max_capacity = 1u64 << (output_tree.height as u64);
@@ -518,12 +496,10 @@ pub fn prediction_reissue<'info>(
         (idx0, idx1, output_tree.root)
     };
 
-    // ── 13. TVL increase ──────────────────────────────────────────────────────
     cfg.total_tvl = cfg.total_tvl
         .checked_add(reissue_amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
-    // ── 14. Emit events ───────────────────────────────────────────────────────
     emit!(CommitmentEvent {
         commitment: output_commitments[0],
         leaf_index: leaf_index_0,

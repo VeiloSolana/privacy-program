@@ -1,92 +1,20 @@
-/// Jupiter Perpetuals Integration for Veilo Privacy Pool
+/// Jupiter Perpetuals integration: the pool's executor PDA owns the position so the
+/// user's wallet never appears on-chain (private perp trading). Jupiter's keeper settles
+/// requests off-chain. Handlers: `jperp_open_position`, `jperp_set_tpsl`,
+/// `jperp_update_tpsl`, `jperp_close_position`, `jperp_cancel_trigger`,
+/// `jperp_reissue_notes`, `jperp_recover_native` (+ `fund_native_jperp_open` for SOL pools).
+/// Per-handler CPI account layouts are documented inline at each `account_metas`/`cpi_infos`.
 ///
-/// Jupiter Perpetuals (PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu) is a leveraged
-/// perpetual-futures DEX on Solana backed by the JLP liquidity pool.
+/// Conventions: Side enum None=0/Long=1/Short=2, RequestType Market=0/Trigger=1; CPI args are
+/// Borsh-encoded with an 8-byte sha256("global:<name>") discriminator and `0x00`/`0x01` Option markers.
 ///
-/// This module lets the pool's executor PDA act as the position owner, enabling
-/// **private perp trading** — the user's wallet never appears on-chain as a position holder.
-///
-/// ## Flow
-///
-/// 1. `jperp_open_position` — ZK-verified USDC withdrawal → executor PDA funded →
-///    `createIncreasePositionMarketRequest` CPI (executor = position owner).
-///    Jupiter's keeper picks up the request and settles it atomically.
-///
-/// 2. `jperp_set_tpsl` — `createDecreasePositionRequest2` CPI with `Trigger` request type.
-///    Each call creates one pending trigger (TP or SL) identified by its `counter`.
-///    Multiple triggers can coexist on the same position.
-///
-/// 3. `jperp_update_tpsl` — `updateDecreasePositionRequest2` CPI.
-///    Adjusts the trigger price or size on a pending trigger request.
-///
-/// 4. `jperp_close_position` — `createDecreasePositionRequest2` CPI with `Market` type.
-///    Full or partial immediate market close; keeper settles and routes proceeds
-///    to the executor's USDC ATA.
-///
-/// 5. `jperp_reissue_notes` — executor USDC ATA → vault transfer + ZK deposit.
-///    Re-mints private notes from settled proceeds; claimant must co-sign (anti-theft).
-///
-/// ## Account roles
-///
-/// - `JupiterPerpExecutor` PDA (`[b"jperp_executor", mint, claimant, withdrawal_id]`):
-///   signs all Jupiter Perps CPIs as the position owner. The user's wallet is never
-///   exposed. Including `withdrawal_id` makes the executor unique **per open**, so each
-///   position gets its own executor/ATA/Jupiter-position and positions are mutually
-///   unlinkable on-chain (and same-market opens don't aggregate into one position).
-/// - `JupiterPerpSlot` PDA (`[b"jperp_slot_v1", mint, withdrawal_id]`): created at
-///   deposit time; tracks deposited amount and the claimant key for anti-theft protection.
-///
-/// ## remaining_accounts layouts
-///
-/// `jperp_open_position` (14 accounts — createIncreasePositionMarketRequest):
-/// ```
-/// [0]  perpsProgram           — JUPITER_PERP_PROGRAM_ID; validated
-/// [1]  perpetuals             — PDA ["perpetuals"] on PERP program; readonly
-/// [2]  pool                   — JLP_POOL; readonly
-/// [3]  position               — PDA on PERP; writable (created by keeper on settle)
-/// [4]  positionRequest        — PDA ["position_request", position, counter_le8, 0x01]; writable
-/// [5]  positionRequestAta     — ATA(inputMint, positionRequest); writable
-/// [6]  custody                — market custody PDA; readonly
-/// [7]  collateralCustody      — collateral custody PDA (same as custody for longs); readonly
-/// [8]  inputMint              — collateral token mint; readonly
-/// [9]  referral               — null (SystemProgram pubkey); readonly
-/// [10] tokenProgram           — SPL Token; readonly
-/// [11] associatedTokenProgram — AToken; readonly
-/// [12] systemProgram          — System; readonly
-/// [13] eventAuthority         — PERPS_EVENT_AUTHORITY; readonly
-/// ```
-///
-/// `jperp_set_tpsl` / `jperp_close_position` (16 accounts — createDecreasePositionRequest2):
-/// ```
-/// [0]  perpsProgram
-/// [1]  perpetuals
-/// [2]  pool
-/// [3]  position               — writable
-/// [4]  positionRequest        — PDA ["position_request", position, counter_le8, 0x02]; writable
-/// [5]  positionRequestAta     — ATA(desiredMint, positionRequest); writable
-/// [6]  custody
-/// [7]  custodyDovesPriceAccount — Doves price oracle for custody
-/// [8]  custodyPythnetPriceAccount — Pyth price oracle for custody
-/// [9]  collateralCustody
-/// [10] desiredMint            — output token mint (USDC for close proceeds)
-/// [11] referral               — null
-/// [12] tokenProgram
-/// [13] associatedTokenProgram
-/// [14] systemProgram
-/// [15] eventAuthority
-/// ```
-///
-/// `jperp_update_tpsl` (8 accounts — updateDecreasePositionRequest2):
-/// ```
-/// [0]  perpsProgram
-/// [1]  perpetuals
-/// [2]  pool
-/// [3]  position               — readonly
-/// [4]  positionRequest        — writable
-/// [5]  custody
-/// [6]  custodyDovesPriceAccount
-/// [7]  custodyPythnetPriceAccount
-/// ```
+/// Trigger lifecycle: each pending TP/SL is a standalone Jupiter-owned `positionRequest`
+/// holding ~0.0051 SOL rent that the per-op sweep cannot reach. The keeper refunds rent only
+/// when that specific trigger fires; cancel every trigger that never fires via
+/// `jperp_cancel_trigger` (when one of TP/SL fires, cancel the other; on manual close or
+/// liquidation, cancel all). Run cancels BEFORE `jperp_reissue_notes` (reissue closes the
+/// executor collateral ATA that cancel needs as Jupiter's `ownerAta`). A cancel that races the
+/// keeper just fails harmlessly (wasted fee, no fund risk).
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{
@@ -111,8 +39,6 @@ use crate::{
     zk::{ verify_transaction_groth16, TransactionProof },
 };
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
 pub const JUPITER_PERP_PROGRAM_ID: Pubkey =
     pubkey!("PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu");
 
@@ -129,23 +55,16 @@ pub const SIDE_SHORT: u8 = 2;
 pub const REQUEST_TYPE_MARKET: u8 = 0;
 pub const REQUEST_TYPE_TRIGGER: u8 = 1;
 
-/// SOL transferred from the relayer into the executor PDA before the Jupiter CPI.
-///
-/// Jupiter's `createIncreasePositionMarketRequest` funds the `positionRequest`
-/// account + its ATA rent via `system_program::transfer(from = owner)`, where
-/// `owner` is our executor PDA. The executor is a SYSTEM-OWNED PDA (no data) so
-/// that transfer is legal — but it must hold enough lamports. 0.02 SOL comfortably
-/// covers the positionRequest account + 165-byte ATA rent; Jupiter refunds the
-/// rent to the executor when the request settles, so the excess is reclaimable.
-pub const EXECUTOR_JUPITER_RENT_FUNDING: u64 = 20_000_000; // 0.02 SOL
+/// Relayer-fronted SOL the executor PDA must hold so Jupiter can pay positionRequest+ATA rent
+/// via `system_program::transfer(from = executor)` — legal only because the executor is
+/// SYSTEM-OWNED. Above the ~7.5M-lamport open floor it's swept back same-tx; don't trim below ~8M.
+pub const EXECUTOR_JUPITER_RENT_FUNDING: u64 = 9_000_000; // 0.009 SOL
 
 /// Native SOL positions (longs) use WSOL as the actual collateral token for Jupiter CPIs.
 pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 
-// ── Lamport sweep helper ────────────────────────────────────────────────────
-
-/// Sweep the system-owned executor PDA's residual lamports (relayer-fronted positionRequest
-/// rent + Jupiter's rent refunds) back to the relayer. No-op when empty.
+/// Sweep the executor PDA's residual lamports (relayer-fronted rent + Jupiter refunds) back to
+/// the relayer. No-op when empty.
 fn sweep_jperp_executor_lamports<'info>(
     system_program: &AccountInfo<'info>,
     executor: &AccountInfo<'info>,
@@ -164,16 +83,12 @@ fn sweep_jperp_executor_lamports<'info>(
     Ok(())
 }
 
-// ── Discriminator helper ──────────────────────────────────────────────────────
-
 fn jperp_disc(name: &str) -> [u8; 8] {
     use sha2::{ Digest, Sha256 };
     let preimage = format!("global:{}", name);
     let hash = Sha256::digest(preimage.as_bytes());
     hash[..8].try_into().expect("sha256 output is 32 bytes")
 }
-
-// ── Instruction data builders ─────────────────────────────────────────────────
 
 fn encode_create_increase_request(
     size_usd_delta: u64,
@@ -239,20 +154,12 @@ fn encode_update_decrease_request(size_usd_delta: u64, trigger_price: u64) -> Ve
     data
 }
 
-// ── Instruction handlers ──────────────────────────────────────────────────────
-
-/// ZK-verified USDC withdrawal → executor PDA funded →
-/// `createIncreasePositionMarketRequest` CPI (atomic).
-///
-/// Consumes private notes, routes USDC to the executor PDA, and submits a
 // sha256("global:jperp_open_position")[..8]
 const JPERP_OPEN_POSITION_DISC: [u8; 8] = [115, 245, 185, 220, 121, 57, 231, 147];
 
-/// Pre-funding step for native SOL pool opens.
-///
-/// Moves `deposit_amount` lamports from the native-SOL vault into the executor's WSOL ATA.
-/// Must immediately precede `jperp_open_position` in the same transaction.
-/// `jperp_open_position` calls sync_native to materialise the WSOL balance.
+/// Pre-funding step for native SOL pool opens: moves `deposit_amount` lamports from the
+/// native-SOL vault into the executor's WSOL ATA. Must immediately precede
+/// `jperp_open_position` (which calls sync_native to materialise the WSOL balance).
 pub fn fund_native_jperp_open(
     ctx: Context<crate::FundNativeJperpOpen>,
     mint_address: Pubkey,
@@ -296,17 +203,14 @@ pub fn fund_native_jperp_open(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // vault → executor_wsol_ata: direct lamport transfer.
-    // sync_native is called in the following jperp_open_position to materialise the WSOL balance.
     **vault_info.try_borrow_mut_lamports()? -= deposit_amount;
     **ctx.accounts.executor_wsol_ata.to_account_info().try_borrow_mut_lamports()? += deposit_amount;
 
     Ok(())
 }
 
-/// position-open request to Jupiter Perps. Jupiter's keeper settles the request
-/// off-chain; once settled the position is owned by the executor PDA.
-///
+/// ZK-verified withdrawal → executor PDA funded → `createIncreasePositionMarketRequest`
+/// CPI (atomic); Jupiter's keeper settles off-chain, leaving the executor PDA as owner.
 /// `ext_data.recipient` must equal the executor PDA (committed in the ZK proof).
 #[allow(clippy::too_many_arguments)]
 pub fn jperp_open_position<'info>(
@@ -421,10 +325,8 @@ pub fn jperp_open_position<'info>(
         );
     }
 
-    // Relayer fee upper-bound (mirrors transact's max_fee cap). The fee is paid
-    // from the vault on top of deposit_amount and is bound into the proof below
-    // (public_amount covers deposit_amount + fee). Without an upper cap a relayer
-    // could set ext_data.fee to drain the entire vault. fee == 0 remains valid.
+    // Relayer fee upper-bound (mirrors transact's max_fee cap): without it a relayer could
+    // set ext_data.fee to drain the vault. The fee is bound into the proof below. fee == 0 ok.
     let max_fee_u128 = (deposit_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -547,7 +449,7 @@ pub fn jperp_open_position<'info>(
     );
 
     if is_native_sol_pool {
-        // remaining[8] is inputMint (WSOL for SOL longs), passed by the relayer.
+        // remaining[8] = inputMint (WSOL for SOL longs).
         let collateral_mint_key = remaining[8].key();
         let expected_executor_ata =
             get_associated_token_address(&executor_key, &collateral_mint_key);
@@ -555,9 +457,7 @@ pub fn jperp_open_position<'info>(
             ctx.accounts.executor_token_account.key() == expected_executor_ata,
             PrivacyError::VaultTokenAccountNotATA
         );
-        // The lamport transfer (vault → executor_wsol_ata) was already done by the preceding
-        // fund_native_jperp_open instruction. Call sync_native here to materialise the
-        // WSOL token balance from those lamports, then assert it covers deposit_amount.
+        // fund_native_jperp_open already moved the lamports here; materialise them as WSOL.
         token::sync_native(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::SyncNative {
@@ -590,10 +490,7 @@ pub fn jperp_open_position<'info>(
         )?;
     }
 
-    // Jupiter funds the positionRequest account + ATA via
-    // `system_program::transfer(from = owner = executor)`. The executor is a
-    // system-owned PDA (no Anchor data), so this transfer is legal — but it must
-    // hold enough lamports first. The relayer fronts this SOL (recovered via fee).
+    // Pre-fund executor rent (see EXECUTOR_JUPITER_RENT_FUNDING).
     invoke(
         &system_instruction::transfer(
             &ctx.accounts.relayer.key(),
@@ -661,15 +558,22 @@ pub fn jperp_open_position<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    // Relayer fee — paid AFTER every CPI. For native SOL the fee moves vault → relayer
-    // as raw lamports; doing this before the system-program rent-funding CPI (which spends
-    // from the relayer) would mix a direct lamport credit with a later CPI on the same
-    // account and break the runtime's lamport-balance invariant. SPL pools transfer from
-    // the vault's collateral ATA instead.
+    // Reclaim the leftover rent same-tx. Must run BEFORE the native-SOL fee's direct lamport
+    // move (CPI-then-direct ordering, see below). Touches only executor lamports, never the ATA
+    // collateral; Jupiter's async post-settlement refund is swept by the next op or reissue.
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
+    )?;
+
+    // Relayer fee — paid AFTER every CPI. For native SOL the fee moves vault → relayer as raw
+    // lamports; doing it before the rent-funding CPI (which spends from the relayer) would mix a
+    // direct lamport credit with a later CPI on the same account and break the runtime's
+    // lamport-balance invariant. SPL pools transfer from the vault's collateral ATA instead.
     if ext_data.fee > 0 {
         if is_native_sol_pool {
-            // Vault solvency is already guaranteed above (lamports >= total_outflow, which
-            // includes the fee); use checked math so an unexpected state can never wrap.
             let vault_ai = ctx.accounts.vault.to_account_info();
             let relayer_ai = ctx.accounts.relayer.to_account_info();
             let mut vault_lamports = vault_ai.try_borrow_mut_lamports()?;
@@ -715,18 +619,9 @@ pub fn jperp_open_position<'info>(
     Ok(())
 }
 
-/// Create a TP or SL trigger on an open Jupiter Perps position.
-///
-/// Calls `createDecreasePositionRequest2` with `Trigger` request type.
-/// The executor PDA signs as position owner.
-///
-/// - **TP long**: `trigger_above_threshold = true`, `trigger_price` = take-profit level
-/// - **SL long**: `trigger_above_threshold = false`, `trigger_price` = stop-loss level
-/// - **TP short**: `trigger_above_threshold = false`
-/// - **SL short**: `trigger_above_threshold = true`
-///
-/// Multiple triggers can exist simultaneously — each uses a different `counter`.
-/// remaining_accounts: 16 accounts (see module docs).
+/// Create a TP or SL trigger on an open position (`createDecreasePositionRequest2`, `Trigger`
+/// type; executor signs as owner). Multiple triggers coexist, each keyed by `counter`.
+/// `trigger_above_threshold`: true for TP-long/SL-short, false for SL-long/TP-short.
 #[allow(clippy::too_many_arguments)]
 pub fn jperp_set_tpsl<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpSetTpsl<'info>>,
@@ -742,7 +637,7 @@ pub fn jperp_set_tpsl<'info>(
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
-    // Claimant must be the ephemeral key committed at open time.
+    // Anti-theft: claimant must be the ephemeral key committed at open time.
     require_keys_eq!(
         ctx.accounts.claimant.key(),
         ctx.accounts.jperp_slot.claimant_pubkey,
@@ -802,8 +697,7 @@ pub fn jperp_set_tpsl<'info>(
         data: ix_data,
     };
 
-    // Fund executor PDA so Jupiter can pay the new positionRequest rent via
-    // system_program::transfer(from = executor). See jperp_open_position §14b.
+    // Pre-fund executor rent (see jperp_open_position).
     invoke(
         &system_instruction::transfer(
             &ctx.accounts.relayer.key(),
@@ -823,16 +717,19 @@ pub fn jperp_set_tpsl<'info>(
         remaining,
     ), &[executor_seeds])?;
 
+    // Reclaim leftover rent + any Jupiter refund same-tx (see jperp_open_position).
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
+    )?;
+
     Ok(())
 }
 
-/// Update the trigger price or size on a pending TP/SL position request.
-///
-/// Calls `updateDecreasePositionRequest2`. Only the `trigger_price` and
-/// `size_usd_delta` can be changed; the `counter` identifies which request to update
-/// (the positionRequest PDA must be passed in remaining_accounts[4]).
-///
-/// remaining_accounts: 8 accounts (see module docs).
+/// Update the trigger price or size on a pending TP/SL request (`updateDecreasePositionRequest2`).
+/// `counter` selects the request (positionRequest PDA passed in remaining_accounts[4]).
 pub fn jperp_update_tpsl<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpUpdateTpsl<'info>>,
     mint_address: Pubkey,
@@ -843,7 +740,7 @@ pub fn jperp_update_tpsl<'info>(
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
-    // Claimant must be the ephemeral key committed at open time.
+    // Anti-theft: claimant must be the ephemeral key committed at open time.
     require_keys_eq!(
         ctx.accounts.claimant.key(),
         ctx.accounts.jperp_slot.claimant_pubkey,
@@ -905,16 +802,9 @@ pub fn jperp_update_tpsl<'info>(
     Ok(())
 }
 
-/// Create a market decrease (full or partial close) for an open position.
-///
-/// Calls `createDecreasePositionRequest2` with `Market` request type.
-/// Jupiter's keeper executes the decrease and routes proceeds to the
-/// executor's receiving ATA.
-///
-/// - Full close: `entire_position = true`, `size_usd_delta = 0`
-/// - Partial: `entire_position = false`, `size_usd_delta` = USD to close
-///
-/// remaining_accounts: 16 accounts (see module docs).
+/// Create a market decrease (full or partial close) for an open position
+/// (`createDecreasePositionRequest2`, `Market` type); keeper routes proceeds to the executor's
+/// receiving ATA. Full close: `entire_position = true`, `size_usd_delta = 0`.
 #[allow(clippy::too_many_arguments)]
 pub fn jperp_close_position<'info>(
     ctx: Context<'_, '_, 'info, 'info, crate::JperpClosePosition<'info>>,
@@ -929,7 +819,7 @@ pub fn jperp_close_position<'info>(
     let cfg = &ctx.accounts.config;
     require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
 
-    // Claimant must be the ephemeral key committed at open time.
+    // Anti-theft: claimant must be the ephemeral key committed at open time.
     require_keys_eq!(
         ctx.accounts.claimant.key(),
         ctx.accounts.jperp_slot.claimant_pubkey,
@@ -985,7 +875,7 @@ pub fn jperp_close_position<'info>(
         data: ix_data,
     };
 
-    // Fund executor PDA for the new positionRequest rent (see jperp_open_position §14b).
+    // Pre-fund executor rent (see jperp_open_position).
     invoke(
         &system_instruction::transfer(
             &ctx.accounts.relayer.key(),
@@ -1005,19 +895,140 @@ pub fn jperp_close_position<'info>(
         remaining,
     ), &[executor_seeds])?;
 
+    // Reclaim leftover rent + any Jupiter refund same-tx (see jperp_open_position).
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
+    )?;
+
     Ok(())
 }
 
-/// Transfer settled USDC from the executor PDA back into the vault,
-/// then ZK-verify and mint new private notes (deposit circuit).
+/// Cancel a pending TP/SL trigger that will never fire and reclaim its stranded rent (see the
+/// module header for which to cancel). CPIs `closePositionRequest2` on the **owner-cancel path**
+/// (mainnet-verified: `keeper` slot = program id / None, executor signs as `owner`); Jupiter
+/// refunds rent to the executor, then we sweep it. Creates no accounts, so needs no rent
+/// pre-funding. Run BEFORE `jperp_reissue_notes` (reissue closes the executor ATA used here as
+/// `ownerAta`).
 ///
-/// Called after a position decrease / TP / SL has been executed by Jupiter's keeper
-/// and proceeds have arrived in the executor's USDC ATA.
+/// `remaining_accounts` (10 — `closePositionRequest2` minus owner/ownerAta, from the Accounts struct):
+/// ```
+/// [0] perpsProgram           — JUPITER_PERP_PROGRAM_ID; validated. Reused as the
+///                              keeper None-marker and as the trailing `program`.
+/// [1] pool                   — JLP_POOL; writable
+/// [2] positionRequest        — the trigger to cancel (by its counter); writable
+/// [3] positionRequestAta     — ATA(collateralMint, positionRequest); writable
+/// [4] position               — readonly
+/// [5] mint                   — collateral token mint; readonly
+/// [6] tokenProgram           — readonly
+/// [7] systemProgram          — readonly
+/// [8] associatedTokenProgram — readonly
+/// [9] eventAuthority         — PERPS_EVENT_AUTHORITY; readonly
+/// ```
+pub fn jperp_cancel_trigger<'info>(
+    ctx: Context<'_, '_, 'info, 'info, crate::JperpCancelTrigger<'info>>,
+    mint_address: Pubkey,
+    withdrawal_id: [u8; 32],
+) -> Result<()> {
+    let cfg = &ctx.accounts.config;
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+
+    // Anti-theft: claimant must be the ephemeral key committed at open time.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.jperp_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    let claimant_key = ctx.accounts.claimant.key();
+    let executor_key = ctx.accounts.executor.key();
+    let executor_bump = ctx.bumps.executor;
+    let executor_seeds: &[&[u8]] = &[
+        b"jperp_executor",
+        mint_address.as_ref(),
+        claimant_key.as_ref(),
+        withdrawal_id.as_ref(),
+        &[executor_bump],
+    ];
+
+    let remaining = ctx.remaining_accounts;
+    require!(remaining.len() >= 10, PrivacyError::JperpInvalidAccounts);
+    require_keys_eq!(
+        remaining[0].key(),
+        JUPITER_PERP_PROGRAM_ID,
+        PrivacyError::JperpInvalidAccounts
+    );
+
+    // ownerAta = executor's collateral ATA (WSOL for native SOL pools, else the mint).
+    let collateral_mint = if mint_address == Pubkey::default() { WSOL_MINT } else { mint_address };
+    let expected_executor_ata = get_associated_token_address(&executor_key, &collateral_mint);
+    require!(
+        ctx.accounts.executor_token_account.key() == expected_executor_ata,
+        PrivacyError::VaultTokenAccountNotATA
+    );
+
+    // closePositionRequest2 takes no args — just the discriminator.
+    let ix_data = jperp_disc("close_position_request2").to_vec();
+
+    let account_metas = vec![
+        AccountMeta::new_readonly(remaining[0].key(), false),     // keeper (None = program id)
+        AccountMeta::new(executor_key, true),                     // owner [mut] [signer]
+        AccountMeta::new(ctx.accounts.executor_token_account.key(), false), // ownerAta [mut]
+        AccountMeta::new(remaining[1].key(), false),              // pool [mut]
+        AccountMeta::new(remaining[2].key(), false),              // positionRequest [mut]
+        AccountMeta::new(remaining[3].key(), false),              // positionRequestAta [mut]
+        AccountMeta::new_readonly(remaining[4].key(), false),     // position
+        AccountMeta::new_readonly(remaining[5].key(), false),     // mint
+        AccountMeta::new_readonly(remaining[6].key(), false),     // tokenProgram
+        AccountMeta::new_readonly(remaining[7].key(), false),     // systemProgram
+        AccountMeta::new_readonly(remaining[8].key(), false),     // associatedTokenProgram
+        AccountMeta::new_readonly(remaining[9].key(), false),     // eventAuthority
+        AccountMeta::new_readonly(remaining[0].key(), false),     // program
+    ];
+
+    let ix = Instruction {
+        program_id: JUPITER_PERP_PROGRAM_ID,
+        accounts: account_metas,
+        data: ix_data,
+    };
+
+    let cpi_infos = vec![
+        ctx.accounts.executor.to_account_info(),
+        ctx.accounts.executor_token_account.to_account_info(),
+        remaining[1].to_account_info(),  // pool
+        remaining[2].to_account_info(),  // positionRequest
+        remaining[3].to_account_info(),  // positionRequestAta
+        remaining[4].to_account_info(),  // position
+        remaining[5].to_account_info(),  // mint
+        remaining[6].to_account_info(),  // tokenProgram
+        remaining[7].to_account_info(),  // systemProgram
+        remaining[8].to_account_info(),  // associatedTokenProgram
+        remaining[9].to_account_info(),  // eventAuthority
+        remaining[0].to_account_info(),  // perpsProgram (keeper None-marker + program)
+    ];
+
+    invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
+
+    // Reclaim the rent Jupiter just refunded to the executor back to the relayer.
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
+    )?;
+
+    Ok(())
+}
+
+/// Transfer settled proceeds from the executor ATA back into the vault, then ZK-verify and
+/// mint new private notes (deposit circuit). Called after Jupiter's keeper settles a decrease
+/// / TP / SL and proceeds have arrived in the executor ATA.
 ///
-/// The claimant must co-sign to prevent a malicious relayer from stealing proceeds.
-/// `reissue_amount` is bounded only by the executor ATA's actual balance — proceeds that
-/// exceed the original deposit (a winning position) reissue fully, since each note minted
-/// is backed by the real USDC moved into the vault.
+/// The claimant must co-sign (anti-theft). `reissue_amount` is bounded only by the ATA's
+/// actual balance — winning positions reissue fully, since each note is backed by real
+/// proceeds moved into the vault.
 #[allow(clippy::too_many_arguments)]
 pub fn jperp_reissue_notes(
     ctx: Context<crate::JperpReissueNotes>,
@@ -1085,9 +1096,8 @@ pub fn jperp_reissue_notes(
     let computed_ext_hash = ext_data.hash()?;
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
-    // Relayer fee upper-bound — mirrors jperp_open_position. SOL-pool reissues
-    // validate the fee here but skip the transfer: close_account sweeps the full
-    // WSOL ATA to vault, so partial extraction isn't possible.
+    // Relayer fee upper-bound (mirrors jperp_open_position). SOL-pool reissues validate the
+    // fee here but skip the transfer: close_account sweeps the full WSOL ATA to the vault.
     let max_fee_u128 = (reissue_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -1116,7 +1126,6 @@ pub fn jperp_reissue_notes(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // Executor seeds are validated by the Accounts struct; sign the ATA→vault transfer with its bump.
     let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
@@ -1131,9 +1140,7 @@ pub fn jperp_reissue_notes(
 
     let is_native_sol_pool = mint_address == Pubkey::default();
     if is_native_sol_pool {
-        // SOL pool: vault_token_account must equal vault itself (no WSOL ATA exists).
-        // executor_token_account must be ATA(executor, WSOL_MINT) — proceeds land there
-        // as WSOL after the Jupiter keeper settles the position.
+        // SOL pool: vault_token_account == vault (no WSOL ATA); proceeds land in the executor WSOL ATA.
         require!(
             ctx.accounts.vault_token_account.key() == ctx.accounts.vault.key(),
             PrivacyError::VaultTokenAccountNotATA
@@ -1150,8 +1157,7 @@ pub fn jperp_reissue_notes(
             executor_wsol_data.amount >= reissue_amount,
             PrivacyError::InsufficientFundsForWithdrawal
         );
-        // Close executor WSOL ATA → vault: unwraps all WSOL as native SOL into the vault.
-        // close_account transfers all lamports (WSOL balance + rent) to destination.
+        // close_account transfers all lamports (WSOL balance + rent) to the vault, unwrapping to native SOL.
         token::close_account(CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             token::CloseAccount {
@@ -1213,6 +1219,21 @@ pub fn jperp_reissue_notes(
             ),
             reissue_amount,
         )?;
+
+        // If this reissue drains the ATA, close it and return the relayer-fronted ATA rent:
+        // the executor is per-withdrawal_id, so a drained ATA is abandoned and its rent would
+        // strand forever. A partial reissue leaves a balance, so the ATA must stay open.
+        if executor_ata_data.amount == gross_outflow {
+            token::close_account(CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::CloseAccount {
+                    account: ctx.accounts.executor_token_account.to_account_info(),
+                    destination: ctx.accounts.relayer.to_account_info(),
+                    authority: ctx.accounts.executor.to_account_info(),
+                },
+                &[executor_seeds],
+            ))?;
+        }
     }
 
     // Reclaim the relayer-fronted SOL now that proceeds are pulled (executor is per-withdrawal_id).
@@ -1265,7 +1286,208 @@ pub fn jperp_reissue_notes(
     Ok(())
 }
 
-// ── Shared helpers ────────────────────────────────────────────────────────────
+/// Settle native-SOL proceeds that the keeper returned to the executor as **native lamports**
+/// — both a **cancelled open** (collateral refunded) and a **native-SOL close** (proceeds
+/// unwrapped to native; the WSOL ATA ends empty). In either case `jperp_reissue_notes` can't
+/// act (it reads the WSOL ATA), and a plain sweep would hand the funds to the relayer.
+///
+/// This backs the user's note directly from the executor's own lamports (`executor → vault`,
+/// signed by the executor PDA), needing **zero relayer float**, then sweeps the leftover —
+/// the capped relayer **fee** + the relayer-fronted **rent** — back to the relayer. The note
+/// (`recover_amount` = proceeds − fee) is claimant-co-signed, the fee is capped at `fee_bps`,
+/// and the non-fee remainder is hard-capped at one rent unit (see below), so the relayer can
+/// never sweep the user's collateral. Native mirror of `fund_native_jperp_open`. Native-SOL only.
+#[allow(clippy::too_many_arguments)]
+pub fn jperp_recover_native(
+    ctx: Context<crate::JperpRecoverNative>,
+    root: [u8; 32],
+    input_tree_id: u16,
+    output_tree_id: u16,
+    recover_amount: u64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+    withdrawal_id: [u8; 32],
+    deadline: i64,
+    ext_data: ExtData,
+    proof: TransactionProof,
+    note_ciphers: Option<NoteCiphers>,
+) -> Result<()> {
+    let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
+        Some(c) => (
+            c.note0_ephemeral_key, c.note0_encrypted, c.note0_view_tag,
+            c.note1_ephemeral_key, c.note1_encrypted, c.note1_view_tag,
+        ),
+        None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
+    };
+
+    let cfg = &mut ctx.accounts.config;
+
+    require_keys_eq!(cfg.mint_address, mint_address, PrivacyError::InvalidMintAddress);
+    // Native-SOL pool only — SPL refunds land in the executor ATA and use jperp_reissue_notes.
+    require!(mint_address == Pubkey::default(), PrivacyError::InvalidMintAddress);
+    require!(input_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+    require!(output_tree_id < cfg.num_trees, PrivacyError::InvalidTreeId);
+    require!(recover_amount > 0, PrivacyError::InvalidPublicAmount);
+
+    require!(cfg.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require_keys_eq!(ctx.accounts.relayer.key(), ext_data.relayer, PrivacyError::RelayerMismatch);
+    let clock = Clock::get()?;
+    require!(clock.unix_timestamp <= deadline, PrivacyError::DeadlineExpired);
+
+    // Anti-theft: claimant co-signs and must equal the key committed at open time.
+    require_keys_eq!(
+        ctx.accounts.claimant.key(),
+        ctx.accounts.jperp_slot.claimant_pubkey,
+        PrivacyError::InvalidClaimant
+    );
+
+    // Relayer service fee, capped at fee_bps (+ margin) of the recovered amount — mirrors
+    // jperp_reissue_notes / open. The fee is paid out of the recovered proceeds: the note is
+    // recover_amount (= proceeds - fee) and the relayer collects the fee via the sweep below.
+    let max_fee_u128 = (recover_amount as u128)
+        .checked_mul(cfg.fee_bps as u128)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
+    require!(max_fee_u128 <= u64::MAX as u128, PrivacyError::ExcessiveFee);
+    let max_fee_with_margin = (max_fee_u128 as u64)
+        .checked_mul((10_000u64).saturating_add(cfg.fee_error_margin_bps as u64))
+        .map(|x| x / 10_000)
+        .unwrap_or(max_fee_u128 as u64);
+    require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
+
+    // The trailing SWEEP hands the relayer `native - recover_amount` = (capped fee) + (rent).
+    // recover_amount is CO-SIGNED by the claimant, so an honest claimant pins it to the true
+    // proceeds-minus-fee. We cap the NON-fee remainder (the rent) at one rent unit, so the
+    // relayer can never sweep the user's collateral — worst case it skims <= fee + one rent
+    // unit, which the claimant co-sign already blocks. Handles BOTH:
+    //   • cancelled open  → executor = collateral + exactly one RENT
+    //   • native-SOL close → executor = proceeds + the last request's rent refund (< RENT;
+    //     the keeper returns close proceeds as native lamports, mixed with that trailing dust).
+    // checked_sub also gives idempotency: a drained executor fails here (native < recover_amount).
+    let native = ctx.accounts.executor.lamports();
+    let relayer_sweep = native
+        .checked_sub(recover_amount)
+        .ok_or(error!(PrivacyError::InsufficientFundsForWithdrawal))?;
+    let rent_part = relayer_sweep
+        .checked_sub(ext_data.fee)
+        .ok_or(error!(PrivacyError::InvalidFeeAmount))?;
+    require!(
+        rent_part <= EXECUTOR_JUPITER_RENT_FUNDING,
+        PrivacyError::JperpCollateralMismatch
+    );
+
+    let input_nullifiers = [input_nullifier_0, input_nullifier_1];
+    let output_commitments = [output_commitment_0, output_commitment_1];
+    let zero = [0u8; 32];
+    require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
+    require!(output_commitments[0] != output_commitments[1], PrivacyError::DuplicateCommitments);
+    require!(
+        output_commitments[0] != zero && output_commitments[1] != zero,
+        PrivacyError::ZeroCommitment
+    );
+
+    let computed_ext_hash = ext_data.hash()?;
+    require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
+
+    // Deposit circuit: public_amount = +recover_amount binds the minted note to the collateral.
+    let public_inputs = TransactionPublicInputs {
+        root,
+        public_amount: recover_amount as i64,
+        ext_data_hash,
+        mint_address,
+        input_nullifiers,
+        output_commitments,
+    };
+    verify_transaction_groth16(proof, &public_inputs)?;
+
+    {
+        let input_tree = ctx.accounts.input_tree.load()?;
+        require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
+    }
+
+    // Cumulative audit counter (mirrors jperp_reissue_notes).
+    let slot = &mut ctx.accounts.jperp_slot;
+    slot.reissued = slot.reissued
+        .checked_add(recover_amount)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    let claimant_key = ctx.accounts.claimant.key();
+    let executor_seeds: &[&[u8]] = &[
+        b"jperp_executor",
+        mint_address.as_ref(),
+        claimant_key.as_ref(),
+        withdrawal_id.as_ref(),
+        &[ctx.bumps.executor],
+    ];
+
+    // Collateral: executor → vault (program signs as the system-owned executor PDA).
+    invoke_signed(
+        &system_instruction::transfer(
+            &ctx.accounts.executor.key(),
+            &ctx.accounts.vault.key(),
+            recover_amount,
+        ),
+        &[
+            ctx.accounts.executor.to_account_info(),
+            ctx.accounts.vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+        &[executor_seeds],
+    )?;
+
+    // Sweep the leftover (capped fee + relayer-fronted rent) back to the relayer.
+    sweep_jperp_executor_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.relayer.to_account_info(),
+        executor_seeds,
+    )?;
+
+    // Mint the user's private SOL note.
+    let (leaf_index_0, leaf_index_1, new_root) = {
+        let mut output_tree = ctx.accounts.output_tree.load_mut()?;
+        let max_capacity = 1u64 << (output_tree.height as u64);
+        let remaining_capacity = max_capacity.saturating_sub(output_tree.next_index);
+        require!(remaining_capacity >= 2, PrivacyError::MerkleTreeFull);
+        let idx0 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[0], &mut *output_tree)?;
+        let idx1 = output_tree.next_index;
+        MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
+        (idx0, idx1, output_tree.root)
+    };
+
+    cfg.total_tvl = cfg.total_tvl
+        .checked_add(recover_amount)
+        .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
+
+    emit!(CommitmentEvent {
+        commitment: output_commitments[0],
+        leaf_index: leaf_index_0,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note0_epk,
+        encrypted_blob: note0_enc,
+        view_tag: note0_vt,
+        timestamp: clock.unix_timestamp,
+    });
+    emit!(CommitmentEvent {
+        commitment: output_commitments[1],
+        leaf_index: leaf_index_1,
+        tree_id: output_tree_id,
+        mint_address,
+        new_root,
+        ephemeral_public_key: note1_epk,
+        encrypted_blob: note1_enc,
+        view_tag: note1_vt,
+        timestamp: clock.unix_timestamp,
+    });
+
+    Ok(())
+}
 
 fn build_decrease_request_metas(
     executor_key: Pubkey,
@@ -1321,6 +1543,5 @@ fn build_decrease_request_infos<'info>(
     ]
 }
 
-// Note-recovery/indexing events (NullifierSpent, CommitmentEvent) are emitted from the shared
-// crate types; the Jupiter-Perps-specific telemetry events were removed as redundant on-chain noise
-// (the relayer already has this data, and broadcasting position size/side/amount leaks metadata).
+// Only the shared NullifierSpent/CommitmentEvent are emitted; perp-specific telemetry events were
+// dropped on purpose — broadcasting position size/side/amount leaks metadata the relayer already has.

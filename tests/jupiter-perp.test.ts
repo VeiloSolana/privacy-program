@@ -1026,6 +1026,9 @@ describe("Jupiter Perpetuals Integration", () => {
     let s3Perpetuals: PublicKey;
     let s3Marker0: PublicKey;
     let s3Marker1: PublicKey;
+    // SL trigger created in Step 2, captured so Step 3b can cancel it.
+    let slTriggerCounter: BN | null = null;
+    let slTriggerRequest: PublicKey | null = null;
     // Empty-tree root for the freshly-initialized USDC pool.
     let usdcEmptyRoot: Uint8Array;
     // Off-chain mirror of the USDC note tree, the root the open spends against, and the
@@ -1696,6 +1699,9 @@ describe("Jupiter Perpetuals Integration", () => {
         .signers([s3Relayer, claimantKp])
         .rpc();
       log(`triggerRequest ${shortKey(positionRequest)} created (counter ${counter.toString()}) — keeper watches the oracle`);
+      // Capture for Step 3b: after the market close, this SL trigger is orphaned and must be cancelled.
+      slTriggerCounter = counter;
+      slTriggerRequest = positionRequest;
       const posSl = await decodePosition(provider, position);
       if (posSl) {
         logPosition(posSl, "position");
@@ -1757,6 +1763,64 @@ describe("Jupiter Perpetuals Integration", () => {
       if (posClose) logPosition(posClose, "closing position");
       log(`closeRequest ${shortKey(positionRequest)} created (counter ${counter.toString()})`);
       log(`✓ market-close request submitted — on mainnet the keeper now settles asynchronously`);
+    });
+
+    it("Step 3b: jperp_cancel_trigger — reclaim the orphaned SL trigger's rent", async function () {
+      if (!suiteReady || !step1Passed) return this.skip();
+      if (!slTriggerRequest || !slTriggerCounter) return this.skip();
+
+      console.log("\n  ▶ STEP 3b — jperp_cancel_trigger (closePositionRequest2, owner-cancel path)");
+      log(`the market close in Step 3 never fires the SL trigger, so its positionRequest is orphaned — cancel it to reclaim ~0.0051 SOL of rent`);
+
+      const position = positionPDA(executor, CUSTODIES.SOL, CUSTODIES.USDC, SIDE_SHORT);
+      const positionRequestAta = await getAssociatedTokenAddress(USDC_MINT, slTriggerRequest, true);
+
+      // The SL trigger's positionRequest must actually exist on-chain before we cancel it.
+      const before = await provider.connection.getAccountInfo(slTriggerRequest);
+      if (!before) {
+        log(`SL positionRequest already gone (keeper/clone settled it) — skipping cancel`);
+        return this.skip();
+      }
+      const relayerBefore = await provider.connection.getBalance(s3Relayer.publicKey);
+      log(`SL positionRequest ${shortKey(slTriggerRequest)} holds ${(before.lamports / 1e9).toFixed(6)} SOL of rent`);
+
+      // 10 remaining_accounts for closePositionRequest2 (owner-cancel path); owner + ownerAta
+      // come from the Accounts struct. remaining[0] doubles as the keeper None-marker + program.
+      const remainingAccounts = [
+        { pubkey: JUPITER_PERP_PROGRAM_ID,     isSigner: false, isWritable: false }, // [0] perpsProgram
+        { pubkey: JLP_POOL,                    isSigner: false, isWritable: true  }, // [1] pool [mut]
+        { pubkey: slTriggerRequest,            isSigner: false, isWritable: true  }, // [2] positionRequest [mut]
+        { pubkey: positionRequestAta,          isSigner: false, isWritable: true  }, // [3] positionRequestAta [mut]
+        { pubkey: position,                    isSigner: false, isWritable: false }, // [4] position
+        { pubkey: USDC_MINT,                   isSigner: false, isWritable: false }, // [5] mint
+        { pubkey: TOKEN_PROGRAM_ID,            isSigner: false, isWritable: false }, // [6] tokenProgram
+        { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false }, // [7] systemProgram
+        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // [8] associatedTokenProgram
+        { pubkey: PERPS_EVENT_AUTHORITY,       isSigner: false, isWritable: false }, // [9] eventAuthority
+      ];
+
+      await (program.methods as any)
+        .jperpCancelTrigger(USDC_MINT, Array.from(withdrawalId))
+        .accounts({
+          config: usdcConfig,
+          jperpSlot,
+          claimant: claimantKp.publicKey,
+          executor,
+          executorTokenAccount: executorUsdcAta,
+          relayer: s3Relayer.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(remainingAccounts)
+        .signers([s3Relayer, claimantKp])
+        .rpc();
+
+      // The positionRequest must now be closed, and its rent swept to the relayer.
+      const after = await provider.connection.getAccountInfo(slTriggerRequest);
+      if (after !== null) throw new Error("SL positionRequest still exists after cancel");
+      const relayerAfter = await provider.connection.getBalance(s3Relayer.publicKey);
+      const relayerDelta = relayerAfter - relayerBefore;
+      log(`SL positionRequest closed; relayer net ${relayerDelta >= 0 ? "+" : ""}${(relayerDelta / 1e9).toFixed(6)} SOL (rent refund − tx fee)`);
+      log(`✓ orphaned trigger cancelled — rent reclaimed by the relayer, none stranded`);
     });
 
     it("Step 4: jperp_reissue_notes — re-mint notes from settled USDC (keeper imitated)", async function () {
@@ -2362,6 +2426,148 @@ describe("Jupiter Perpetuals Integration", () => {
       const vaultAfter = await provider.connection.getBalance(solVault);
       log(`✓ tx ${sig.slice(0, 16)}…  vault SOL: ${sol(vaultBefore)} → ${sol(vaultAfter)} (WSOL ATA closed → vault)`);
       console.log("\n  ✓ SOL pool LONG lifecycle: deposit → open → SL → TP → close → reissue ✓\n");
+    });
+
+    // EXECUTOR_JUPITER_RENT_FUNDING (perps.rs) — the relayer-fronted rent kept whole on recovery.
+    const RENT_FUNDING = new BN(9_000_000); // 0.009 SOL
+
+    it("Step 6: jperp_recover_native — recover a (simulated) cancelled-open's native collateral", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 6 — jperp_recover_native (cancelled native-SOL open → SOL note, zero relayer float)");
+
+      const recoverAmount = COLLATERAL; // 0.1 SOL collateral the keeper refunds on cancel
+
+      // Simulate the keeper CANCEL: collateral is refunded to the executor as NATIVE lamports,
+      // WSOL ATA left empty (Step 5 already closed it). Fund executor = collateral + rent. The
+      // executor was swept to 0 by Step 5's reissue, so it starts empty.
+      await provider.sendAndConfirm(new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: wallet.publicKey,
+          toPubkey: executor,
+          lamports: BigInt(recoverAmount.add(RENT_FUNDING).toString()),
+        }),
+      ), []);
+
+      const vaultBefore = await provider.connection.getBalance(solVault);
+      const relayerBefore = await provider.connection.getBalance(relayer.publicKey);
+      const execBefore = await provider.connection.getBalance(executor);
+      const treeBefore: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      const rootBefore = Buffer.from(extractRootFromAccount(treeBefore)).toString("hex");
+      log(`simulated cancel: executor holds ${sol(execBefore)} native (collateral + rent), WSOL ATA empty`);
+
+      // Deposit-circuit proof, publicAmount = +recoverAmount, 0-value inputs (mirrors reissue).
+      const rp0 = randomBytes32(), rpub0 = derivePublicKey(poseidon, rp0), rb0 = randomBytes32();
+      const rc0 = computeCommitment(poseidon, 0n, rpub0, rb0, SOL_POOL_MINT);
+      const n0 = computeNullifier(poseidon, rc0, 0, rp0);
+      const rp1 = randomBytes32(), rpub1 = derivePublicKey(poseidon, rp1), rb1 = randomBytes32();
+      const rc1 = computeCommitment(poseidon, 0n, rpub1, rb1, SOL_POOL_MINT);
+      const n1 = computeNullifier(poseidon, rc1, 0, rp1);
+      const o0Priv = randomBytes32(), o0Pub = derivePublicKey(poseidon, o0Priv), o0Blind = randomBytes32();
+      const c0 = computeCommitment(poseidon, BigInt(recoverAmount.toString()), o0Pub, o0Blind, SOL_POOL_MINT);
+      const o1Priv = randomBytes32(), o1Pub = derivePublicKey(poseidon, o1Priv), o1Blind = randomBytes32();
+      const c1 = computeCommitment(poseidon, 0n, o1Pub, o1Blind, SOL_POOL_MINT);
+
+      const extData = {
+        recipient: solVault, relayer: relayer.publicKey,
+        fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey,
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+      const treeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      const recoverRoot = extractRootFromAccount(treeAcc);
+      const zeros = offTree.getZeros();
+      const zeroPath = zeros.slice(0, 22).map((z: Uint8Array) => bytesToBigIntBE(z));
+      const zeroMerklePath = { pathElements: zeroPath, pathIndices: new Array(22).fill(0) };
+      const proof = await generateTransactionProof({
+        root: recoverRoot, publicAmount: BigInt(recoverAmount.toString()), extDataHash,
+        mintAddress: SOL_POOL_MINT,
+        inputNullifiers: [n0, n1], outputCommitments: [c0, c1],
+        inputAmounts: [0n, 0n], inputPrivateKeys: [rp0, rp1],
+        inputPublicKeys: [rpub0, rpub1], inputBlindings: [rb0, rb1],
+        inputMerklePaths: [zeroMerklePath, zeroMerklePath],
+        outputAmounts: [BigInt(recoverAmount.toString()), 0n],
+        outputOwners: [o0Pub, o1Pub], outputBlindings: [o0Blind, o1Blind],
+      });
+
+      const ix = await (program.methods as any)
+        .jperpRecoverNative(
+          Array.from(recoverRoot), TREE_ID, TREE_ID, recoverAmount, Array.from(extDataHash),
+          SOL_POOL_MINT, Array.from(n0), Array.from(n1), Array.from(c0), Array.from(c1),
+          Array.from(solWithdrawalId),
+          new BN(Math.floor(Date.now() / 1000) + 3600),
+          extData, proof, null,
+        )
+        .accounts({
+          config: solConfig, globalConfig, vault: solVault,
+          inputTree: noteTree1, outputTree: noteTree1, nullifiers: solNullifiers,
+          nullifierMarker0: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n0),
+          nullifierMarker1: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n1),
+          relayer: relayer.publicKey, jperpSlot, claimant: claimantKp.publicKey,
+          executor, systemProgram: SystemProgram.programId,
+        }).instruction();
+
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
+      const sig = await sendVersionedTx(provider, [cuIx, ix], [relayer, claimantKp], [lut]);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+
+      const vaultAfter = await provider.connection.getBalance(solVault);
+      const relayerAfter = await provider.connection.getBalance(relayer.publicKey);
+      const execAfter = await provider.connection.getBalance(executor);
+      const treeAfter: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      const rootAfter = Buffer.from(extractRootFromAccount(treeAfter)).toString("hex");
+
+      // Vault gains exactly the collateral; executor is fully drained; a fresh note was inserted.
+      const dVault = vaultAfter - vaultBefore;
+      if (dVault !== Number(recoverAmount.toString()))
+        throw new Error(`vault delta ${dVault} != collateral ${recoverAmount.toString()}`);
+      if (execAfter !== 0)
+        throw new Error(`executor not drained: ${execAfter} lamports remain`);
+      if (rootAfter === rootBefore)
+        throw new Error("note tree root unchanged — no note minted");
+
+      // Conservation: collateral → vault, rent → relayer; executor emptied of both.
+      // dRelayer = rent − tx fee − fresh nullifier-marker rent (so it nets positive, not exact).
+      const dRelayer = relayerAfter - relayerBefore;
+      log(`vault +${sol(dVault)} (collateral) · executor drained to 0 · relayer Δ ${(dRelayer / 1e9).toFixed(6)} SOL (rent − fees − marker rent)`);
+      log(`✓ recovered cancelled-open collateral as a private SOL note with ZERO relayer float`);
+    });
+
+    it("Step 7: jperp_recover_native — second call fails the solvency guard (idempotent)", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      // Step 6 drained the executor to 0. A repeat recovery must fail the solvency check
+      // (native < recover_amount + rent) BEFORE any proof work — so a dummy proof suffices.
+      const n0 = randomBytes32(), n1 = randomBytes32();
+      const c0 = randomBytes32(), c1 = randomBytes32();
+      const extData = {
+        recipient: solVault, relayer: relayer.publicKey,
+        fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey,
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+
+      // Versioned tx + LUT: the full recover instruction exceeds the 1232-byte legacy limit.
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
+      const ix = await (program.methods as any)
+        .jperpRecoverNative(
+          new Array(32).fill(0), TREE_ID, TREE_ID, COLLATERAL, Array.from(extDataHash),
+          SOL_POOL_MINT, Array.from(n0), Array.from(n1), Array.from(c0), Array.from(c1),
+          Array.from(solWithdrawalId),
+          new BN(Math.floor(Date.now() / 1000) + 3600),
+          extData, dummyProof(), null,
+        )
+        .accounts({
+          config: solConfig, globalConfig, vault: solVault,
+          inputTree: noteTree1, outputTree: noteTree1, nullifiers: solNullifiers,
+          nullifierMarker0: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n0),
+          nullifierMarker1: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n1),
+          relayer: relayer.publicKey, jperpSlot, claimant: claimantKp.publicKey,
+          executor, systemProgram: SystemProgram.programId,
+        })
+        .instruction();
+
+      await assertError(
+        sendVersionedTx(provider, [cuIx, ix], [relayer, claimantKp], [lut]),
+        "InsufficientFundsForWithdrawal",
+        "recover on a drained executor (idempotency)",
+      );
     });
 
     /** 16 remaining_accounts for createDecreasePositionRequest2 (SOL-pool LONG). */

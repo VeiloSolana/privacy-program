@@ -67,7 +67,7 @@ unsafe impl std::alloc::GlobalAlloc for BumpAllocator {
             pos = HEAP_START + std::mem::size_of::<usize>(); // reserve first word for the cursor
         }
         let align = layout.align();
-        pos = (pos.wrapping_add(align.wrapping_sub(1))) & !(align.wrapping_sub(1));
+        pos = pos.wrapping_add(align.wrapping_sub(1)) & !align.wrapping_sub(1);
         let next = pos.wrapping_add(layout.size());
         if next > HEAP_END {
             return std::ptr::null_mut();
@@ -1580,16 +1580,20 @@ pub struct ClosePositionToSol<'info> {
     pub position_pda: Box<Account<'info, PositionPDA>>,
 
     #[account(
-        init, payer = relayer,
+        init,
+        payer = relayer,
         seeds = [b"position_nullifier_v1", source_mint.as_ref(), input_nullifier_0.as_ref()],
-        bump, space = PositionNullifierMarker::LEN
+        bump,
+        space = PositionNullifierMarker::LEN
     )]
     pub position_nullifier_marker_0: Box<Account<'info, PositionNullifierMarker>>,
 
     #[account(
-        init, payer = relayer,
+        init,
+        payer = relayer,
         seeds = [b"position_nullifier_v1", source_mint.as_ref(), input_nullifier_1.as_ref()],
-        bump, space = PositionNullifierMarker::LEN
+        bump,
+        space = PositionNullifierMarker::LEN
     )]
     pub position_nullifier_marker_1: Box<Account<'info, PositionNullifierMarker>>,
 
@@ -1862,7 +1866,12 @@ pub struct PhoenixDepositFromPool<'info> {
     #[account(
         init,
         payer = relayer,
-        seeds = [b"phoenix_slot_v1", mint_address.as_ref(), claimant.as_ref(), withdrawal_id.as_ref()],
+        seeds = [
+            b"phoenix_slot_v1",
+            mint_address.as_ref(),
+            claimant.as_ref(),
+            withdrawal_id.as_ref(),
+        ],
         bump,
         space = PhoenixSlot::LEN
     )]
@@ -2212,7 +2221,12 @@ pub struct PhoenixEmberUnwrap<'info> {
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"phoenix_pending_v1", mint_address.as_ref(), claimant.as_ref(), withdrawal_id.as_ref()],
+        seeds = [
+            b"phoenix_pending_v1",
+            mint_address.as_ref(),
+            claimant.as_ref(),
+            withdrawal_id.as_ref(),
+        ],
         bump,
         space = PhoenixPendingReissue::LEN
     )]
@@ -2255,7 +2269,7 @@ pub struct PhoenixRegisterTrader<'info> {
     )]
     pub executor: Box<Account<'info, PhoenixExecutor>>,
 
-    #[account(mut)] // mut needed for init_if_needed rent payment
+    #[account(mut)]
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
@@ -2353,14 +2367,27 @@ pub struct PhoenixReissueNotes<'info> {
     #[account(
         init_if_needed,
         payer = relayer,
-        seeds = [b"phoenix_pending_v1", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()],
+        seeds = [
+            b"phoenix_pending_v1",
+            mint_address.as_ref(),
+            claimant.key().as_ref(),
+            withdrawal_id.as_ref(),
+        ],
         bump,
         space = PhoenixPendingReissue::LEN
     )]
     pub pending_reissue: Box<Account<'info, PhoenixPendingReissue>>,
 
     /// Per-deposit slot — checked here to validate the claimant_pubkey.
-    #[account(seeds = [b"phoenix_slot_v1", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()], bump)]
+    #[account(
+        seeds = [
+            b"phoenix_slot_v1",
+            mint_address.as_ref(),
+            claimant.key().as_ref(),
+            withdrawal_id.as_ref(),
+        ],
+        bump
+    )]
     pub phoenix_slot: Box<Account<'info, PhoenixSlot>>,
 
     /// Ephemeral claim key — must match `phoenix_slot.claimant_pubkey`.
@@ -2561,7 +2588,7 @@ pub struct JperpSetTpsl<'info> {
     /// Per-deposit slot — read to validate the claimant co-signer.
     #[account(
         seeds = [b"jperp_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
-        bump = jperp_slot.bump,
+        bump = jperp_slot.bump
     )]
     pub jperp_slot: Box<Account<'info, JupiterPerpSlot>>,
 
@@ -2600,7 +2627,7 @@ pub struct JperpUpdateTpsl<'info> {
     /// Per-deposit slot — read to validate the claimant co-signer.
     #[account(
         seeds = [b"jperp_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
-        bump = jperp_slot.bump,
+        bump = jperp_slot.bump
     )]
     pub jperp_slot: Box<Account<'info, JupiterPerpSlot>>,
 
@@ -2609,7 +2636,15 @@ pub struct JperpUpdateTpsl<'info> {
     pub claimant: Signer<'info>,
 
     /// CHECK: Seeds validated as [b"jperp_executor", mint_address, claimant, withdrawal_id].
-    #[account(seeds = [b"jperp_executor", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()], bump)]
+    #[account(
+        seeds = [
+            b"jperp_executor",
+            mint_address.as_ref(),
+            claimant.key().as_ref(),
+            withdrawal_id.as_ref(),
+        ],
+        bump
+    )]
     pub executor: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -2631,7 +2666,7 @@ pub struct JperpClosePosition<'info> {
     /// Per-deposit slot — read to validate the claimant co-signer.
     #[account(
         seeds = [b"jperp_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
-        bump = jperp_slot.bump,
+        bump = jperp_slot.bump
     )]
     pub jperp_slot: Box<Account<'info, JupiterPerpSlot>>,
 
@@ -2647,6 +2682,46 @@ pub struct JperpClosePosition<'info> {
 
     /// Executor's receiving ATA — proceeds land here after keeper settles.
     /// CHECK: Validated as ATA(executor, desired_mint) by Jupiter Perps program.
+    #[account(mut)]
+    pub executor_token_account: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+/// Cancel a pending TP/SL trigger (`closePositionRequest2`, owner-cancel path).
+///
+/// No funds move except the rent refund: Jupiter closes the trigger's
+/// positionRequest + ATA and returns their lamports to the executor (owner),
+/// which the handler then sweeps back to the relayer.
+/// remaining_accounts: 10 accounts (see `perps::jperp_cancel_trigger`).
+#[derive(Accounts)]
+#[instruction(mint_address: Pubkey, withdrawal_id: [u8; 32])]
+pub struct JperpCancelTrigger<'info> {
+    #[account(seeds = [b"privacy_config_v3", mint_address.as_ref()], bump = config.bump)]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    /// Per-deposit slot — read to validate the claimant co-signer.
+    #[account(
+        seeds = [b"jperp_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
+        bump = jperp_slot.bump
+    )]
+    pub jperp_slot: Box<Account<'info, JupiterPerpSlot>>,
+
+    /// Ephemeral claim key — must match jperp_slot.claimant_pubkey.
+    /// Co-signing ensures only the position owner can cancel a trigger.
+    pub claimant: Signer<'info>,
+
+    /// Executor PDA — signs the Jupiter `closePositionRequest2` CPI as `owner`.
+    /// Must be `mut`: Jupiter refunds the closed request's rent here.
+    /// CHECK: Seeds validated as [b"jperp_executor", mint_address, claimant, withdrawal_id].
+    #[account(mut, seeds = [b"jperp_executor", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()], bump)]
+    pub executor: UncheckedAccount<'info>,
+
+    /// Executor's collateral ATA = Jupiter's `ownerAta` (receives any request-ATA dust).
+    /// CHECK: Validated as ATA(executor, collateral_mint) in the handler.
     #[account(mut)]
     pub executor_token_account: UncheckedAccount<'info>,
 
@@ -2772,6 +2847,106 @@ pub struct JperpReissueNotes<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Recover collateral stranded in the executor by a keeper-cancelled native-SOL open.
+///
+/// Same shape as `JperpReissueNotes` minus all token plumbing: the backing moves as a
+/// native `executor → vault` system transfer, so there are no token accounts. Native-SOL
+/// pool only (`mint_address == Pubkey::default()`).
+#[derive(Accounts)]
+#[instruction(
+    root: [u8; 32],
+    input_tree_id: u16,
+    output_tree_id: u16,
+    recover_amount: u64,
+    ext_data_hash: [u8; 32],
+    mint_address: Pubkey,
+    input_nullifier_0: [u8; 32],
+    input_nullifier_1: [u8; 32],
+    output_commitment_0: [u8; 32],
+    output_commitment_1: [u8; 32],
+    withdrawal_id: [u8; 32]
+)]
+pub struct JperpRecoverNative<'info> {
+    #[account(
+        mut,
+        seeds = [b"privacy_config_v3", mint_address.as_ref()],
+        bump = config.bump
+    )]
+    pub config: Box<Account<'info, PrivacyConfig>>,
+
+    #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
+    pub global_config: Box<Account<'info, GlobalConfig>>,
+
+    /// Native-SOL vault — destination for the recovered collateral (mut: receives lamports).
+    #[account(mut, seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    pub vault: Box<Account<'info, Vault>>,
+
+    #[account(
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &input_tree_id.to_le_bytes()],
+        bump
+    )]
+    pub input_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_note_tree_v3", mint_address.as_ref(), &output_tree_id.to_le_bytes()],
+        bump
+    )]
+    pub output_tree: AccountLoader<'info, MerkleTreeAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"privacy_nullifiers_v3", mint_address.as_ref()],
+        bump = nullifiers.bump
+    )]
+    pub nullifiers: Box<Account<'info, NullifierSet>>,
+
+    /// init_if_needed: deposit circuit reuses dummy zero-value witnesses (mirrors reissue).
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_0.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_0: Box<Account<'info, NullifierMarker>>,
+
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        seeds = [b"nullifier_v3", mint_address.as_ref(), input_nullifier_1.as_ref()],
+        bump,
+        space = NullifierMarker::LEN
+    )]
+    pub nullifier_marker_1: Box<Account<'info, NullifierMarker>>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    /// Per-deposit slot — checked for the claimant co-signer; reissued counter bumped.
+    #[account(
+        mut,
+        seeds = [b"jperp_slot_v1", mint_address.as_ref(), withdrawal_id.as_ref()],
+        bump = jperp_slot.bump
+    )]
+    pub jperp_slot: Box<Account<'info, JupiterPerpSlot>>,
+
+    /// Ephemeral claim key — must match jperp_slot.claimant_pubkey (anti-theft).
+    pub claimant: Signer<'info>,
+
+    /// Executor PDA — system-owned; signs the `executor → vault` transfer and the rent sweep.
+    /// `mut` so its lamports can be moved.
+    /// CHECK: Seeds validated as [b"jperp_executor", mint_address, claimant, withdrawal_id].
+    #[account(
+        mut,
+        seeds = [b"jperp_executor", mint_address.as_ref(), claimant.key().as_ref(), withdrawal_id.as_ref()],
+        bump
+    )]
+    pub executor: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 /// Fund an ephemeral wallet from the pool via a ZK withdrawal proof.
 ///
 /// The relayer must pre-create the ephemeral's USDC ATA (e.g., via
@@ -2804,10 +2979,7 @@ pub struct PredictionOpen<'info> {
     #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
     pub global_config: Box<Account<'info, GlobalConfig>>,
 
-    #[account(
-        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
-        bump = config.vault_bump
-    )]
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
     pub vault: Box<Account<'info, Vault>>,
 
     #[account(
@@ -2915,10 +3087,7 @@ pub struct PredictionReissue<'info> {
     #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
     pub global_config: Box<Account<'info, GlobalConfig>>,
 
-    #[account(
-        seeds = [b"privacy_vault_v3", mint_address.as_ref()],
-        bump = config.vault_bump
-    )]
+    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
     pub vault: Box<Account<'info, Vault>>,
 
     #[account(
@@ -3250,7 +3419,6 @@ pub mod privacy_pool {
                 ),
             None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
         };
-        // Combine individual nullifiers/commitments into arrays for processing
         let input_nullifiers = [input_nullifier_0, input_nullifier_1];
         let output_commitments = [output_commitment_0, output_commitment_1];
         let cfg = &mut ctx.accounts.config;
@@ -3445,7 +3613,7 @@ pub mod privacy_pool {
         // 7. Check root is known in input tree
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
 
-        drop(input_tree); // Release immutable borrow
+        drop(input_tree);
 
         // 8. Mark both input nullifiers as spent on ALL paths (deposits and withdrawals).
         // The `init` constraint on the marker accounts already blocks reuse at account resolution,
@@ -3488,7 +3656,7 @@ pub mod privacy_pool {
         MerkleTree::append::<PoseidonHasher>(output_commitments[1], &mut *output_tree)?;
         let new_root = output_tree.root;
 
-        drop(output_tree); // Release mutable borrow
+        drop(output_tree);
 
         // Emit commitment events for both outputs
         let timestamp = Clock::get()?.unix_timestamp;
@@ -3603,7 +3771,7 @@ pub mod privacy_pool {
         ctx: Context<FundNativeOpenPosition>,
         source_mint: Pubkey,
         swap_amount: u64,
-        to_executor_native: bool,
+        to_executor_native: bool
     ) -> Result<()> {
         positions::fund_native_open_position(ctx, source_mint, swap_amount, to_executor_native)
     }
@@ -3614,7 +3782,7 @@ pub mod privacy_pool {
     pub fn stage_swap_legs(
         ctx: Context<StageSwapLegs>,
         input_nullifier_0: [u8; 32],
-        legs: Vec<u8>,
+        legs: Vec<u8>
     ) -> Result<()> {
         positions::stage_swap_legs(ctx, input_nullifier_0, legs)
     }
@@ -3622,7 +3790,7 @@ pub mod privacy_pool {
     /// Reclaim the rent from a staged Jupiter-legs buffer after `open_position`.
     pub fn close_swap_legs(
         ctx: Context<CloseSwapLegs>,
-        _input_nullifier_0: [u8; 32],
+        _input_nullifier_0: [u8; 32]
     ) -> Result<()> {
         positions::close_swap_legs(ctx)
     }
@@ -3655,10 +3823,7 @@ pub mod privacy_pool {
     }
 
     /// Remove a whitelisted relayer from the position pool.
-    pub fn remove_position_relayer(
-        ctx: Context<PositionPoolAdmin>,
-        relayer: Pubkey
-    ) -> Result<()> {
+    pub fn remove_position_relayer(ctx: Context<PositionPoolAdmin>, relayer: Pubkey) -> Result<()> {
         let cfg = &mut ctx.accounts.config;
         let n = cfg.num_relayers as usize;
         let idx = cfg.relayers[..n].iter().position(|k| k == &relayer);
@@ -4153,7 +4318,7 @@ pub mod privacy_pool {
         mint_address: Pubkey,
         claimant: Pubkey,
         amount: u64,
-        withdrawal_id: [u8; 32],
+        withdrawal_id: [u8; 32]
     ) -> Result<()> {
         phoenix::phoenix_queue_withdraw(ctx, mint_address, claimant, amount, withdrawal_id)
     }
@@ -4249,9 +4414,15 @@ pub mod privacy_pool {
         mint_address: Pubkey,
         claimant: Pubkey,
         withdrawal_id: [u8; 32],
-        deposit_amount: u64,
+        deposit_amount: u64
     ) -> Result<()> {
-        crate::perps::fund_native_jperp_open(ctx, mint_address, claimant, withdrawal_id, deposit_amount)
+        crate::perps::fund_native_jperp_open(
+            ctx,
+            mint_address,
+            claimant,
+            withdrawal_id,
+            deposit_amount
+        )
     }
 
     /// The executor PDA becomes the Jupiter Perps position owner; the user's
@@ -4387,6 +4558,21 @@ pub mod privacy_pool {
         )
     }
 
+    /// Cancel a pending TP/SL trigger and reclaim its ~0.0051 SOL rent.
+    ///
+    /// CPIs Jupiter's `closePositionRequest2` on the owner-cancel path (executor
+    /// signs as `owner`, keeper slot = program id / None), then sweeps the
+    /// refunded rent back to the relayer. Call this for any trigger that will
+    /// never fire — see `jupiter_perp::jperp_cancel_trigger` for the full flow.
+    #[inline(never)]
+    pub fn jperp_cancel_trigger<'info>(
+        ctx: Context<'_, '_, 'info, 'info, JperpCancelTrigger<'info>>,
+        mint_address: Pubkey,
+        withdrawal_id: [u8; 32]
+    ) -> Result<()> {
+        perps::jperp_cancel_trigger(ctx, mint_address, withdrawal_id)
+    }
+
     /// Transfer settled proceeds from executor ATA → vault, then ZK-deposit
     /// to re-mint private notes.
     ///
@@ -4435,6 +4621,48 @@ pub mod privacy_pool {
         )
     }
 
+    /// Recover collateral stranded in the executor by a keeper-cancelled native-SOL open,
+    /// backing the user's note directly from the executor's lamports (zero relayer float).
+    /// See `jupiter_perp::jperp_recover_native`.
+    #[inline(never)]
+    pub fn jperp_recover_native(
+        ctx: Context<JperpRecoverNative>,
+        root: [u8; 32],
+        input_tree_id: u16,
+        output_tree_id: u16,
+        recover_amount: u64,
+        ext_data_hash: [u8; 32],
+        mint_address: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        withdrawal_id: [u8; 32],
+        deadline: i64,
+        ext_data: ExtData,
+        proof: zk::TransactionProof,
+        note_ciphers: Option<NoteCiphers>
+    ) -> Result<()> {
+        perps::jperp_recover_native(
+            ctx,
+            root,
+            input_tree_id,
+            output_tree_id,
+            recover_amount,
+            ext_data_hash,
+            mint_address,
+            input_nullifier_0,
+            input_nullifier_1,
+            output_commitment_0,
+            output_commitment_1,
+            withdrawal_id,
+            deadline,
+            ext_data,
+            proof,
+            note_ciphers
+        )
+    }
+
     // ── Jupiter Prediction Market ────────────────────────────────────────────
 
     /// ZK withdrawal → ephemeral wallet funded for Jupiter Prediction trading.
@@ -4464,7 +4692,7 @@ pub mod privacy_pool {
         ext_data: ExtData,
         proof: zk::TransactionProof,
         note_ciphers: Option<NoteCiphers>,
-        sol_funding: u64,
+        sol_funding: u64
     ) -> Result<()> {
         predictions::prediction_open(
             ctx,
@@ -4484,7 +4712,7 @@ pub mod privacy_pool {
             ext_data,
             proof,
             note_ciphers,
-            sol_funding,
+            sol_funding
         )
     }
 
@@ -4512,7 +4740,7 @@ pub mod privacy_pool {
         deadline: i64,
         ext_data: ExtData,
         proof: zk::TransactionProof,
-        note_ciphers: Option<NoteCiphers>,
+        note_ciphers: Option<NoteCiphers>
     ) -> Result<()> {
         predictions::prediction_reissue(
             ctx,
@@ -4530,7 +4758,7 @@ pub mod privacy_pool {
             deadline,
             ext_data,
             proof,
-            note_ciphers,
+            note_ciphers
         )
     }
 }

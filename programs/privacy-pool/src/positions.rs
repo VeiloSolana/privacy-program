@@ -41,10 +41,6 @@ pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = pubkey!(
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 );
 
-// ============================================================================
-// Position-pool data structs (re-exported from lib.rs via `pub use positions::{...}`)
-// ============================================================================
-
 /// Global config for the cross-mint position pool (one pool for all tokens).
 ///
 /// Seeds: [b"position_config_v1"]
@@ -132,9 +128,9 @@ impl PositionPDA {
 #[account]
 pub struct SwapLegsBuffer {
     pub bump: u8,
-    pub owner: Pubkey,        // relayer that staged it
-    pub nullifier: [u8; 32],  // input_nullifier_0 it is bound to
-    pub legs: Vec<u8>,        // full JUP_LEGS_SENTINEL ++ borsh(Vec<JupLeg>) blob
+    pub owner: Pubkey, // relayer that staged it
+    pub nullifier: [u8; 32], // input_nullifier_0 it is bound to
+    pub legs: Vec<u8>, // full JUP_LEGS_SENTINEL ++ borsh(Vec<JupLeg>) blob
 }
 
 fn is_token_2022(mint_info: &AccountInfo) -> bool {
@@ -166,17 +162,14 @@ const EXECUTOR_FEE_BUFFER_LAMPORTS: u64 = 50_000_000;
 fn fund_executor_fee_buffer<'info>(
     system_program: &Program<'info, System>,
     relayer: &AccountInfo<'info>,
-    executor: &AccountInfo<'info>,
+    executor: &AccountInfo<'info>
 ) -> Result<()> {
     anchor_lang::system_program::transfer(
-        CpiContext::new(
-            system_program.to_account_info(),
-            anchor_lang::system_program::Transfer {
-                from: relayer.clone(),
-                to: executor.clone(),
-            },
-        ),
-        EXECUTOR_FEE_BUFFER_LAMPORTS,
+        CpiContext::new(system_program.to_account_info(), anchor_lang::system_program::Transfer {
+            from: relayer.clone(),
+            to: executor.clone(),
+        }),
+        EXECUTOR_FEE_BUFFER_LAMPORTS
     )
 }
 
@@ -186,7 +179,7 @@ fn sweep_executor_lamports<'info>(
     system_program: &Program<'info, System>,
     executor: &AccountInfo<'info>,
     relayer: &AccountInfo<'info>,
-    executor_seeds: &[&[u8]],
+    executor_seeds: &[&[u8]]
 ) -> Result<()> {
     let residual = executor.lamports();
     if residual == 0 {
@@ -199,16 +192,15 @@ fn sweep_executor_lamports<'info>(
                 from: executor.clone(),
                 to: relayer.clone(),
             },
-            &[executor_seeds],
+            &[executor_seeds]
         ),
-        residual,
+        residual
     )
 }
 
 /// Rent buffer handed to the ephemeral cosigner on top of swap_amount (covers Jupiter's WSOL-ATA
 /// rent for createIdempotent; reclaimed by Jupiter's cleanup close + the post-swap cosigner sweep).
 const COSIGNER_RENT_BUFFER_LAMPORTS: u64 = 20_000_000;
-
 
 /// Move swap funds (swap_amount + rent buffer) from the executor PDA to the ephemeral cosigner so
 /// Jupiter's wrap leg (native→WSOL from the cosigner) and ATA creation are covered. invoke_signed
@@ -218,7 +210,7 @@ fn fund_cosigner<'info>(
     executor: &AccountInfo<'info>,
     cosigner: &AccountInfo<'info>,
     executor_seeds: &[&[u8]],
-    swap_amount: u64,
+    swap_amount: u64
 ) -> Result<()> {
     let amount = swap_amount
         .checked_add(COSIGNER_RENT_BUFFER_LAMPORTS)
@@ -227,9 +219,9 @@ fn fund_cosigner<'info>(
         CpiContext::new_with_signer(
             system_program.clone(),
             anchor_lang::system_program::Transfer { from: executor.clone(), to: cosigner.clone() },
-            &[executor_seeds],
+            &[executor_seeds]
         ),
-        amount,
+        amount
     )
 }
 
@@ -239,14 +231,14 @@ fn fund_cosigner<'info>(
 fn fund_cosigner_rent<'info>(
     system_program: &AccountInfo<'info>,
     relayer: &AccountInfo<'info>,
-    cosigner: &AccountInfo<'info>,
+    cosigner: &AccountInfo<'info>
 ) -> Result<()> {
     anchor_lang::system_program::transfer(
-        CpiContext::new(
-            system_program.clone(),
-            anchor_lang::system_program::Transfer { from: relayer.clone(), to: cosigner.clone() },
-        ),
-        COSIGNER_RENT_BUFFER_LAMPORTS,
+        CpiContext::new(system_program.clone(), anchor_lang::system_program::Transfer {
+            from: relayer.clone(),
+            to: cosigner.clone(),
+        }),
+        COSIGNER_RENT_BUFFER_LAMPORTS
     )
 }
 
@@ -255,18 +247,18 @@ fn fund_cosigner_rent<'info>(
 fn sweep_cosigner_lamports<'info>(
     system_program: &AccountInfo<'info>,
     cosigner: &AccountInfo<'info>,
-    relayer: &AccountInfo<'info>,
+    relayer: &AccountInfo<'info>
 ) -> Result<()> {
     let residual = cosigner.lamports();
     if residual == 0 {
         return Ok(());
     }
     anchor_lang::system_program::transfer(
-        CpiContext::new(
-            system_program.clone(),
-            anchor_lang::system_program::Transfer { from: cosigner.clone(), to: relayer.clone() },
-        ),
-        residual,
+        CpiContext::new(system_program.clone(), anchor_lang::system_program::Transfer {
+            from: cosigner.clone(),
+            to: relayer.clone(),
+        }),
+        residual
     )
 }
 
@@ -330,7 +322,7 @@ fn append_and_emit<'info>(
     tree_id: u16,
     ephemeral_public_key: [u8; 32],
     encrypted_blob: [u8; 80],
-    view_tag: u8,
+    view_tag: u8
 ) -> Result<u64> {
     let mut t = tree.load_mut()?;
     let leaf_index = t.next_index;
@@ -359,7 +351,7 @@ fn validate_fee_to_vault(
     relayer_fee: u64,
     dest_amount: u64,
     swap_fee_bps: u16,
-    min_swap_fee: u64,
+    min_swap_fee: u64
 ) -> Result<u64> {
     require!(received >= min_amount_out, PrivacyError::InvalidPublicAmount);
     require!(received > relayer_fee, PrivacyError::InvalidPublicAmount);
@@ -373,10 +365,6 @@ fn validate_fee_to_vault(
     require!(vault_amount >= dest_amount, PrivacyError::InvalidPublicAmount);
     Ok(vault_amount)
 }
-
-// ============================================================================
-// init_position_pool
-// ============================================================================
 
 pub fn init_position_pool(
     ctx: Context<InitPositionPool>,
@@ -425,10 +413,7 @@ pub fn update_position_pool(
     Ok(())
 }
 
-// ============================================================================
-// open_position — swap a source (USDC/SOL) note into a private position via Jupiter
-// ============================================================================
-
+/// Swap a source (USDC/SOL) note into a private position via Jupiter.
 #[inline(never)]
 pub fn open_position<'info>(
     ctx: Context<'_, '_, 'info, 'info, OpenPosition<'info>>,
@@ -462,7 +447,6 @@ pub fn open_position<'info>(
         None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
     };
 
-    // Validate swap program
     require!(
         ctx.accounts.swap_program.key() == crate::JUPITER_PROGRAM_ID,
         PrivacyError::InvalidSwapProgram
@@ -567,8 +551,7 @@ pub fn open_position<'info>(
     let source_is_native = !crate::is_token_mint(&source_mint);
     // The Jupiter-legs path keeps the SOL as native lamports on the executor PDA (not WSOL) and skips
     // the WSOL sync — Jupiter's own setup (via the cosigner) wraps native→WSOL.
-    let is_jup_legs =
-        swap_data.len() >= 8 && swap_data[0..8] == JUP_LEGS_BUFFER_SENTINEL;
+    let is_jup_legs = swap_data.len() >= 8 && swap_data[0..8] == JUP_LEGS_BUFFER_SENTINEL;
 
     if source_is_native && is_jup_legs {
         // fund_native_open_position(to_executor_native=true) already debited the vault and credited
@@ -675,19 +658,31 @@ pub fn open_position<'info>(
     // Solana's truncation limit, which silently drops events emitted after the swap CPI.
     // Commitments are ZK-proven parameters and don't depend on the swap result.
     let pos_leaf_idx = append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, position_tree_id, note1_epk, note1_enc, note1_vt,
+        &ctx.accounts.position_tree,
+        output_commitments[1],
+        clock.unix_timestamp,
+        dest_mint,
+        position_tree_id,
+        note1_epk,
+        note1_enc,
+        note1_vt
     )?;
     append_and_emit(
-        &ctx.accounts.source_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, source_tree_id, note0_epk, note0_enc, note0_vt,
+        &ctx.accounts.source_tree,
+        output_commitments[0],
+        clock.unix_timestamp,
+        source_mint,
+        source_tree_id,
+        note0_epk,
+        note0_enc,
+        note0_vt
     )?;
 
     // Pre-fund the executor's native fee buffer (swept back after the swap); see helper.
     fund_executor_fee_buffer(
         &ctx.accounts.system_program,
         &ctx.accounts.relayer.to_account_info(),
-        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.executor.to_account_info()
     )?;
 
     // Staged Jupiter-legs path: route through an ephemeral cosigner (remaining[1]) instead of the
@@ -707,7 +702,7 @@ pub fn open_position<'info>(
                 &ctx.accounts.executor.to_account_info(),
                 &cosigner,
                 executor_seeds,
-                swap_amount,
+                swap_amount
             )?;
         } else {
             // SPL source (e.g. USDC→SOL→bonding-curve buy): the cosigner runs a multi-leg route whose
@@ -719,9 +714,10 @@ pub fn open_position<'info>(
             let cosigner_src_ata_key = get_ata_address(
                 &cosigner.key(),
                 &crate::effective_mint(&source_mint),
-                &src_token_program_id,
+                &src_token_program_id
             );
-            let cosigner_src_ata = ctx.remaining_accounts.iter()
+            let cosigner_src_ata = ctx.remaining_accounts
+                .iter()
                 .find(|a| a.key() == cosigner_src_ata_key)
                 .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
                 .clone();
@@ -732,7 +728,7 @@ pub fn open_position<'info>(
                 cosigner_src_ata.clone(),
                 src_token_program_id,
                 ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.associated_token_program.to_account_info(),
+                ctx.accounts.associated_token_program.to_account_info()
             )?;
             token::transfer(
                 CpiContext::new_with_signer(
@@ -742,16 +738,20 @@ pub fn open_position<'info>(
                         to: cosigner_src_ata,
                         authority: ctx.accounts.executor.to_account_info(),
                     },
-                    &[executor_seeds],
+                    &[executor_seeds]
                 ),
-                swap_amount,
+                swap_amount
             )?;
             // The staged legs include a SPL Token close_account instruction between the USDC→WSOL
             // hop and the Pump.fun buy hop. That converts the cosigner's WSOL ATA balance to native
             // lamports before the buy runs, so Pump.fun's native-SOL pull succeeds. No relayer
             // front is needed — the user's own USDC (converted to WSOL then unwrapped) pays for
             // the buy. Only the rent buffer above is needed for intermediate ATA creation.
-            fund_cosigner_rent(&ctx.accounts.system_program.to_account_info(), &ctx.accounts.relayer.to_account_info(), &cosigner)?;
+            fund_cosigner_rent(
+                &ctx.accounts.system_program.to_account_info(),
+                &ctx.accounts.relayer.to_account_info(),
+                &cosigner
+            )?;
         }
     }
 
@@ -781,8 +781,13 @@ pub fn open_position<'info>(
             .get(1)
             .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
             .clone();
-        let cosigner_dest_ata_key = get_ata_address(&cosigner.key(), &dest_mint, &dest_token_program_id);
-        let cosigner_dest_ata = ctx.remaining_accounts.iter()
+        let cosigner_dest_ata_key = get_ata_address(
+            &cosigner.key(),
+            &dest_mint,
+            &dest_token_program_id
+        );
+        let cosigner_dest_ata = ctx.remaining_accounts
+            .iter()
             .find(|a| a.key() == cosigner_dest_ata_key)
             .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
             .clone();
@@ -801,12 +806,22 @@ pub fn open_position<'info>(
             out_amt,
             dest_decimals,
             &ctx.accounts.token_program.to_account_info(),
-            &ctx.accounts.token_2022_program.to_account_info(),
+            &ctx.accounts.token_2022_program.to_account_info()
+        )?;
+        // The cosigner dest ATA is now fully drained into the executor — close it to reclaim
+        // its rent before sweeping the cosigner's residual native lamports.
+        close_cosigner_ata_if_empty(
+            dest_is_t22,
+            &cosigner_dest_ata,
+            &cosigner,
+            &ctx.accounts.relayer.to_account_info(),
+            &ctx.accounts.token_program.to_account_info(),
+            &ctx.accounts.token_2022_program.to_account_info()
         )?;
         sweep_cosigner_lamports(
             &ctx.accounts.system_program.to_account_info(),
             &cosigner,
-            &ctx.accounts.relayer.to_account_info(),
+            &ctx.accounts.relayer.to_account_info()
         )?;
     }
 
@@ -815,10 +830,9 @@ pub fn open_position<'info>(
         &ctx.accounts.system_program,
         &ctx.accounts.executor.to_account_info(),
         &ctx.accounts.relayer.to_account_info(),
-        executor_seeds,
+        executor_seeds
     )?;
 
-    // Read amount received
     let received_amount = if dest_is_t22 {
         read_token_2022_amount(&ctx.accounts.executor_dest_token.to_account_info())?
     } else {
@@ -832,7 +846,7 @@ pub fn open_position<'info>(
         relayer_fee,
         swap_params.dest_amount,
         ctx.accounts.position_config.swap_fee_bps,
-        ctx.accounts.position_config.min_swap_fee,
+        ctx.accounts.position_config.min_swap_fee
     )?;
 
     // Lazy-init position vault ATA
@@ -857,7 +871,6 @@ pub fn open_position<'info>(
         ctx.accounts.associated_token_program.to_account_info()
     )?;
 
-    // Transfer vault_amount from executor_dest_token → position_vault_ata
     let executor_ai = ctx.accounts.executor.to_account_info();
     if dest_is_t22 {
         token_2022_transfer_checked(
@@ -885,7 +898,6 @@ pub fn open_position<'info>(
         )?;
     }
 
-    // Pay relayer fee from executor_dest_token
     if relayer_fee > 0 {
         let expected_relayer_ata = get_ata_address(
             &ctx.accounts.relayer.key(),
@@ -924,7 +936,7 @@ pub fn open_position<'info>(
         }
     }
 
-    // Init position_vault_record (lazy)
+    // Lazy-init the position vault record on first use of this mint.
     let vault_record = &mut ctx.accounts.position_vault_record;
     if vault_record.mint == Pubkey::default() {
         vault_record.bump = ctx.bumps.position_vault_record;
@@ -939,7 +951,6 @@ pub fn open_position<'info>(
         .checked_add(1)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Init PositionPDA
     require!(ext_data.claimant != Pubkey::default(), PrivacyError::InvalidClaimant);
     let pos_pda = &mut ctx.accounts.position_pda;
     pos_pda.bump = ctx.bumps.position_pda;
@@ -950,7 +961,6 @@ pub fn open_position<'info>(
     pos_pda.is_active = true;
     pos_pda.claimant = ext_data.claimant;
 
-    // Cleanup: verify executor_source_token is empty, then close accounts + reclaim rent
     let source_token_data = crate::deserialize_token_account(
         &ctx.accounts.executor_source_token.to_account_info()
     )?;
@@ -968,7 +978,6 @@ pub fn open_position<'info>(
         )
     )?;
 
-    // Close executor_dest_token
     if dest_is_t22 {
         close_token_2022_account(
             &ctx.accounts.executor_dest_token.to_account_info(),
@@ -991,7 +1000,6 @@ pub fn open_position<'info>(
         )?;
     }
 
-    // Return executor rent to relayer
     let executor_lamports = executor_ai.lamports();
     **executor_ai.try_borrow_mut_lamports()? = 0;
     **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
@@ -1003,21 +1011,8 @@ pub fn open_position<'info>(
     Ok(())
 }
 
-// ============================================================================
-// close_position
-// ============================================================================
-//
-// Flow:
-// 1. Validate + ZK proof verify (swap circuit in reverse: stock → USDC)
-// 2. Mark position nullifiers spent
-// 3. Transfer stock from position vault → executor
-// 4. Execute Jupiter/Raydium swap: stock → USDC
-// 5. Transfer USDC from executor → USDC pool vault (fee deducted)
-// 6. Insert USDC notes into USDC tree
-// 7. Insert position change note (usually 0-amount) into position tree
-// 8. Close PositionPDA, update PositionVaultRecord
-// 9. Cleanup executor
-
+/// Close a position back to USDC: swap the position token → USDC via Jupiter and deposit into the
+/// USDC pool (swap circuit in reverse).
 #[inline(never)]
 pub fn close_position<'info>(
     ctx: Context<'_, '_, 'info, 'info, ClosePosition<'info>>,
@@ -1051,31 +1046,26 @@ pub fn close_position<'info>(
         None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
     };
 
-    // Validate swap program
     require!(
         ctx.accounts.swap_program.key() == crate::JUPITER_PROGRAM_ID,
         PrivacyError::InvalidSwapProgram
     );
 
-    // Validate pool config
     require!(ctx.accounts.usdc_config.mint_address == dest_mint, PrivacyError::InvalidMintAddress);
     require!(source_mint != dest_mint, PrivacyError::InvalidMintAddress);
 
-    // Validate PositionPDA consistency
     let pos_pda = &ctx.accounts.position_pda;
     require!(pos_pda.is_active, PrivacyError::Unauthorized);
     require!(pos_pda.mint == source_mint, PrivacyError::InvalidMintAddress);
     require!(pos_pda.tree_id == position_tree_id, PrivacyError::InvalidTreeId);
     require_keys_eq!(ctx.accounts.claimant.key(), pos_pda.claimant, PrivacyError::InvalidClaimant);
 
-    // Tree ID bounds
     require!(
         position_tree_id < ctx.accounts.position_config.num_trees,
         PrivacyError::InvalidTreeId
     );
     require!(usdc_tree_id < ctx.accounts.usdc_config.num_trees, PrivacyError::InvalidTreeId);
 
-    // Relayer whitelisting
     require!(
         ctx.accounts.position_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
@@ -1124,20 +1114,17 @@ pub fn close_position<'info>(
 
     verify_swap_transaction_groth16(&proof, &public_inputs)?;
 
-    // Verify position tree root is in history
     let pos_tree = ctx.accounts.position_tree.load()?;
     require!(MerkleTree::is_known_root(&*pos_tree, position_root), PrivacyError::UnknownRoot);
     let pos_cap = 1u64 << (pos_tree.height as u64);
     require!(pos_cap.saturating_sub(pos_tree.next_index) >= 1, PrivacyError::MerkleTreeFull);
     drop(pos_tree);
 
-    // Verify USDC tree has capacity
     let usdc_tree = ctx.accounts.usdc_tree.load()?;
     let usdc_cap = 1u64 << (usdc_tree.height as u64);
     require!(usdc_cap.saturating_sub(usdc_tree.next_index) >= 1, PrivacyError::MerkleTreeFull);
     drop(usdc_tree);
 
-    // Mark position nullifiers spent
     require!(
         !ctx.accounts.position_nullifier_marker_0.is_spent,
         PrivacyError::NullifierAlreadyUsed
@@ -1162,7 +1149,6 @@ pub fn close_position<'info>(
         position_tree_id
     )?;
 
-    // Detect source mint token program
     let src_is_t22 = is_token_2022(&ctx.accounts.source_mint_info);
     let src_decimals = get_mint_decimals(&ctx.accounts.source_mint_info)?;
     let src_token_program_id = if src_is_t22 {
@@ -1171,11 +1157,8 @@ pub fn close_position<'info>(
         anchor_spl::token::ID
     };
 
-    // Executor is a system-owned PDA — ephemeral, holds no Anchor data. Signing uses ctx.bumps.
-
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
 
-    // Create executor_source_token ATA (for stock) idempotently
     let expected_exec_src_ata = get_ata_address(
         &ctx.accounts.executor.key(),
         &source_mint,
@@ -1196,7 +1179,6 @@ pub fn close_position<'info>(
         ctx.accounts.associated_token_program.to_account_info()
     )?;
 
-    // Validate position_vault_ata
     let vault_pda_bump = ctx.bumps.position_vault_pda;
     let expected_vault_ata = get_ata_address(
         &ctx.accounts.position_vault_pda.key(),
@@ -1208,13 +1190,11 @@ pub fn close_position<'info>(
         PrivacyError::InvalidMintAddress
     );
 
-    // Check vault has sufficient balance
     let vault_balance = read_token_amount_unchecked(
         &ctx.accounts.position_vault_ata.to_account_info()
     )?;
     require!(vault_balance >= swap_amount, PrivacyError::InsufficientFundsForWithdrawal);
 
-    // Transfer swap_amount from position_vault_ata → executor_source_token
     let vault_pda_seeds: &[&[u8]] = &[
         b"position_vault_token_v1",
         source_mint.as_ref(),
@@ -1247,7 +1227,6 @@ pub fn close_position<'info>(
         )?;
     }
 
-    // Execute DEX swap: stock → USDC
     let relayer_key = ctx.accounts.relayer.key();
     let executor_seeds: &[&[u8]] = &[
         b"position_executor",
@@ -1260,12 +1239,24 @@ pub fn close_position<'info>(
 
     // Emit commitment events before the swap to survive log truncation (same reason as open_position).
     append_and_emit(
-        &ctx.accounts.usdc_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, usdc_tree_id, note1_epk, note1_enc, note1_vt,
+        &ctx.accounts.usdc_tree,
+        output_commitments[1],
+        clock.unix_timestamp,
+        dest_mint,
+        usdc_tree_id,
+        note1_epk,
+        note1_enc,
+        note1_vt
     )?;
     append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
+        &ctx.accounts.position_tree,
+        output_commitments[0],
+        clock.unix_timestamp,
+        source_mint,
+        position_tree_id,
+        note0_epk,
+        note0_enc,
+        note0_vt
     )?;
 
     // Pre-fund the executor PDA with native SOL for DEXs that charge a native protocol fee from
@@ -1273,7 +1264,7 @@ pub fn close_position<'info>(
     fund_executor_fee_buffer(
         &ctx.accounts.system_program,
         &ctx.accounts.relayer.to_account_info(),
-        &ctx.accounts.executor.to_account_info(),
+        &ctx.accounts.executor.to_account_info()
     )?;
 
     execute_dex_swap(
@@ -1297,7 +1288,7 @@ pub fn close_position<'info>(
         &ctx.accounts.system_program,
         &ctx.accounts.executor.to_account_info(),
         &ctx.accounts.relayer.to_account_info(),
-        executor_seeds,
+        executor_seeds
     )?;
 
     ctx.accounts.executor_dest_token.reload()?;
@@ -1310,10 +1301,9 @@ pub fn close_position<'info>(
         relayer_fee,
         swap_params.dest_amount,
         ctx.accounts.usdc_config.swap_fee_bps,
-        ctx.accounts.usdc_config.min_swap_fee,
+        ctx.accounts.usdc_config.min_swap_fee
     )?;
 
-    // Validate USDC vault ATA
     let expected_usdc_vault_ata = get_associated_token_address(
         &ctx.accounts.usdc_vault.key(),
         &crate::effective_mint(&dest_mint)
@@ -1325,7 +1315,6 @@ pub fn close_position<'info>(
 
     let executor_ai = ctx.accounts.executor.to_account_info();
 
-    // Transfer USDC from executor_dest_token → usdc_vault_token_account
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -1339,7 +1328,6 @@ pub fn close_position<'info>(
         vault_usdc
     )?;
 
-    // Pay relayer fee
     if relayer_fee > 0 {
         token::transfer(
             CpiContext::new_with_signer(
@@ -1359,20 +1347,17 @@ pub fn close_position<'info>(
         .checked_add(vault_usdc)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Update PositionVaultRecord
     let vault_record = &mut ctx.accounts.position_vault_record;
     vault_record.total_balance = vault_record.total_balance.saturating_sub(swap_amount);
     vault_record.position_count = vault_record.position_count.saturating_sub(1);
 
     // PositionPDA is auto-closed by Anchor `close = relayer` constraint
 
-    // Cleanup executor
     let source_exec_balance = read_token_amount_unchecked(
         &ctx.accounts.executor_source_token.to_account_info()
     )?;
     require!(source_exec_balance == 0, PrivacyError::SwapLeftoverTokens);
 
-    // Close executor_source_token (stock ATA)
     if src_is_t22 {
         close_token_2022_account(
             &ctx.accounts.executor_source_token.to_account_info(),
@@ -1395,7 +1380,7 @@ pub fn close_position<'info>(
         )?;
     }
 
-    // Close executor_dest_token (USDC ATA — always legacy SPL)
+    // USDC dest ATA is always legacy SPL.
     token::close_account(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -1408,7 +1393,6 @@ pub fn close_position<'info>(
         )
     )?;
 
-    // Return executor rent to relayer
     let executor_lamports = executor_ai.lamports();
     **executor_ai.try_borrow_mut_lamports()? = 0;
     **ctx.accounts.relayer.to_account_info().try_borrow_mut_lamports()? = ctx.accounts.relayer
@@ -1443,7 +1427,15 @@ pub fn close_position_to_sol<'info>(
     note_ciphers: Option<NoteCiphers>
 ) -> Result<()> {
     let (note0_epk, note0_enc, note0_vt, note1_epk, note1_enc, note1_vt) = match note_ciphers {
-        Some(c) => (c.note0_ephemeral_key, c.note0_encrypted, c.note0_view_tag, c.note1_ephemeral_key, c.note1_encrypted, c.note1_view_tag),
+        Some(c) =>
+            (
+                c.note0_ephemeral_key,
+                c.note0_encrypted,
+                c.note0_view_tag,
+                c.note1_ephemeral_key,
+                c.note1_encrypted,
+                c.note1_view_tag,
+            ),
         None => ([0u8; 32], [0u8; 80], 0u8, [0u8; 32], [0u8; 80], 0u8),
     };
 
@@ -1463,10 +1455,19 @@ pub fn close_position_to_sol<'info>(
     require!(pos_pda.mint == source_mint, PrivacyError::InvalidMintAddress);
     require!(pos_pda.tree_id == position_tree_id, PrivacyError::InvalidTreeId);
     require_keys_eq!(ctx.accounts.claimant.key(), pos_pda.claimant, PrivacyError::InvalidClaimant);
-    require!(position_tree_id < ctx.accounts.position_config.num_trees, PrivacyError::InvalidTreeId);
+    require!(
+        position_tree_id < ctx.accounts.position_config.num_trees,
+        PrivacyError::InvalidTreeId
+    );
     require!(sol_tree_id < ctx.accounts.sol_config.num_trees, PrivacyError::InvalidTreeId);
-    require!(ctx.accounts.position_config.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
-    require!(ctx.accounts.sol_config.is_relayer(&ctx.accounts.relayer.key()), PrivacyError::RelayerNotAllowed);
+    require!(
+        ctx.accounts.position_config.is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
+    require!(
+        ctx.accounts.sol_config.is_relayer(&ctx.accounts.relayer.key()),
+        PrivacyError::RelayerNotAllowed
+    );
 
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= swap_params.deadline, PrivacyError::InvalidPublicAmount);
@@ -1477,8 +1478,14 @@ pub fn close_position_to_sol<'info>(
     require!(input_nullifiers[0] != input_nullifiers[1], PrivacyError::DuplicateNullifiers);
     require!(output_commitments[0] != output_commitments[1], PrivacyError::DuplicateCommitments);
     let zero = [0u8; 32];
-    require!(input_nullifiers[0] != zero && input_nullifiers[1] != zero, PrivacyError::ZeroNullifier);
-    require!(output_commitments[0] != zero && output_commitments[1] != zero, PrivacyError::ZeroCommitment);
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(
+        output_commitments[0] != zero && output_commitments[1] != zero,
+        PrivacyError::ZeroCommitment
+    );
 
     let proof = Box::new(proof);
     let swap_params = Box::new(swap_params);
@@ -1509,19 +1516,47 @@ pub fn close_position_to_sol<'info>(
     require!(sol_cap.saturating_sub(sol_tree.next_index) >= 1, PrivacyError::MerkleTreeFull);
     drop(sol_tree);
 
-    require!(!ctx.accounts.position_nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
-    require!(!ctx.accounts.position_nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
-    emit_position_nullifier_spent(&mut ctx.accounts.position_nullifier_marker_0, input_nullifiers[0], ctx.bumps.position_nullifier_marker_0, source_mint, position_tree_id)?;
-    emit_position_nullifier_spent(&mut ctx.accounts.position_nullifier_marker_1, input_nullifiers[1], ctx.bumps.position_nullifier_marker_1, source_mint, position_tree_id)?;
+    require!(
+        !ctx.accounts.position_nullifier_marker_0.is_spent,
+        PrivacyError::NullifierAlreadyUsed
+    );
+    require!(
+        !ctx.accounts.position_nullifier_marker_1.is_spent,
+        PrivacyError::NullifierAlreadyUsed
+    );
+    emit_position_nullifier_spent(
+        &mut ctx.accounts.position_nullifier_marker_0,
+        input_nullifiers[0],
+        ctx.bumps.position_nullifier_marker_0,
+        source_mint,
+        position_tree_id
+    )?;
+    emit_position_nullifier_spent(
+        &mut ctx.accounts.position_nullifier_marker_1,
+        input_nullifiers[1],
+        ctx.bumps.position_nullifier_marker_1,
+        source_mint,
+        position_tree_id
+    )?;
 
     // Source mint token program (memes are Token-2022, but support both)
     let src_is_t22 = is_token_2022(&ctx.accounts.source_mint_info);
     let src_decimals = get_mint_decimals(&ctx.accounts.source_mint_info)?;
-    let src_token_program_id = if src_is_t22 { TOKEN_2022_PROGRAM_ID } else { anchor_spl::token::ID };
+    let src_token_program_id = if src_is_t22 {
+        TOKEN_2022_PROGRAM_ID
+    } else {
+        anchor_spl::token::ID
+    };
 
-    // Create executor MEME ATA + validate vault ATA
-    let expected_exec_src_ata = get_ata_address(&ctx.accounts.executor.key(), &source_mint, &src_token_program_id);
-    require!(ctx.accounts.executor_source_token.key() == expected_exec_src_ata, PrivacyError::InvalidMintAddress);
+    let expected_exec_src_ata = get_ata_address(
+        &ctx.accounts.executor.key(),
+        &source_mint,
+        &src_token_program_id
+    );
+    require!(
+        ctx.accounts.executor_source_token.key() == expected_exec_src_ata,
+        PrivacyError::InvalidMintAddress
+    );
     create_ata_idempotent(
         ctx.accounts.relayer.to_account_info(),
         ctx.accounts.executor.to_account_info(),
@@ -1533,26 +1568,55 @@ pub fn close_position_to_sol<'info>(
     )?;
 
     let vault_pda_bump = ctx.bumps.position_vault_pda;
-    let expected_vault_ata = get_ata_address(&ctx.accounts.position_vault_pda.key(), &source_mint, &src_token_program_id);
-    require!(ctx.accounts.position_vault_ata.key() == expected_vault_ata, PrivacyError::InvalidMintAddress);
-    let vault_balance = read_token_amount_unchecked(&ctx.accounts.position_vault_ata.to_account_info())?;
+    let expected_vault_ata = get_ata_address(
+        &ctx.accounts.position_vault_pda.key(),
+        &source_mint,
+        &src_token_program_id
+    );
+    require!(
+        ctx.accounts.position_vault_ata.key() == expected_vault_ata,
+        PrivacyError::InvalidMintAddress
+    );
+    let vault_balance = read_token_amount_unchecked(
+        &ctx.accounts.position_vault_ata.to_account_info()
+    )?;
     require!(vault_balance >= swap_amount, PrivacyError::InsufficientFundsForWithdrawal);
 
     let relayer_key = ctx.accounts.relayer.key();
     let executor_seeds: &[&[u8]] = &[
-        b"position_executor", source_mint.as_ref(), dest_mint.as_ref(),
-        input_nullifiers[0].as_ref(), relayer_key.as_ref(), &[ctx.bumps.executor],
+        b"position_executor",
+        source_mint.as_ref(),
+        dest_mint.as_ref(),
+        input_nullifiers[0].as_ref(),
+        relayer_key.as_ref(),
+        &[ctx.bumps.executor],
     ];
-    let vault_pda_seeds: &[&[u8]] = &[b"position_vault_token_v1", source_mint.as_ref(), &[vault_pda_bump]];
+    let vault_pda_seeds: &[&[u8]] = &[
+        b"position_vault_token_v1",
+        source_mint.as_ref(),
+        &[vault_pda_bump],
+    ];
 
     // Emit commitment events before the swap to survive log truncation (same reason as open_position).
     append_and_emit(
-        &ctx.accounts.sol_tree, output_commitments[1], clock.unix_timestamp,
-        dest_mint, sol_tree_id, note1_epk, note1_enc, note1_vt,
+        &ctx.accounts.sol_tree,
+        output_commitments[1],
+        clock.unix_timestamp,
+        dest_mint,
+        sol_tree_id,
+        note1_epk,
+        note1_enc,
+        note1_vt
     )?;
     append_and_emit(
-        &ctx.accounts.position_tree, output_commitments[0], clock.unix_timestamp,
-        source_mint, position_tree_id, note0_epk, note0_enc, note0_vt,
+        &ctx.accounts.position_tree,
+        output_commitments[0],
+        clock.unix_timestamp,
+        source_mint,
+        position_tree_id,
+        note0_epk,
+        note0_enc,
+        note0_vt
     )?;
 
     // Bonding-curve sells route through Jupiter (staged-legs cosigner) — no direct pump CPI (see
@@ -1563,44 +1627,90 @@ pub fn close_position_to_sol<'info>(
     require!(is_buffer_legs, PrivacyError::InvalidSwapParams);
     let sol_received: u64;
     {
-        let cosigner = ctx.remaining_accounts.get(1)
-            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?.clone();
-        let cosigner_meme_ata_key = get_ata_address(&cosigner.key(), &source_mint, &src_token_program_id);
-        let cosigner_meme_ata = ctx.remaining_accounts.iter()
+        let cosigner = ctx.remaining_accounts
+            .get(1)
+            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+            .clone();
+        let cosigner_meme_ata_key = get_ata_address(
+            &cosigner.key(),
+            &source_mint,
+            &src_token_program_id
+        );
+        let cosigner_meme_ata = ctx.remaining_accounts
+            .iter()
             .find(|a| a.key() == cosigner_meme_ata_key)
-            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?.clone();
+            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+            .clone();
         // Jupiter doesn't create the sell SOURCE ATA — create it and move the MEME in from the vault.
         create_ata_idempotent(
-            ctx.accounts.relayer.to_account_info(), cosigner.clone(),
-            ctx.accounts.source_mint_info.to_account_info(), cosigner_meme_ata.clone(),
-            src_token_program_id, ctx.accounts.system_program.to_account_info(),
-            ctx.accounts.associated_token_program.to_account_info(),
+            ctx.accounts.relayer.to_account_info(),
+            cosigner.clone(),
+            ctx.accounts.source_mint_info.to_account_info(),
+            cosigner_meme_ata.clone(),
+            src_token_program_id,
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.associated_token_program.to_account_info()
         )?;
         if src_is_t22 {
             token_2022_transfer_checked(
-                &ctx.accounts.position_vault_ata.to_account_info(), &ctx.accounts.source_mint_info.to_account_info(),
-                &cosigner_meme_ata, &ctx.accounts.position_vault_pda.to_account_info(),
-                vault_pda_seeds, swap_amount, src_decimals, &ctx.accounts.token_2022_program.to_account_info(),
+                &ctx.accounts.position_vault_ata.to_account_info(),
+                &ctx.accounts.source_mint_info.to_account_info(),
+                &cosigner_meme_ata,
+                &ctx.accounts.position_vault_pda.to_account_info(),
+                vault_pda_seeds,
+                swap_amount,
+                src_decimals,
+                &ctx.accounts.token_2022_program.to_account_info()
             )?;
         } else {
-            token::transfer(CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer { from: ctx.accounts.position_vault_ata.to_account_info(), to: cosigner_meme_ata.clone(), authority: ctx.accounts.position_vault_pda.to_account_info() },
-                &[vault_pda_seeds],
-            ), swap_amount)?;
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.position_vault_ata.to_account_info(),
+                        to: cosigner_meme_ata.clone(),
+                        authority: ctx.accounts.position_vault_pda.to_account_info(),
+                    },
+                    &[vault_pda_seeds]
+                ),
+                swap_amount
+            )?;
         }
         // Cover the cosigner's WSOL-ATA rent (Jupiter creates it for the unwrap); relayer-sourced.
-        fund_cosigner_rent(&ctx.accounts.system_program.to_account_info(), &ctx.accounts.relayer.to_account_info(), &cosigner)?;
+        fund_cosigner_rent(
+            &ctx.accounts.system_program.to_account_info(),
+            &ctx.accounts.relayer.to_account_info(),
+            &cosigner
+        )?;
         let before = cosigner.lamports();
         execute_dex_swap(
-            &ctx.accounts.swap_program, &ctx.accounts.jupiter_event_authority,
+            &ctx.accounts.swap_program,
+            &ctx.accounts.jupiter_event_authority,
             ctx.accounts.executor.to_account_info(),
             &ctx.accounts.executor_source_token.to_account_info(),
             &ctx.accounts.executor_source_token.to_account_info(),
-            &ctx.accounts.token_program, executor_seeds, &swap_data, &swap_params, swap_amount, source_mint, dest_mint,
-            ctx.remaining_accounts,
+            &ctx.accounts.token_program,
+            executor_seeds,
+            &swap_data,
+            &swap_params,
+            swap_amount,
+            source_mint,
+            dest_mint,
+            ctx.remaining_accounts
         )?;
-        sol_received = cosigner.lamports().checked_sub(before).ok_or(PrivacyError::ArithmeticOverflow)?;
+        sol_received = cosigner
+            .lamports()
+            .checked_sub(before)
+            .ok_or(PrivacyError::ArithmeticOverflow)?;
+        // The cosigner MEME ATA is now drained by the sell — close it to reclaim its rent.
+        close_cosigner_ata_if_empty(
+            src_is_t22,
+            &cosigner_meme_ata,
+            &cosigner,
+            &ctx.accounts.relayer.to_account_info(),
+            &ctx.accounts.token_program.to_account_info(),
+            &ctx.accounts.token_2022_program.to_account_info()
+        )?;
     }
 
     let relayer_fee = ext_data.fee;
@@ -1610,50 +1720,72 @@ pub fn close_position_to_sol<'info>(
         relayer_fee,
         swap_params.dest_amount,
         ctx.accounts.sol_config.swap_fee_bps,
-        ctx.accounts.sol_config.min_swap_fee,
+        ctx.accounts.sol_config.min_swap_fee
     )?;
 
     // Deposit the SOL proceeds (from the cosigner) into the SOL vault, then sweep its leftover.
-    let cosigner = ctx.remaining_accounts.get(1)
-        .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?.clone();
+    let cosigner = ctx.remaining_accounts
+        .get(1)
+        .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+        .clone();
     anchor_lang::system_program::transfer(
         CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
-            anchor_lang::system_program::Transfer { from: cosigner.clone(), to: ctx.accounts.sol_vault.to_account_info() },
+            anchor_lang::system_program::Transfer {
+                from: cosigner.clone(),
+                to: ctx.accounts.sol_vault.to_account_info(),
+            }
         ),
-        vault_sol,
+        vault_sol
     )?;
-    sweep_cosigner_lamports(&ctx.accounts.system_program.to_account_info(), &cosigner, &ctx.accounts.relayer.to_account_info())?;
+    sweep_cosigner_lamports(
+        &ctx.accounts.system_program.to_account_info(),
+        &cosigner,
+        &ctx.accounts.relayer.to_account_info()
+    )?;
 
-    ctx.accounts.sol_config.total_tvl = ctx.accounts.sol_config.total_tvl.checked_add(vault_sol).ok_or(PrivacyError::ArithmeticOverflow)?;
+    ctx.accounts.sol_config.total_tvl = ctx.accounts.sol_config.total_tvl
+        .checked_add(vault_sol)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
 
-    // Update vault record
     let vault_record = &mut ctx.accounts.position_vault_record;
     vault_record.total_balance = vault_record.total_balance.saturating_sub(swap_amount);
     vault_record.position_count = vault_record.position_count.saturating_sub(1);
 
-    // Close executor MEME ATA (must be drained by the sell)
+    // Executor MEME ATA must be fully drained by the sell before close.
     let executor_ai = ctx.accounts.executor.to_account_info();
-    let src_exec_balance = read_token_amount_unchecked(&ctx.accounts.executor_source_token.to_account_info())?;
+    let src_exec_balance = read_token_amount_unchecked(
+        &ctx.accounts.executor_source_token.to_account_info()
+    )?;
     require!(src_exec_balance == 0, PrivacyError::SwapLeftoverTokens);
     if src_is_t22 {
-        close_token_2022_account(&ctx.accounts.executor_source_token.to_account_info(), &ctx.accounts.relayer.to_account_info(), &executor_ai, executor_seeds, &ctx.accounts.token_2022_program.to_account_info())?;
+        close_token_2022_account(
+            &ctx.accounts.executor_source_token.to_account_info(),
+            &ctx.accounts.relayer.to_account_info(),
+            &executor_ai,
+            executor_seeds,
+            &ctx.accounts.token_2022_program.to_account_info()
+        )?;
     } else {
-        token::close_account(CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            CloseAccount { account: ctx.accounts.executor_source_token.to_account_info(), destination: ctx.accounts.relayer.to_account_info(), authority: executor_ai.clone() },
-            &[executor_seeds]
-        ))?;
+        token::close_account(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                CloseAccount {
+                    account: ctx.accounts.executor_source_token.to_account_info(),
+                    destination: ctx.accounts.relayer.to_account_info(),
+                    authority: executor_ai.clone(),
+                },
+                &[executor_seeds]
+            )
+        )?;
     }
     // PositionPDA auto-closed by Anchor `close = relayer`.
     Ok(())
 }
 
-// ============================================================================
 // Staged Jupiter-legs execution: run Jupiter's setup+route+cleanup instructions via invoke_signed.
 // Supports any route Jupiter emits (incl. native-SOL bonding curves) without hand-building the inner
 // instruction or tracking rotating fee accounts. Bound to the proof via swap_data_hash.
-// ============================================================================
 
 /// swap_data sentinel that marks the "Jupiter legs" encoding (not a real Anchor discriminator).
 const JUP_LEGS_SENTINEL: [u8; 8] = [0x6a, 0x75, 0x70, 0x6c, 0x65, 0x67, 0x73, 0x00]; // "juplegs\0"
@@ -1687,9 +1819,10 @@ fn execute_jup_legs<'info>(
     executor_seeds: &[&[u8]],
     cosigner: Pubkey,
     swap_data: &[u8],
-    remaining: &[AccountInfo<'info>],
+    remaining: &[AccountInfo<'info>]
 ) -> Result<()> {
-    let legs: Vec<JupLeg> = Vec::<JupLeg>::try_from_slice(&swap_data[8..])
+    let legs: Vec<JupLeg> = Vec::<JupLeg>
+        ::try_from_slice(&swap_data[8..])
         .map_err(|_| error!(PrivacyError::InvalidSwapParams))?;
     let exec_key = executor.key();
     for leg in legs.iter() {
@@ -1704,23 +1837,26 @@ fn execute_jup_legs<'info>(
             // so its signature propagates into this CPI. Jupiter's bonding-curve route then sees a
             // real wallet signer (not a PDA), avoiding the route's PDA-signer rejection.
             let is_signer = acc.key() == exec_key || acc.key() == cosigner;
-            metas.push(if acc.is_writable {
-                AccountMeta::new(acc.key(), is_signer)
-            } else {
-                AccountMeta::new_readonly(acc.key(), is_signer)
-            });
+            metas.push(
+                if acc.is_writable {
+                    AccountMeta::new(acc.key(), is_signer)
+                } else {
+                    AccountMeta::new_readonly(acc.key(), is_signer)
+                }
+            );
             infos.push(acc.clone());
         }
-        let ix = Instruction { program_id: leg.program_id, accounts: metas, data: leg.data.clone() };
+        let ix = Instruction {
+            program_id: leg.program_id,
+            accounts: metas,
+            data: leg.data.clone(),
+        };
         invoke_signed(&ix, &infos, &[executor_seeds])?;
     }
     Ok(())
 }
 
-// ============================================================================
-// Jupiter swap execution — dispatches to the staged-legs path or a single Jupiter route.
-// ============================================================================
-
+/// Jupiter swap execution — dispatches to the staged-legs path or a single Jupiter route.
 #[inline(never)]
 fn execute_dex_swap<'info>(
     swap_program: &UncheckedAccount<'info>,
@@ -1746,10 +1882,13 @@ fn execute_dex_swap<'info>(
         // remaining[0] = SwapLegsBuffer PDA, remaining[1] = ephemeral cosigner, remaining[2..] = legs.
         let buffer_acc = remaining.get(0).ok_or(error!(PrivacyError::InvalidRemainingAccounts))?;
         require!(buffer_acc.owner == &crate::ID, PrivacyError::InvalidRemainingAccounts);
-        let cosigner = remaining.get(1).ok_or(error!(PrivacyError::InvalidRemainingAccounts))?.key();
-        let buf = SwapLegsBuffer::try_deserialize(
-            &mut &buffer_acc.try_borrow_data()?[..]
-        ).map_err(|_| error!(PrivacyError::InvalidSwapParams))?;
+        let cosigner = remaining
+            .get(1)
+            .ok_or(error!(PrivacyError::InvalidRemainingAccounts))?
+            .key();
+        let buf = SwapLegsBuffer::try_deserialize(&mut &buffer_acc.try_borrow_data()?[..]).map_err(
+            |_| error!(PrivacyError::InvalidSwapParams)
+        )?;
         let computed: [u8; 32] = solana_sha256_hasher::hash(&buf.legs).to_bytes();
         require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
         return execute_jup_legs(&executor, executor_seeds, cosigner, &buf.legs, &remaining[2..]);
@@ -1865,9 +2004,7 @@ fn execute_dex_swap<'info>(
     Ok(())
 }
 
-// ============================================================================
-// Token-2022 helpers (raw CPI — avoid anchor_spl::token_2022 dependency)
-// ============================================================================
+// Token-2022 helpers (raw CPI — avoid anchor_spl::token_2022 dependency).
 
 /// transfer_checked CPI to Token-2022 program.
 fn token_2022_transfer_checked<'info>(
@@ -1933,6 +2070,41 @@ fn close_token_2022_account<'info>(
     Ok(())
 }
 
+/// Close an ephemeral-cosigner ATA back to the relayer IF it is already empty, reclaiming the
+/// ~0.002 SOL of relayer-fronted ATA rent. The cosigner is a real tx signer (not a PDA), so this
+/// uses `invoke` (its signature comes from the outer tx). Guarded on a zero balance so trailing
+/// swap dust can never abort the tx — close_account rejects a non-zero balance. SPL Token and
+/// Token-2022 share the close_account instruction index (9).
+fn close_cosigner_ata_if_empty<'info>(
+    is_t22: bool,
+    ata: &AccountInfo<'info>,
+    cosigner: &AccountInfo<'info>,
+    relayer: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+    token_2022_program: &AccountInfo<'info>
+) -> Result<()> {
+    let amount = if is_t22 {
+        read_token_2022_amount(ata)?
+    } else {
+        read_token_amount_unchecked(ata)?
+    };
+    if amount != 0 {
+        return Ok(());
+    }
+    let prog = if is_t22 { token_2022_program } else { token_program };
+    let ix = Instruction {
+        program_id: prog.key(),
+        accounts: vec![
+            AccountMeta::new(ata.key(), false),
+            AccountMeta::new(relayer.key(), false),
+            AccountMeta::new_readonly(cosigner.key(), true)
+        ],
+        data: vec![9u8],
+    };
+    invoke(&ix, &[ata.clone(), relayer.clone(), cosigner.clone(), prog.clone()])?;
+    Ok(())
+}
+
 /// Transfer tokens where `authority` is a **real transaction signer** (not a PDA) — e.g. the
 /// ephemeral cosigner moving the Jupiter swap output into the executor's dest ATA. Uses `invoke`
 /// (the authority's signature comes from the outer tx), so no signer seeds. Handles Token + Token-2022.
@@ -1946,7 +2118,7 @@ fn transfer_from_signer<'info>(
     amount: u64,
     decimals: u8,
     token_program: &AccountInfo<'info>,
-    token_2022_program: &AccountInfo<'info>,
+    token_2022_program: &AccountInfo<'info>
 ) -> Result<()> {
     if is_t22 {
         let mut data = vec![12u8]; // transfer_checked
@@ -1958,11 +2130,14 @@ fn transfer_from_signer<'info>(
                 AccountMeta::new(from.key(), false),
                 AccountMeta::new_readonly(mint.key(), false),
                 AccountMeta::new(to.key(), false),
-                AccountMeta::new_readonly(authority.key(), true),
+                AccountMeta::new_readonly(authority.key(), true)
             ],
             data,
         };
-        invoke(&ix, &[from.clone(), mint.clone(), to.clone(), authority.clone(), token_2022_program.clone()])?;
+        invoke(
+            &ix,
+            &[from.clone(), mint.clone(), to.clone(), authority.clone(), token_2022_program.clone()]
+        )?;
     } else {
         let mut data = vec![3u8]; // SPL Token transfer
         data.extend_from_slice(&amount.to_le_bytes());
@@ -1971,7 +2146,7 @@ fn transfer_from_signer<'info>(
             accounts: vec![
                 AccountMeta::new(from.key(), false),
                 AccountMeta::new(to.key(), false),
-                AccountMeta::new_readonly(authority.key(), true),
+                AccountMeta::new_readonly(authority.key(), true)
             ],
             data,
         };
@@ -2001,10 +2176,6 @@ fn read_token_2022_amount(account: &AccountInfo) -> Result<u64> {
     read_token_amount_unchecked(account)
 }
 
-// ============================================================================
-// merge_positions
-// ============================================================================
-
 /// Merge two position notes of the same mint into one using the existing
 /// transaction circuit (publicAmount=0). No vault token movement occurs.
 ///
@@ -2027,7 +2198,6 @@ pub fn merge_positions<'info>(
     ext_data: ExtData,
     merged_amount: u64
 ) -> Result<()> {
-    // Validate both PDAs are active and same mint
     require!(ctx.accounts.position_pda_0.is_active, PrivacyError::Unauthorized);
     require!(ctx.accounts.position_pda_1.is_active, PrivacyError::Unauthorized);
     require!(ctx.accounts.position_pda_0.mint == mint, PrivacyError::InvalidMintAddress);
@@ -2035,17 +2205,14 @@ pub fn merge_positions<'info>(
     require!(ctx.accounts.position_pda_0.tree_id == input_tree_id, PrivacyError::InvalidTreeId);
     require!(ctx.accounts.position_pda_1.tree_id == input_tree_id, PrivacyError::InvalidTreeId);
 
-    // Tree ID bounds
     require!(input_tree_id < ctx.accounts.position_config.num_trees, PrivacyError::InvalidTreeId);
     require!(output_tree_id < ctx.accounts.position_config.num_trees, PrivacyError::InvalidTreeId);
 
-    // Relayer whitelisting
     require!(
         ctx.accounts.position_config.is_relayer(&ctx.accounts.relayer.key()),
         PrivacyError::RelayerNotAllowed
     );
 
-    // Nullifier sanity checks
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
     let zero = [0u8; 32];
@@ -2059,12 +2226,11 @@ pub fn merge_positions<'info>(
         PrivacyError::ZeroCommitment
     );
 
-    // Verify position tree root is in history
     let in_tree = ctx.accounts.input_tree.load()?;
     require!(MerkleTree::is_known_root(&*in_tree, position_root), PrivacyError::UnknownRoot);
     drop(in_tree);
 
-    // Verify output tree has capacity for 2 new leaves
+    // Output tree must have capacity for 2 new leaves.
     let out_tree = ctx.accounts.output_tree.load()?;
     let out_cap = 1u64 << (out_tree.height as u64);
     require!(out_cap.saturating_sub(out_tree.next_index) >= 2, PrivacyError::MerkleTreeFull);
@@ -2081,7 +2247,7 @@ pub fn merge_positions<'info>(
         PrivacyError::NullifierAlreadyUsed
     );
 
-    // Verify ZK proof: transaction circuit with publicAmount=0
+    // Transaction circuit with publicAmount=0 (no net value moves).
     let ext_data_hash_val = ext_data.hash()?;
     let public_inputs = TransactionPublicInputs {
         root: position_root,
@@ -2093,7 +2259,6 @@ pub fn merge_positions<'info>(
     };
     verify_transaction_groth16(proof, &public_inputs)?;
 
-    // Mark both input nullifiers as spent
     emit_position_nullifier_spent(
         &mut ctx.accounts.position_nullifier_marker_0,
         input_nullifiers[0],
@@ -2113,21 +2278,32 @@ pub fn merge_positions<'info>(
 
     // Insert both output commitments into the output position tree (same tree, sequential leaves).
     let merged_leaf_idx = append_and_emit(
-        &ctx.accounts.output_tree, output_commitments[0], clock.unix_timestamp,
-        mint, output_tree_id, [0u8; 32], [0u8; 80], 0,
+        &ctx.accounts.output_tree,
+        output_commitments[0],
+        clock.unix_timestamp,
+        mint,
+        output_tree_id,
+        [0u8; 32],
+        [0u8; 80],
+        0
     )?;
     append_and_emit(
-        &ctx.accounts.output_tree, output_commitments[1], clock.unix_timestamp,
-        mint, output_tree_id, [0u8; 32], [0u8; 80], 0,
+        &ctx.accounts.output_tree,
+        output_commitments[1],
+        clock.unix_timestamp,
+        mint,
+        output_tree_id,
+        [0u8; 32],
+        [0u8; 80],
+        0
     )?;
 
-    // Validate merged_amount matches the sum of both input PDA balances
+    // merged_amount must equal the sum of both input PDA balances.
     let expected_merged = ctx.accounts.position_pda_0.balance
         .checked_add(ctx.accounts.position_pda_1.balance)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
     require!(merged_amount == expected_merged, PrivacyError::InvalidPublicAmount);
 
-    // Create merged PositionPDA
     let new_pda = &mut ctx.accounts.new_position_pda;
     new_pda.bump = ctx.bumps.new_position_pda;
     new_pda.mint = mint;
@@ -2157,13 +2333,14 @@ pub fn fund_native_open_position(
     ctx: Context<crate::FundNativeOpenPosition>,
     source_mint: Pubkey,
     swap_amount: u64,
-    to_executor_native: bool, // false → WSOL ATA (AMM), true → native lamports (Pump.fun)
+    to_executor_native: bool // false → WSOL ATA (AMM), true → native lamports (Pump.fun)
 ) -> Result<()> {
     {
         use anchor_lang::solana_program::sysvar::instructions as ix_sysvar;
         let ixs = ctx.accounts.instructions_sysvar.to_account_info();
         let current_idx = ix_sysvar::load_current_index_checked(&ixs)? as usize;
-        let next_ix = ix_sysvar::load_instruction_at_checked(current_idx + 1, &ixs)
+        let next_ix = ix_sysvar
+            ::load_instruction_at_checked(current_idx + 1, &ixs)
             .map_err(|_| error!(PrivacyError::Unauthorized))?;
         require_keys_eq!(next_ix.program_id, crate::ID, PrivacyError::Unauthorized);
         require!(
@@ -2174,8 +2351,8 @@ pub fn fund_native_open_position(
         // relayer could credit an arbitrary account from the vault. Index 15 = executor in OpenPosition.
         const OPEN_POSITION_EXECUTOR_IDX: usize = 15;
         require!(
-            next_ix.accounts.len() > OPEN_POSITION_EXECUTOR_IDX
-                && next_ix.accounts[OPEN_POSITION_EXECUTOR_IDX].pubkey == ctx.accounts.executor.key(),
+            next_ix.accounts.len() > OPEN_POSITION_EXECUTOR_IDX &&
+                next_ix.accounts[OPEN_POSITION_EXECUTOR_IDX].pubkey == ctx.accounts.executor.key(),
             PrivacyError::Unauthorized
         );
     }
@@ -2218,7 +2395,7 @@ pub fn fund_native_open_position(
 pub fn stage_swap_legs(
     ctx: Context<crate::StageSwapLegs>,
     input_nullifier_0: [u8; 32],
-    legs: Vec<u8>,
+    legs: Vec<u8>
 ) -> Result<()> {
     require!(legs.len() >= 8, PrivacyError::InvalidSwapParams);
     require!(legs[0..8] == JUP_LEGS_SENTINEL, PrivacyError::InvalidSwapParams);
