@@ -1898,91 +1898,74 @@ fn execute_dex_swap<'info>(
     // staged-legs cosigner branch handled above). Direct Raydium CPMM/AMM and Pump.fun CPI paths
     // were removed — the position pool never produces those swap_data forms. See
     // docs/pumpfun-direct-cpi.md for the removed pump direct-CPI recipe.
-    let is_jupiter =
-        swap_data.len() >= 8 &&
-        (swap_data[0..8] == [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a] ||
-            swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] ||
-            swap_data[0..8] == [0xd0, 0x33, 0xef, 0x97, 0x7b, 0x2b, 0xed, 0x5c] ||
-            swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e]);
+    // Jupiter V6 route variants → (auth, source_token, dest_token, source_mint?, dest_mint?) account
+    // indices in the relayer-provided list, from the live Jupiter V6 IDL. Every index sits BEFORE any
+    // optional account in its variant, so positions are stable. Substituting auth/source/dest with
+    // our executor + ATAs forces the swap to authorize via our executor and move funds only through
+    // our ATAs (a relayer can't redirect). v1 route/exact_out place their mints after optional
+    // accounts (unstable index) so mints aren't validated there — the substituted ATAs already pin
+    // the mints. The v2 variants carry no preceding optionals, so their mints are validated too.
+    let disc: [u8; 8] = if swap_data.len() >= 8 {
+        swap_data[0..8].try_into().unwrap()
+    } else {
+        [0u8; 8]
+    };
+    let layout: Option<(usize, usize, usize, Option<usize>, Option<usize>)> = match disc {
+        [0xe5, 0x17, 0xcb, 0x97, 0x7a, 0xe3, 0xad, 0x2a] => Some((1, 2, 3, None, None)), // route
+        [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] => Some((2, 3, 6, Some(7), Some(8))), // shared_accounts_route
+        [0xd0, 0x33, 0xef, 0x97, 0x7b, 0x2b, 0xed, 0x5c] => Some((1, 2, 3, None, None)), // exact_out_route
+        [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e] => Some((2, 3, 6, Some(7), Some(8))), // shared_accounts_exact_out_route
+        [0xbb, 0x64, 0xfa, 0xcc, 0x31, 0xc4, 0xaf, 0x14] => Some((0, 1, 2, Some(3), Some(4))), // route_v2
+        [0xd1, 0x98, 0x53, 0x93, 0x7c, 0xfe, 0xd8, 0xe9] => Some((1, 2, 5, Some(6), Some(7))), // shared_accounts_route_v2
+        _ => None,
+    };
 
-    if is_jupiter {
+    if let Some((auth_i, src_i, dst_i, src_mint_i, dst_mint_i)) = layout {
         require!(
             jupiter_event_authority.key() == crate::JUPITER_EVENT_AUTHORITY,
             PrivacyError::Unauthorized
         );
 
+        let min_len =
+            auth_i
+                .max(src_i)
+                .max(dst_i)
+                .max(src_mint_i.unwrap_or(0))
+                .max(dst_mint_i.unwrap_or(0)) + 1;
+        require!(remaining.len() >= min_len, PrivacyError::JupiterInsufficientAccounts);
+
+        if let Some(i) = src_mint_i {
+            require!(
+                remaining[i].key() == crate::effective_mint(&source_mint),
+                PrivacyError::InvalidMintAddress
+            );
+        }
+        if let Some(i) = dst_mint_i {
+            require!(
+                remaining[i].key() == crate::effective_mint(&dest_mint),
+                PrivacyError::InvalidMintAddress
+            );
+        }
+
         let mut jupiter_accounts = Vec::new();
         let mut account_infos = Vec::new();
-
-        let is_shared =
-            swap_data[0..8] == [0xc1, 0x20, 0x9b, 0x33, 0x41, 0xd6, 0x9c, 0x81] ||
-            swap_data[0..8] == [0xb0, 0xd1, 0x69, 0xa8, 0x9a, 0x7d, 0x45, 0x3e];
-
-        if is_shared {
-            require!(remaining.len() >= 9, PrivacyError::JupiterInsufficientAccounts);
-            require!(
-                remaining[7].key() == crate::effective_mint(&source_mint),
-                PrivacyError::InvalidMintAddress
-            );
-            require!(
-                remaining[8].key() == crate::effective_mint(&dest_mint),
-                PrivacyError::InvalidMintAddress
-            );
-
-            for (i, acc) in remaining.iter().enumerate() {
-                match i {
-                    2 => {
-                        jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
-                        account_infos.push(executor.clone());
-                    }
-                    3 => {
-                        jupiter_accounts.push(AccountMeta::new(executor_source_token.key(), false));
-                        account_infos.push(executor_source_token.clone());
-                    }
-                    6 => {
-                        jupiter_accounts.push(AccountMeta::new(executor_dest_token.key(), false));
-                        account_infos.push(executor_dest_token.clone());
-                    }
-                    _ => {
-                        jupiter_accounts.push(
-                            if acc.is_writable {
-                                AccountMeta::new(acc.key(), false)
-                            } else {
-                                AccountMeta::new_readonly(acc.key(), false)
-                            }
-                        );
-                        account_infos.push(acc.clone());
-                    }
-                }
-            }
-        } else {
-            require!(remaining.len() >= 4, PrivacyError::JupiterInsufficientAccounts);
-
-            for (i, acc) in remaining.iter().enumerate() {
-                match i {
-                    1 => {
-                        jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
-                        account_infos.push(executor.clone());
-                    }
-                    2 => {
-                        jupiter_accounts.push(AccountMeta::new(executor_source_token.key(), false));
-                        account_infos.push(executor_source_token.clone());
-                    }
-                    3 => {
-                        jupiter_accounts.push(AccountMeta::new(executor_dest_token.key(), false));
-                        account_infos.push(executor_dest_token.clone());
-                    }
-                    _ => {
-                        jupiter_accounts.push(
-                            if acc.is_writable {
-                                AccountMeta::new(acc.key(), false)
-                            } else {
-                                AccountMeta::new_readonly(acc.key(), false)
-                            }
-                        );
-                        account_infos.push(acc.clone());
-                    }
-                }
+        for (i, acc) in remaining.iter().enumerate() {
+            if i == auth_i {
+                jupiter_accounts.push(AccountMeta::new_readonly(executor.key(), true));
+                account_infos.push(executor.clone());
+            } else if i == src_i {
+                jupiter_accounts.push(AccountMeta::new(executor_source_token.key(), false));
+                account_infos.push(executor_source_token.clone());
+            } else if i == dst_i {
+                jupiter_accounts.push(AccountMeta::new(executor_dest_token.key(), false));
+                account_infos.push(executor_dest_token.clone());
+            } else {
+                jupiter_accounts.push(if acc.is_writable {
+                    AccountMeta::new(acc.key(), false)
+                } else {
+                    AccountMeta::new_readonly(acc.key(), false)
+                });
+                account_infos.push(acc.clone());
             }
         }
 
