@@ -33,7 +33,7 @@ wallet = "/Users/admin/.config/solana/id.json"
 # wallet = "./keys/deployer-keypair.json"
 
 [scripts]
-test = "npm run test:position"
+test = "npm run test:jperp"
 
 [test]
 startup_wait = 150000
