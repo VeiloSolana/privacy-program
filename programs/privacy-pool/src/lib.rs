@@ -5249,4 +5249,7 @@ pub enum PrivacyError {
     // ---- Jupiter Prediction errors ----
     #[msg("Prediction open: ext_data.recipient must equal the ephemeral wallet (claimant)")]
     PredictionRecipientMustBeClaimant,
+    // Appended at the END so existing error numbers are not renumbered (relayer maps codes).
+    #[msg("Jupiter Perps recover: relayer rent sweep exceeds JPERP_RECOVER_RENT_CAP")]
+    JperpRecoverRentExceeded,
 }

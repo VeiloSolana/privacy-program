@@ -60,6 +60,12 @@ pub const REQUEST_TYPE_TRIGGER: u8 = 1;
 /// SYSTEM-OWNED. Above the ~7.5M-lamport open floor it's swept back same-tx; don't trim below ~8M.
 pub const EXECUTOR_JUPITER_RENT_FUNDING: u64 = 9_000_000; // 0.009 SOL
 
+/// Defense-in-depth ceiling on the rent `jperp_recover_native` sweeps to the relayer. Exactness
+/// comes from `recover_amount = settled proceeds` (claimant-co-signed); this just bounds skim.
+/// Set above a close's two request-rent refunds (~10.2M) so it never blocks a claim. Decoupled
+/// from EXECUTOR_JUPITER_RENT_FUNDING (which also funds opens) to avoid re-inflating the overpay.
+pub const JPERP_RECOVER_RENT_CAP: u64 = 15_000_000; // 0.015 SOL
+
 /// Native SOL positions (longs) use WSOL as the actual collateral token for Jupiter CPIs.
 pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 
@@ -1358,15 +1364,8 @@ pub fn jperp_recover_native(
         .unwrap_or(max_fee_u128 as u64);
     require!(ext_data.fee <= max_fee_with_margin, PrivacyError::InvalidFeeAmount);
 
-    // The trailing SWEEP hands the relayer `native - recover_amount` = (capped fee) + (rent).
-    // recover_amount is CO-SIGNED by the claimant, so an honest claimant pins it to the true
-    // proceeds-minus-fee. We cap the NON-fee remainder (the rent) at one rent unit, so the
-    // relayer can never sweep the user's collateral — worst case it skims <= fee + one rent
-    // unit, which the claimant co-sign already blocks. Handles BOTH:
-    //   • cancelled open  → executor = collateral + exactly one RENT
-    //   • native-SOL close → executor = proceeds + the last request's rent refund (< RENT;
-    //     the keeper returns close proceeds as native lamports, mixed with that trailing dust).
-    // checked_sub also gives idempotency: a drained executor fails here (native < recover_amount).
+    // recover_amount = proceeds (claimant-co-signed) → user gets exact funds; relayer sweeps the
+    // rest (fee + rent), bounded by JPERP_RECOVER_RENT_CAP. checked_sub gives idempotency.
     let native = ctx.accounts.executor.lamports();
     let relayer_sweep = native
         .checked_sub(recover_amount)
@@ -1375,8 +1374,8 @@ pub fn jperp_recover_native(
         .checked_sub(ext_data.fee)
         .ok_or(error!(PrivacyError::InvalidFeeAmount))?;
     require!(
-        rent_part <= EXECUTOR_JUPITER_RENT_FUNDING,
-        PrivacyError::JperpCollateralMismatch
+        rent_part <= JPERP_RECOVER_RENT_CAP,
+        PrivacyError::JperpRecoverRentExceeded
     );
 
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];

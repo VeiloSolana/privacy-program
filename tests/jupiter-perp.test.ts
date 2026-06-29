@@ -2531,6 +2531,93 @@ describe("Jupiter Perpetuals Integration", () => {
       log(`✓ recovered cancelled-open collateral as a private SOL note with ZERO relayer float`);
     });
 
+    it("Step 6b: jperp_recover_native — winning CLOSE (two rent refunds) pays exact proceeds, no overpay", async function () {
+      if (!ready || !step1Passed) return this.skip();
+      console.log("\n  ▶ STEP 6b — jperp_recover_native close path (executor = proceeds + 2 request rents)");
+
+      // Close refunds both request rents (~10.2M) alongside proceeds. rent_part 10.2M > old 9M cap
+      // (would revert/overpay) but ≤ the new 15M cap → user gets exact proceeds.
+      const TWO_RENTS = new BN(10_203_360);
+      const proceeds  = new BN(150_000_000); // 0.15 SOL — collateral + profit (a win)
+
+      await provider.sendAndConfirm(new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: wallet.publicKey,
+          toPubkey: executor,
+          lamports: BigInt(proceeds.add(TWO_RENTS).toString()),
+        }),
+      ), []);
+
+      const vaultBefore = await provider.connection.getBalance(solVault);
+      const execBefore = await provider.connection.getBalance(executor);
+      log(`simulated winning close: executor holds ${sol(execBefore)} (proceeds ${sol(proceeds)} + 2 rents ${sol(TWO_RENTS)})`);
+
+      const rp0 = randomBytes32(), rpub0 = derivePublicKey(poseidon, rp0), rb0 = randomBytes32();
+      const rc0 = computeCommitment(poseidon, 0n, rpub0, rb0, SOL_POOL_MINT);
+      const n0 = computeNullifier(poseidon, rc0, 0, rp0);
+      const rp1 = randomBytes32(), rpub1 = derivePublicKey(poseidon, rp1), rb1 = randomBytes32();
+      const rc1 = computeCommitment(poseidon, 0n, rpub1, rb1, SOL_POOL_MINT);
+      const n1 = computeNullifier(poseidon, rc1, 0, rp1);
+      const o0Priv = randomBytes32(), o0Pub = derivePublicKey(poseidon, o0Priv), o0Blind = randomBytes32();
+      const c0 = computeCommitment(poseidon, BigInt(proceeds.toString()), o0Pub, o0Blind, SOL_POOL_MINT);
+      const o1Priv = randomBytes32(), o1Pub = derivePublicKey(poseidon, o1Priv), o1Blind = randomBytes32();
+      const c1 = computeCommitment(poseidon, 0n, o1Pub, o1Blind, SOL_POOL_MINT);
+
+      const extData = {
+        recipient: solVault, relayer: relayer.publicKey,
+        fee: new BN(0), refund: new BN(0), claimant: claimantKp.publicKey,
+      };
+      const extDataHash = computeExtDataHash(poseidon, extData);
+      const treeAcc: any = await (program.account as any).merkleTreeAccount.fetch(noteTree1);
+      const recoverRoot = extractRootFromAccount(treeAcc);
+      const zeros = offTree.getZeros();
+      const zeroPath = zeros.slice(0, 22).map((z: Uint8Array) => bytesToBigIntBE(z));
+      const zeroMerklePath = { pathElements: zeroPath, pathIndices: new Array(22).fill(0) };
+      const proof = await generateTransactionProof({
+        root: recoverRoot, publicAmount: BigInt(proceeds.toString()), extDataHash,
+        mintAddress: SOL_POOL_MINT,
+        inputNullifiers: [n0, n1], outputCommitments: [c0, c1],
+        inputAmounts: [0n, 0n], inputPrivateKeys: [rp0, rp1],
+        inputPublicKeys: [rpub0, rpub1], inputBlindings: [rb0, rb1],
+        inputMerklePaths: [zeroMerklePath, zeroMerklePath],
+        outputAmounts: [BigInt(proceeds.toString()), 0n],
+        outputOwners: [o0Pub, o1Pub], outputBlindings: [o0Blind, o1Blind],
+      });
+
+      const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 });
+      const ix = await (program.methods as any)
+        .jperpRecoverNative(
+          Array.from(recoverRoot), TREE_ID, TREE_ID, proceeds, Array.from(extDataHash),
+          SOL_POOL_MINT, Array.from(n0), Array.from(n1), Array.from(c0), Array.from(c1),
+          Array.from(solWithdrawalId),
+          new BN(Math.floor(Date.now() / 1000) + 3600),
+          extData, proof, null,
+        )
+        .accounts({
+          config: solConfig, globalConfig, vault: solVault,
+          inputTree: noteTree1, outputTree: noteTree1, nullifiers: solNullifiers,
+          nullifierMarker0: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n0),
+          nullifierMarker1: nullifierMarkerPDA(program.programId, SOL_POOL_MINT, n1),
+          relayer: relayer.publicKey, jperpSlot, claimant: claimantKp.publicKey,
+          executor, systemProgram: SystemProgram.programId,
+        }).instruction();
+
+      const sig = await sendVersionedTx(provider, [cuIx, ix], [relayer, claimantKp], [lut]);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+
+      const vaultAfter = await provider.connection.getBalance(solVault);
+      const execAfter = await provider.connection.getBalance(executor);
+      const dVault = vaultAfter - vaultBefore;
+
+      // EXACT proceeds to the vault/note — not proceeds + (10.2M − 9M) overpay the old cap caused.
+      if (dVault !== Number(proceeds.toString()))
+        throw new Error(`overpay/short: vault delta ${dVault} != proceeds ${proceeds.toString()}`);
+      if (execAfter !== 0)
+        throw new Error(`executor not drained: ${execAfter} lamports remain`);
+      log(`vault +${sol(dVault)} (exact proceeds, incl. profit) · 2-rent close cleared the 15M cap (would've reverted at 9M)`);
+      log(`✓ winning close recovers exact proceeds — no overpay, no blocked claim`);
+    });
+
     it("Step 7: jperp_recover_native — second call fails the solvency guard (idempotent)", async function () {
       if (!ready || !step1Passed) return this.skip();
       // Step 6 drained the executor to 0. A repeat recovery must fail the solvency check
