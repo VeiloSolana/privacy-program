@@ -1387,7 +1387,8 @@ pub struct OpenPosition<'info> {
 
     // ---- Programs ----
     pub token_program: Program<'info, Token>,
-    /// CHECK: Token-2022 program for Token-2022 token transfers
+    /// CHECK: address-constrained to the canonical Token-2022 program.
+    #[account(address = crate::positions::TOKEN_2022_PROGRAM_ID @ PrivacyError::MissingTokenProgram)]
     pub token_2022_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
@@ -1543,7 +1544,8 @@ pub struct ClosePosition<'info> {
 
     // ---- Programs ----
     pub token_program: Program<'info, Token>,
-    /// CHECK: Token-2022 program for Token-2022 token transfers
+    /// CHECK: address-constrained to the canonical Token-2022 program.
+    #[account(address = crate::positions::TOKEN_2022_PROGRAM_ID @ PrivacyError::MissingTokenProgram)]
     pub token_2022_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
@@ -1660,7 +1662,8 @@ pub struct ClosePositionToSol<'info> {
 
     // ---- Programs ----
     pub token_program: Program<'info, Token>,
-    /// CHECK: Token-2022 program for Token-2022 meme transfers
+    /// CHECK: address-constrained to the canonical Token-2022 program.
+    #[account(address = crate::positions::TOKEN_2022_PROGRAM_ID @ PrivacyError::MissingTokenProgram)]
     pub token_2022_program: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
@@ -1702,20 +1705,23 @@ pub struct MergePositions<'info> {
     )]
     pub output_tree: AccountLoader<'info, MerkleTreeAccount>,
 
-    /// First input PositionPDA — closed at end, rent → relayer
+    /// First input PositionPDA — closed at end, rent → relayer.
     #[account(
         mut,
         seeds = [b"position_pda_v1", position_pda_key_0.as_ref()],
         bump = position_pda_0.bump,
+        has_one = claimant @ PrivacyError::Unauthorized,
         close = relayer,
     )]
     pub position_pda_0: Box<Account<'info, PositionPDA>>,
 
-    /// Second input PositionPDA — closed at end, rent → relayer
+    /// Second input PositionPDA — closed at end, rent → relayer.
+    /// has_one = claimant: both input positions are owned by the co-signing claimant.
     #[account(
         mut,
         seeds = [b"position_pda_v1", position_pda_key_1.as_ref()],
         bump = position_pda_1.bump,
+        has_one = claimant @ PrivacyError::Unauthorized,
         close = relayer,
     )]
     pub position_pda_1: Box<Account<'info, PositionPDA>>,
@@ -1755,6 +1761,9 @@ pub struct MergePositions<'info> {
         bump = position_vault_record.bump,
     )]
     pub position_vault_record: Box<Account<'info, PositionVaultRecord>>,
+
+    /// Must co-sign to prove ownership of both input PositionPDAs.
+    pub claimant: Signer<'info>,
 
     #[account(mut)]
     pub relayer: Signer<'info>,
@@ -2402,9 +2411,6 @@ pub struct PhoenixReissueNotes<'info> {
 /// Pre-funding step for native SOL pool jperp opens.
 ///
 /// Moves `deposit_amount` lamports from the native-SOL vault directly into the executor's
-/// WSOL ATA (creating it in the process). Must be sent as the instruction immediately
-/// before `jperp_open_position` in the same transaction — the pairing guard enforces this.
-///
 /// Separating the lamport move from `jperp_open_position` is required because Solana's
 /// SVM checks lamport conservation at the end of each instruction; wrapping (sync_native)
 /// in the same instruction as the lamport spend creates an apparent imbalance.

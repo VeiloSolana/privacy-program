@@ -554,10 +554,10 @@ pub fn open_position<'info>(
     let is_jup_legs = swap_data.len() >= 8 && swap_data[0..8] == JUP_LEGS_BUFFER_SENTINEL;
 
     if source_is_native && is_jup_legs {
-        // fund_native_open_position(to_executor_native=true) already debited the vault and credited
-        // the executor PDA with native lamports (moved to the cosigner for Jupiter's wrap setup).
+        // The executor is pre-funded with exactly this leg's swap_amount; require an exact match
+        // so its balance equals the proof-committed amount before routing.
         require!(
-            ctx.accounts.executor.to_account_info().lamports() >= swap_amount,
+            ctx.accounts.executor.to_account_info().lamports() == swap_amount,
             PrivacyError::InvalidSwapParams
         );
     } else if source_is_native {
@@ -2294,6 +2294,7 @@ pub fn merge_positions<'info>(
     new_pda.leaf_index = merged_leaf_idx;
     new_pda.tree_id = output_tree_id;
     new_pda.is_active = true;
+    new_pda.claimant = ctx.accounts.claimant.key();
 
     // Two positions consumed, one created — net -1
     let vault_record = &mut ctx.accounts.position_vault_record;
@@ -2330,14 +2331,36 @@ pub fn fund_native_open_position(
             next_ix.data.len() >= 8 && next_ix.data[..8] == OPEN_POSITION_DISCRIMINATOR,
             PrivacyError::Unauthorized
         );
-        // Bind the funded executor to the paired open_position's (seed-checked) executor — else a
-        // relayer could credit an arbitrary account from the vault. Index 15 = executor in OpenPosition.
+        // The funded executor must match the paired open_position's (seed-checked) executor.
+        // Index 15 = executor in OpenPosition.
         const OPEN_POSITION_EXECUTOR_IDX: usize = 15;
         require!(
             next_ix.accounts.len() > OPEN_POSITION_EXECUTOR_IDX &&
                 next_ix.accounts[OPEN_POSITION_EXECUTOR_IDX].pubkey == ctx.accounts.executor.key(),
             PrivacyError::Unauthorized
         );
+
+        // Cross-check the paired open_position's source_mint and swap_amount against this call.
+        // Offsets into open_position's fixed-size Anchor args: 8 disc +2 +32(source_mint) +32 +32
+        // +2 +32 +32 +256(proof) +32 +32 +32 +56(swap_params) -> swap_amount at 580.
+        const OPEN_SOURCE_MINT_OFFSET: usize = 10;
+        const OPEN_SWAP_AMOUNT_OFFSET: usize = 580;
+        require!(
+            next_ix.data.len() >= OPEN_SWAP_AMOUNT_OFFSET + 8,
+            PrivacyError::Unauthorized
+        );
+        let open_source_mint = Pubkey::new_from_array(
+            next_ix.data[OPEN_SOURCE_MINT_OFFSET..OPEN_SOURCE_MINT_OFFSET + 32]
+                .try_into()
+                .unwrap()
+        );
+        require_keys_eq!(open_source_mint, source_mint, PrivacyError::InvalidMintAddress);
+        let open_swap_amount = u64::from_le_bytes(
+            next_ix.data[OPEN_SWAP_AMOUNT_OFFSET..OPEN_SWAP_AMOUNT_OFFSET + 8]
+                .try_into()
+                .unwrap()
+        );
+        require!(open_swap_amount == swap_amount, PrivacyError::InvalidSwapParams);
     }
     require!(!crate::is_token_mint(&source_mint), PrivacyError::InvalidMintAddress);
     require!(

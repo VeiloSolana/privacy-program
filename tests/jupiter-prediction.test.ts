@@ -55,7 +55,7 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const API_KEY = "jup_3d454d26a8d79cad377464154390770508006cdc5fba405abb4192a9f4f41298";
+const API_KEY = process.env.JUPITER_API_KEY ?? "";
 
 const WALLET_PATH = path.join(process.cwd(), "keys/prediction-wallet.json");
 const wallet = Keypair.fromSecretKey(

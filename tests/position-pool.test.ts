@@ -2167,7 +2167,7 @@ describe("Position Pool", () => {
     // that is (a) missing on localnet AND (b) a system-owned 0-data account on mainnet — i.e. a SOL fee
     // recipient, never an ephemeral cosigner ATA (absent on mainnet) or a data-carrying pool/vault
     // (those must still be cloned). Mirrors mainnet, where these recipients already exist rent-exempt.
-    const MAINNET_RPC = "https://mainnet.helius-rpc.com/?api-key=a3016be0-c6e1-441f-b8df-2310eb026b66";
+    const MAINNET_RPC = process.env.MAINNET_RPC_URL ?? "https://api.mainnet-beta.solana.com";
     async function fundMissingRouteAccounts(
       remaining: { pubkey: PublicKey; isWritable: boolean }[],
       exclude?: Set<string>,
