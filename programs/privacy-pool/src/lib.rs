@@ -4767,6 +4767,91 @@ pub mod privacy_pool {
             note_ciphers
         )
     }
+
+    /// Withdraw private notes to an ephemeral wallet whose key is committed in the proof.
+    #[inline(never)]
+    pub fn ephemeral_withdraw<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PredictionOpen<'info>>,
+        root: [u8; 32],
+        input_tree_id: u16,
+        output_tree_id: u16,
+        deposit_amount: u64,
+        ext_data_hash: [u8; 32],
+        mint_address: Pubkey,
+        claimant: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        withdrawal_id: [u8; 32],
+        deadline: i64,
+        ext_data: ExtData,
+        proof: zk::TransactionProof,
+        note_ciphers: Option<NoteCiphers>,
+        sol_funding: u64
+    ) -> Result<()> {
+        predictions::prediction_open(
+            ctx,
+            root,
+            input_tree_id,
+            output_tree_id,
+            deposit_amount,
+            ext_data_hash,
+            mint_address,
+            claimant,
+            input_nullifier_0,
+            input_nullifier_1,
+            output_commitment_0,
+            output_commitment_1,
+            withdrawal_id,
+            deadline,
+            ext_data,
+            proof,
+            note_ciphers,
+            sol_funding
+        )
+    }
+
+    /// Deposit proceeds from the ephemeral wallet back into the pool, minting fresh private
+    /// notes. The ephemeral keypair co-signs (it is the ATA authority).
+    #[inline(never)]
+    pub fn ephemeral_deposit<'info>(
+        ctx: Context<'_, '_, 'info, 'info, PredictionReissue<'info>>,
+        root: [u8; 32],
+        input_tree_id: u16,
+        output_tree_id: u16,
+        reissue_amount: u64,
+        ext_data_hash: [u8; 32],
+        mint_address: Pubkey,
+        input_nullifier_0: [u8; 32],
+        input_nullifier_1: [u8; 32],
+        output_commitment_0: [u8; 32],
+        output_commitment_1: [u8; 32],
+        withdrawal_id: [u8; 32],
+        deadline: i64,
+        ext_data: ExtData,
+        proof: zk::TransactionProof,
+        note_ciphers: Option<NoteCiphers>
+    ) -> Result<()> {
+        predictions::prediction_reissue(
+            ctx,
+            root,
+            input_tree_id,
+            output_tree_id,
+            reissue_amount,
+            ext_data_hash,
+            mint_address,
+            input_nullifier_0,
+            input_nullifier_1,
+            output_commitment_0,
+            output_commitment_1,
+            withdrawal_id,
+            deadline,
+            ext_data,
+            proof,
+            note_ciphers
+        )
+    }
 }
 
 // ---- Helper Functions ----
