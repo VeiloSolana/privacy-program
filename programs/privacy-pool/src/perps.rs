@@ -194,6 +194,21 @@ pub fn fund_native_jperp_open(
         PrivacyError::Unauthorized
     );
 
+    // Bind the funded amount to the paired open's proof-verified deposit_amount, else the
+    // debit here and the notes burned there are independent. Offset into jperp_open_position's
+    // fixed args: 8 disc + 32 root + 2 in_tree + 2 out_tree -> deposit_amount at 44.
+    const JPERP_OPEN_DEPOSIT_OFFSET: usize = 44;
+    require!(
+        next_ix.data.len() >= JPERP_OPEN_DEPOSIT_OFFSET + 8,
+        PrivacyError::Unauthorized
+    );
+    let open_deposit_amount = u64::from_le_bytes(
+        next_ix.data[JPERP_OPEN_DEPOSIT_OFFSET..JPERP_OPEN_DEPOSIT_OFFSET + 8]
+            .try_into()
+            .unwrap()
+    );
+    require!(open_deposit_amount == deposit_amount, PrivacyError::InvalidPublicAmount);
+
     require!(!crate::is_token_mint(&mint_address), PrivacyError::InvalidMintAddress);
     require!(
         ctx.accounts.source_config.is_relayer(&ctx.accounts.relayer.key()),
@@ -473,7 +488,7 @@ pub fn jperp_open_position<'info>(
         ))?;
         let wsol_data = deserialize_token_account(&ctx.accounts.executor_token_account.to_account_info())?;
         require!(
-            wsol_data.amount >= deposit_amount,
+            wsol_data.amount == deposit_amount,
             PrivacyError::InsufficientFundsForWithdrawal
         );
     } else {
