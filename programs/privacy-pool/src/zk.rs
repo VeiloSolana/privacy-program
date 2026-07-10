@@ -25,6 +25,18 @@ pub struct TransactionProof {
     pub proof_c: [u8; 64],
 }
 
+const FR_MODULUS_BE: [u8; 32] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+
+/// Require a public input to be a canonical field element (< Fr) so its byte
+/// encoding is unique and matches the value bound by the proof.
+fn require_canonical(bytes: &[u8; 32]) -> Result<()> {
+    require!(is_less_than(bytes, &FR_MODULUS_BE), PrivacyError::NonCanonicalFieldElement);
+    Ok(())
+}
+
 /// Reverse 32-byte chunks (for bn254 endianness dance).
 pub fn change_endianness(bytes: &[u8]) -> Vec<u8> {
     let mut vec = Vec::with_capacity(bytes.len());
@@ -158,6 +170,12 @@ pub fn verify_transaction_groth16(
     proof: TransactionProof,
     inputs: &TransactionPublicInputs
 ) -> Result<()> {
+    require_canonical(&inputs.root)?;
+    require_canonical(&inputs.input_nullifiers[0])?;
+    require_canonical(&inputs.input_nullifiers[1])?;
+    require_canonical(&inputs.output_commitments[0])?;
+    require_canonical(&inputs.output_commitments[1])?;
+
     // ----- 1. Build public input array (8 inputs) -----
     let mut public_inputs: [[u8; 32]; 8] = [[0u8; 32]; 8];
 
@@ -242,6 +260,12 @@ fn u64_to_field_be(value: u64) -> [u8; 32] {
 /// 10. swapAmount        - Amount being swapped (public for DEX CPI)
 #[inline(never)]
 pub fn verify_swap_transaction_groth16(proof: &SwapProof, inputs: &SwapPublicInputs) -> Result<()> {
+    require_canonical(&inputs.source_root)?;
+    require_canonical(&inputs.input_nullifiers[0])?;
+    require_canonical(&inputs.input_nullifiers[1])?;
+    require_canonical(&inputs.output_commitments[0])?;
+    require_canonical(&inputs.output_commitments[1])?;
+
     // ----- 1. Build public input array (10 inputs) -----
     let mut public_inputs = Box::new([[0u8; 32]; 10]);
 

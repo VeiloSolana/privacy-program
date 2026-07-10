@@ -5343,4 +5343,6 @@ pub enum PrivacyError {
     // Appended at the END so existing error numbers are not renumbered (relayer maps codes).
     #[msg("Jupiter Perps recover: relayer rent sweep exceeds JPERP_RECOVER_RENT_CAP")]
     JperpRecoverRentExceeded,
+    #[msg("Field element is not in canonical form (>= BN254 Fr)")]
+    NonCanonicalFieldElement,
 }
