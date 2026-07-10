@@ -1147,6 +1147,30 @@ pub fn jperp_reissue_notes(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
+    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_0,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[0],
+        ctx.bumps.nullifier_marker_0,
+        mint_address,
+        input_tree_id,
+    )?;
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_1,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[1],
+        ctx.bumps.nullifier_marker_1,
+        mint_address,
+        input_tree_id,
+    )?;
+
     let claimant_key = ctx.accounts.claimant.key();
     let executor_key = ctx.accounts.executor.key();
     let executor_bump = ctx.bumps.executor;
@@ -1421,6 +1445,30 @@ pub fn jperp_recover_native(
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
+
+    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_0,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[0],
+        ctx.bumps.nullifier_marker_0,
+        mint_address,
+        input_tree_id,
+    )?;
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_1,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[1],
+        ctx.bumps.nullifier_marker_1,
+        mint_address,
+        input_tree_id,
+    )?;
 
     // Cumulative audit counter (mirrors jperp_reissue_notes).
     let slot = &mut ctx.accounts.jperp_slot;

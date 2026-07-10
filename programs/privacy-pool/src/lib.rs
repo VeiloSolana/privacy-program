@@ -2768,7 +2768,7 @@ pub struct JperpReissueNotes<'info> {
     #[account(seeds = [b"global_config_v1"], bump = global_config.bump)]
     pub global_config: Box<Account<'info, GlobalConfig>>,
 
-    #[account(seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
+    #[account(mut, seeds = [b"privacy_vault_v3", mint_address.as_ref()], bump = config.vault_bump)]
     pub vault: Box<Account<'info, Vault>>,
 
     #[account(

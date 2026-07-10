@@ -372,6 +372,10 @@ pub fn phoenix_deposit_from_pool<'info>(
     require!(remaining.len() >= 13, PrivacyError::PhoenixInvalidAccounts);
     require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
     require_keys_eq!(remaining[7].key(), EMBER_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
+    // Pin EMBER/PhUSD system accounts so a relayer can't redirect deposited USDC.
+    require_keys_eq!(remaining[8].key(), PHUSD_MINT_AUTHORITY, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[9].key(), PHUSD_MINT, PrivacyError::PhoenixInvalidAccounts);
+    require_keys_eq!(remaining[11].key(), EMBER_USDC_RESERVE, PrivacyError::PhoenixInvalidAccounts);
 
     let _vault_key = ctx.accounts.vault.key();
     let vault_seeds: &[&[u8]] = &[b"privacy_vault_v3", mint_address.as_ref(), &[cfg.vault_bump]];
@@ -1815,6 +1819,30 @@ pub fn phoenix_reissue_notes(
         let input_tree = ctx.accounts.input_tree.load()?;
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
+
+    // ── 10b. Burn input nullifiers — deposit circuit permits real non-zero inputs ──
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_0,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[0],
+        ctx.bumps.nullifier_marker_0,
+        mint_address,
+        input_tree_id,
+    )?;
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_1,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[1],
+        ctx.bumps.nullifier_marker_1,
+        mint_address,
+        input_tree_id,
+    )?;
 
     // ── 11. Insert output commitments into output tree ────────────────────────
     let (leaf_index_0, leaf_index_1, new_root) = {

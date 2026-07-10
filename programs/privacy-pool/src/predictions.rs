@@ -396,6 +396,30 @@ pub fn prediction_reissue<'info>(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
+    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    require!(
+        input_nullifiers[0] != zero && input_nullifiers[1] != zero,
+        PrivacyError::ZeroNullifier
+    );
+    require!(!ctx.accounts.nullifier_marker_0.is_spent, PrivacyError::NullifierAlreadyUsed);
+    require!(!ctx.accounts.nullifier_marker_1.is_spent, PrivacyError::NullifierAlreadyUsed);
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_0,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[0],
+        ctx.bumps.nullifier_marker_0,
+        mint_address,
+        input_tree_id,
+    )?;
+    mark_nullifier_spent(
+        &mut ctx.accounts.nullifier_marker_1,
+        &mut ctx.accounts.nullifiers,
+        input_nullifiers[1],
+        ctx.bumps.nullifier_marker_1,
+        mint_address,
+        input_tree_id,
+    )?;
+
     // Slot reconciliation: require the slot PDA to actually exist (created only by
     // `prediction_open` — can't reissue a non-existent deposit) and bind the committed
     // claimant. No profit cap — see jperp_reissue_notes. Checked after the ZK proof so
