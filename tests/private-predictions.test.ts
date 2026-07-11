@@ -111,6 +111,18 @@ function tinyProof() {
   return { proofA: [] as number[], proofB: [] as number[], proofC: [] as number[] };
 }
 
+/**
+ * Random 32-byte value guaranteed canonical (< BN254 Fr modulus) by zeroing the
+ * top byte — Fr's high byte is 0x30, so any value with byte[0]=0 is < Fr.
+ * Use for proof public inputs (nullifiers/commitments) that must pass the
+ * program's require_canonical() check before reaching proof verification.
+ */
+function canonicalBytes32(): Uint8Array {
+  const b = randomBytes32();
+  b[0] = 0;
+  return b;
+}
+
 /** Short pubkey for compact logging. */
 function shortKey(k: PublicKey): string {
   const s = k.toBase58();
@@ -391,10 +403,12 @@ describe("Private Predictions (pool integration)", () => {
     let suite2Lut: import("@solana/web3.js").AddressLookupTableAccount;
 
     const ephemeral = Keypair.generate();
-    const n0 = randomBytes32();
-    const n1 = randomBytes32();
-    const c0 = randomBytes32();
-    const c1 = randomBytes32();
+    // Nullifiers/commitments are proof public inputs — keep them canonical (< Fr)
+    // so any path that reaches verify_transaction_groth16 clears require_canonical().
+    const n0 = canonicalBytes32();
+    const n1 = canonicalBytes32();
+    const c0 = canonicalBytes32();
+    const c1 = canonicalBytes32();
 
     before(async () => {
       suite2Lut = await buildAlt(provider, relayer, [
@@ -634,10 +648,12 @@ describe("Private Predictions (pool integration)", () => {
     } = {}) {
       const resolvedRelayer  = overrides.relayerKey ?? relayer;
       const resolvedClaimant = overrides.claimantKp ?? ephemeral;
-      const nm0 = overrides.n0 ?? randomBytes32();
-      const nm1 = overrides.n1 ?? randomBytes32();
-      const rc0 = overrides.oc0 ?? randomBytes32();
-      const rc1 = overrides.oc1 ?? randomBytes32();
+      // Default to canonical (< Fr) proof public inputs so the ZK layer's
+      // require_canonical() gate is cleared unless a test overrides on purpose.
+      const nm0 = overrides.n0 ?? canonicalBytes32();
+      const nm1 = overrides.n1 ?? canonicalBytes32();
+      const rc0 = overrides.oc0 ?? canonicalBytes32();
+      const rc1 = overrides.oc1 ?? canonicalBytes32();
       const withdrawalId = overrides.withdrawalId ?? new Uint8Array(32).fill(0xcc);
       const [predictionSlot] = PublicKey.findProgramAddressSync(
         [Buffer.from("prediction_slot_v1"), testMint.toBuffer(), Buffer.from(withdrawalId)],
@@ -830,7 +846,9 @@ describe("Private Predictions (pool integration)", () => {
       // The handler validates ephemeral_token_account == get_associated_token_address(claimant, mint)
       // at step 8, AFTER ZK proof at step 6. With tinyProof() the ZK check always fires first.
       // This test confirms the order: passing a wrong ATA does not bypass ZK — it still
-      // hits InvalidProof, which is the primary guard in production.
+      // hits InvalidProof, which is the primary guard in production. (buildReissueIx
+      // defaults to canonical public inputs, so the flow clears require_canonical()
+      // and reaches proof verification rather than NonCanonicalFieldElement.)
       const ix = await buildReissueIx({
         ephemeralTokenAccount: vaultTokenAccount, // wrong — not claimant's ATA
       });

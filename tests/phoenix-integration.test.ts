@@ -385,6 +385,10 @@ async function expectTxError(
 // ─── Suite ───────────────────────────────────────────────────────────────────
 
 describe("Phoenix Eternal Integration", () => {
+  // Signable ephemeral claimant for the validation-error suites (replaces the old
+  // unsignable SystemProgram.programId placeholder now that operational Phoenix
+  // instructions require the claimant to co-sign).
+  const valErrClaimant = Keypair.generate();
   const provider = makeProvider();
   setProvider(provider);
   const wallet = provider.wallet as Wallet;
@@ -597,7 +601,7 @@ describe("Phoenix Eternal Integration", () => {
         [
           Buffer.from("phoenix_executor"),
           testMint.toBuffer(),
-          SystemProgram.programId.toBuffer(),
+          valErrClaimant.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -605,7 +609,7 @@ describe("Phoenix Eternal Integration", () => {
         [
           Buffer.from("phoenix_slot_v1"),
           testMint.toBuffer(),
-          SystemProgram.programId.toBuffer(), // claimant (non-Phoenix flow: zero key)
+          valErrClaimant.publicKey.toBuffer(), // claimant (non-Phoenix flow: zero key)
           Buffer.alloc(32, 0), // withdrawal_id
         ],
         program.programId,
@@ -642,7 +646,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: relayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
-        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
+        claimant: valErrClaimant.publicKey, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -669,7 +673,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000), // deposit_amount
             Array.from(extDataHash), // ext_data_hash
             testMint, // mint_address ← NOT USDC, triggers error
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
+            valErrClaimant.publicKey, // claimant (dummy — error fires before claimant check)
             Array.from(nullifier0),
             Array.from(nullifier1),
             Array.from(commitment0),
@@ -733,18 +737,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             testMint,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
             null,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: stranger.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([stranger])
+          .signers([stranger, valErrClaimant])
           .rpc(),
         "RelayerNotAllowed",
       );
@@ -757,18 +762,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             testMint, // non-USDC
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
             null,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([relayer])
+          .signers([relayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidPool",
       );
@@ -779,15 +785,16 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrders(testMint, SystemProgram.programId)
+          .phoenixCancelOrders(testMint, valErrClaimant.publicKey)
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([relayer])
+          .signers([relayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidPool",
       );
@@ -803,18 +810,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             testMint,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             [new BN(70000)],
             [new BN(1)],
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: stranger.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([stranger])
+          .signers([stranger, valErrClaimant])
           .rpc(),
         "RelayerNotAllowed",
       );
@@ -829,18 +837,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             testMint,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             [new BN(70000)],
             [new BN(1)],
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([relayer])
+          .signers([relayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidPool",
       );
@@ -858,17 +867,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             testMint,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: stranger.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([stranger])
+          .signers([stranger, valErrClaimant])
           .rpc(),
         "RelayerNotAllowed",
       );
@@ -883,17 +893,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             testMint, // non-USDC
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config,
             executor: testMintExecutor,
             relayer: relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([relayer])
+          .signers([relayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidPool",
       );
@@ -906,7 +917,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixQueueWithdraw(
             testMint,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 0)),
           )
@@ -983,7 +994,7 @@ describe("Phoenix Eternal Integration", () => {
         [
           Buffer.from("phoenix_executor"),
           USDC_MAINNET.toBuffer(),
-          SystemProgram.programId.toBuffer(),
+          valErrClaimant.publicKey.toBuffer(),
         ],
         program.programId,
       );
@@ -992,7 +1003,7 @@ describe("Phoenix Eternal Integration", () => {
         [
           Buffer.from("phoenix_slot_v1"),
           USDC_MAINNET.toBuffer(),
-          SystemProgram.programId.toBuffer(), // claimant (non-Phoenix flow: zero key)
+          valErrClaimant.publicKey.toBuffer(), // claimant (non-Phoenix flow: zero key)
           Buffer.alloc(32, 255), // withdrawal_id
         ],
         program.programId,
@@ -1093,18 +1104,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
             null,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(3, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidAccounts",
       );
@@ -1120,18 +1132,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
             null,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, SystemProgram.programId))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "InvalidSwapProgram",
       );
@@ -1148,18 +1161,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixPlaceOrder(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             badDisc,
             null,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidOrderData",
       );
@@ -1174,15 +1188,16 @@ describe("Phoenix Eternal Integration", () => {
       const marketDisc = Buffer.from(phoenixDisc("place_market_order"));
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, marketDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, valErrClaimant.publicKey, marketDisc)
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc();
         // If Phoenix is deployed and the call somehow succeeds, that's also fine
       } catch (e: any) {
@@ -1214,15 +1229,16 @@ describe("Phoenix Eternal Integration", () => {
       const limitDisc = Buffer.from(phoenixDisc("place_limit_order"));
       try {
         await (program.methods as any)
-          .phoenixPlaceOrder(USDC_MAINNET, SystemProgram.programId, limitDisc)
+          .phoenixPlaceOrder(USDC_MAINNET, valErrClaimant.publicKey, limitDisc)
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc();
       } catch (e: any) {
         const logs: string[] =
@@ -1253,15 +1269,16 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixCancelOrders(USDC_MAINNET, SystemProgram.programId)
+          .phoenixCancelOrders(USDC_MAINNET, valErrClaimant.publicKey)
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, SystemProgram.programId))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "InvalidSwapProgram",
       );
@@ -1276,18 +1293,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             [],
             [],
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidOrderData",
       );
@@ -1302,18 +1320,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             [new BN(70000), new BN(80000)],
             [new BN(1)], // length mismatch
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidOrderData",
       );
@@ -1330,18 +1349,19 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixCancelOrdersById(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             [new BN(70000)],
             [new BN(1)],
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, SystemProgram.programId))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "InvalidSwapProgram",
       );
@@ -1361,17 +1381,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: stranger.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([stranger])
+          .signers([stranger, valErrClaimant])
           .rpc(),
         "RelayerNotAllowed",
       );
@@ -1386,17 +1407,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(3, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidAccounts",
       );
@@ -1413,17 +1435,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             Buffer.from(phoenixDisc("place_market_order")),
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, SystemProgram.programId))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "InvalidSwapProgram",
       );
@@ -1440,17 +1463,18 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             limitDisc,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidOrderData",
       );
@@ -1464,15 +1488,16 @@ describe("Phoenix Eternal Integration", () => {
       await expectTxError(
         provider,
         (program.methods as any)
-          .phoenixClosePosition(USDC_MAINNET, SystemProgram.programId, badDisc)
+          .phoenixClosePosition(USDC_MAINNET, valErrClaimant.publicKey, badDisc)
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidOrderData",
       );
@@ -1489,17 +1514,18 @@ describe("Phoenix Eternal Integration", () => {
         await (program.methods as any)
           .phoenixClosePosition(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             marketDisc,
           )
           .accounts({
+            claimantSigner: valErrClaimant.publicKey,
             config: usdcConfig,
             executor: usdcExecutor,
             relayer: usdcRelayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(dummyRemainingAccounts(9, PHOENIX_PROGRAM_ID))
-          .signers([usdcRelayer])
+          .signers([usdcRelayer, valErrClaimant])
           .rpc();
       } catch (e: any) {
         const logs: string[] =
@@ -1542,7 +1568,7 @@ describe("Phoenix Eternal Integration", () => {
         (program.methods as any)
           .phoenixQueueWithdraw(
             USDC_MAINNET,
-            SystemProgram.programId,
+            valErrClaimant.publicKey,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 255)),
           )
@@ -1577,7 +1603,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: stranger.publicKey,
         fee: new BN(0),
         refund: new BN(0),
-        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
+        claimant: valErrClaimant.publicKey, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
       const n0 = randomBytes32();
@@ -1596,7 +1622,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000),
             Array.from(extDataHash),
             USDC_MAINNET,
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
+            valErrClaimant.publicKey, // claimant (dummy — error fires before claimant check)
             Array.from(n0),
             Array.from(n1),
             Array.from(randomBytes32()),
@@ -1664,7 +1690,7 @@ describe("Phoenix Eternal Integration", () => {
         relayer: usdcRelayer.publicKey,
         fee: new BN(0),
         refund: new BN(0),
-        claimant: SystemProgram.programId, // non-Phoenix flow: zero key
+        claimant: valErrClaimant.publicKey, // non-Phoenix flow: zero key
       };
       const extDataHash = computeExtDataHash(poseidon, extData);
 
@@ -1684,7 +1710,7 @@ describe("Phoenix Eternal Integration", () => {
             new BN(1_000_000),
             Array.from(extDataHash),
             USDC_MAINNET,
-            SystemProgram.programId, // claimant (dummy — error fires before claimant check)
+            valErrClaimant.publicKey, // claimant (dummy — error fires before claimant check)
             Array.from(n0),
             Array.from(n1),
             Array.from(randomBytes32()),
@@ -2136,6 +2162,7 @@ describe("Phoenix Eternal Integration", () => {
         mint: USDC_MAINNET,
         poolConfig: s4UsdcConfig,
         claimant: s4ClaimKey.publicKey,
+        claimantKeypair: s4ClaimKey,
       });
       console.log("   Suite 4 ready ✅");
     });
@@ -2297,13 +2324,22 @@ describe("Phoenix Eternal Integration", () => {
         // TraderCapabilityUpdate: vec len=6 (u32 LE), then six {target(u8), enable(u8)} pairs.
         const disc = Buffer.from([191, 72, 45, 190, 214, 250, 182, 213]); // sha256("global:set_trader_capability")[0..8]
         const params = Buffer.from([
-          6, 0, 0, 0, // vec len = 6
-          0, 1, // PlaceLimitOrder
-          1, 1, // PlaceMarketOrder
-          2, 1, // RiskIncreasingTrade
-          3, 1, // RiskReducingTrade
-          4, 1, // DepositCollateral
-          5, 1, // WithdrawCollateral
+          6,
+          0,
+          0,
+          0, // vec len = 6
+          0,
+          1, // PlaceLimitOrder
+          1,
+          1, // PlaceMarketOrder
+          2,
+          1, // RiskIncreasingTrade
+          3,
+          1, // RiskReducingTrade
+          4,
+          1, // DepositCollateral
+          5,
+          1, // WithdrawCollateral
         ]);
         const ixData = Buffer.concat([disc, params]);
 
@@ -2517,6 +2553,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, marketDisc)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2529,7 +2566,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -2580,6 +2617,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2592,7 +2630,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -2667,6 +2705,7 @@ describe("Phoenix Eternal Integration", () => {
             100, // sizePercent
           )
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2679,7 +2718,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -2755,6 +2794,7 @@ describe("Phoenix Eternal Integration", () => {
             true, // disableSecond (cancel greaterTrigger/TP leg)
           )
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2767,7 +2807,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -2865,6 +2905,7 @@ describe("Phoenix Eternal Integration", () => {
             0, // lessOrderKind (IOC)
           )
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2877,7 +2918,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -2944,6 +2985,7 @@ describe("Phoenix Eternal Integration", () => {
         const sig = await (program.methods as any)
           .phoenixClosePosition(USDC_MAINNET, s4ClaimKey.publicKey, marketDisc)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -2956,7 +2998,7 @@ describe("Phoenix Eternal Integration", () => {
               traderPda,
             ),
           )
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(sig, {
@@ -3448,11 +3490,14 @@ describe("Phoenix Eternal Integration", () => {
           NATIVE_MINT, // WSOL input
           USDC_MAINNET, // USDC output
           Number(e2eNoteAmount),
-          500, // 5% slippage — gives headroom for the frozen snapshot price
-          false, // onlyDirectRoutes
-          "Meteora", // Jupiter relabeled the cloned Meteora Dynamic AMM pools from "BisonFi" to
-                     // "Meteora" (pool 5yuefg, program Eo7W). "BisonFi" now routes through a new
-                     // BiSoNH program whose pool-state invariants break on localnet (outputs ~0 USDC).
+          5000, // 50% slippage — matches the proven SOL→USDC config in position-pool.test.ts:623.
+          // The cloned Meteora pool's frozen reserves drift far from the live quote; only a
+          // wide tolerance clears it. Program economics still enforced by proof-bound dest_amount.
+          true, // onlyDirectRoutes — pins the single cloned direct WSOL→USDC Meteora pool (no
+          // multi-hop into un-cloned programs → "Unsupported program id").
+          "Raydium, Raydium CLMM, Raydium CPMM", // cloned Raydium AMM v4 SOL/USDC pool (58oQChx4… + program 675kPX9…, both in
+          // Anchor.toml, swapped by raydium-amm-swap.test.ts). AMM v4 is Jupiter's oldest
+          // supported AMM, so no "Unsupported program id"; Meteora isn't cloned in this config.
         );
       } catch (e: any) {
         console.log(
@@ -4328,6 +4373,7 @@ describe("Phoenix Eternal Integration", () => {
         await (program.methods as any)
           .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, orderData)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -4343,7 +4389,7 @@ describe("Phoenix Eternal Integration", () => {
           .preInstructions([
             ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
           ])
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
         console.log(
           "   ✅ e2e place_market_order: CPI succeeded — order placed on Phoenix Eternal",
@@ -4439,6 +4485,7 @@ describe("Phoenix Eternal Integration", () => {
         placeSig = await (program.methods as any)
           .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, limitOrderData)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -4448,7 +4495,7 @@ describe("Phoenix Eternal Integration", () => {
           .preInstructions([
             ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
           ])
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         orderPlaced = true;
@@ -4526,13 +4573,14 @@ describe("Phoenix Eternal Integration", () => {
         const cancelSig = await (program.methods as any)
           .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(remainingAccts)
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(cancelSig, {
@@ -4630,6 +4678,7 @@ describe("Phoenix Eternal Integration", () => {
         await (program.methods as any)
           .phoenixPlaceOrder(USDC_MAINNET, s4ClaimKey.publicKey, limitOrderData)
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -4639,7 +4688,7 @@ describe("Phoenix Eternal Integration", () => {
           .preInstructions([
             ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
           ])
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
         orderPlaced = true;
         console.log("   ✅ PostOnly bid placed at priceInTicks=1000");
@@ -4693,6 +4742,7 @@ describe("Phoenix Eternal Integration", () => {
             [new BN(inferredOrderSeq.toString())],
           )
           .accounts({
+            claimantSigner: s4ClaimKey.publicKey,
             config: s4UsdcConfig,
             executor: executorPda,
             relayer: s4Relayer.publicKey,
@@ -4702,7 +4752,7 @@ describe("Phoenix Eternal Integration", () => {
           .preInstructions([
             ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
           ])
-          .signers([s4Relayer])
+          .signers([s4Relayer, s4ClaimKey])
           .rpc();
 
         const tx = await provider.connection.getTransaction(cancelSig, {
@@ -4735,13 +4785,14 @@ describe("Phoenix Eternal Integration", () => {
           await (program.methods as any)
             .phoenixCancelOrders(USDC_MAINNET, s4ClaimKey.publicKey)
             .accounts({
+              claimantSigner: s4ClaimKey.publicKey,
               config: s4UsdcConfig,
               executor: executorPda,
               relayer: s4Relayer.publicKey,
               systemProgram: SystemProgram.programId,
             })
             .remainingAccounts(remainingAccts)
-            .signers([s4Relayer])
+            .signers([s4Relayer, s4ClaimKey])
             .rpc();
           console.log("   🧹 Cleaned up with cancelAll after cancel_by_id");
         } catch {
@@ -5250,7 +5301,7 @@ describe("Phoenix Eternal Integration", () => {
           claimant: s4ClaimKey.publicKey, // NEW: must match slot.claimant_pubkey
           systemProgram: SystemProgram.programId,
         })
-        .signers([s4Relayer, s4ClaimKey]) // NEW: s4ClaimKey must co-sign
+        .signers([s4Relayer]) // NEW: s4ClaimKey must co-sign
         .instruction();
 
       // ── 7. Create ALT (ZK proof data exceeds legacy 1232-byte tx limit) ──
@@ -6413,7 +6464,7 @@ describe("Phoenix Eternal Integration", () => {
             claimant: s4ClaimKey.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .signers([s4Relayer, s4ClaimKey])
+          .signers([s4Relayer])
           .instruction();
 
         // ── 7. Send via ALT (ZK proof exceeds legacy 1232-byte tx limit) ─────
@@ -8110,7 +8161,7 @@ describe("Phoenix Eternal Integration", () => {
             claimant: s4ClaimKey.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .signers([s4Relayer, s4ClaimKey])
+          .signers([s4Relayer])
           .instruction();
 
         // ── Send via Address Lookup Table (ZK proof exceeds 1232-byte limit) ─
@@ -8500,6 +8551,7 @@ describe("Phoenix Eternal Integration", () => {
           mint: USDC_MAINNET,
           poolConfig: s4UsdcConfig,
           claimant: s4ClaimKey.publicKey,
+          claimantKeypair: s4ClaimKey,
           traderPdaOverride: isolatedTraderPda,
         });
 
@@ -9519,7 +9571,7 @@ describe("Phoenix Eternal Integration", () => {
             claimant: s4ClaimKey.publicKey,
             systemProgram: SystemProgram.programId,
           })
-          .signers([s4Relayer, s4ClaimKey])
+          .signers([s4Relayer])
           .instruction();
 
         const slot = await provider.connection.getSlot("finalized");
@@ -9751,6 +9803,7 @@ describe("Phoenix Eternal Integration", () => {
           mint: USDC_MAINNET,
           poolConfig: s4UsdcConfig,
           claimant: s4ClaimKey.publicKey,
+          claimantKeypair: s4ClaimKey,
           traderPdaOverride: s9IsolatedPda,
         });
 

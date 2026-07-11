@@ -705,6 +705,11 @@ export interface PositionsManagerConfig {
    * Derive deterministically from `walletMasterSeed + "veilo-phoenix" + withdrawalId`.
    */
   claimant: PublicKey;
+  /**
+   * Ephemeral claimant KEYPAIR — must co-sign every operational Phoenix instruction
+   * (place/cancel/close/conditional). Its public key must equal `claimant`.
+   */
+  claimantKeypair?: Keypair;
   /** Compute unit budget per transaction (default 400 000). */
   computeUnitLimit?: number;
   /**
@@ -739,6 +744,7 @@ export class PositionsManager {
 
   private readonly program: any;
   private readonly relayer: Keypair;
+  private readonly claimantKp?: Keypair;
   private readonly cu: number;
 
   constructor(cfg: PositionsManagerConfig) {
@@ -747,6 +753,7 @@ export class PositionsManager {
     this.mint = cfg.mint;
     this.poolConfig = cfg.poolConfig;
     this.claimant = cfg.claimant;
+    this.claimantKp = cfg.claimantKeypair;
     this.cu = cfg.computeUnitLimit ?? 400_000;
     this.executorPda = deriveExecutorPda(
       cfg.program.programId,
@@ -906,6 +913,7 @@ export class PositionsManager {
         new BN(opts.amountPhUsd.toString()),
       )
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -921,7 +929,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -963,6 +971,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixPlaceOrder(this.mint, this.claimant, pkt, transferAmount)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -972,7 +981,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1020,6 +1029,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixPlaceOrder(this.mint, this.claimant, pkt, transferAmount)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1029,7 +1039,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1054,6 +1064,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixClosePosition(this.mint, this.claimant, pkt)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1065,7 +1076,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1143,6 +1154,7 @@ export class PositionsManager {
     const ORDER_KIND_IOC = 1; // immediate-or-cancel with slippage — used for SL
 
     const baseAccounts = {
+      claimantSigner: this.claimant,
       config: this.poolConfig,
       executor: this.executorPda,
       relayer: this.relayer.publicKey,
@@ -1219,7 +1231,7 @@ export class PositionsManager {
       instructions: ixs,
     }).compileToV0Message();
     const tx = new VersionedTransaction(msg);
-    tx.sign([this.relayer]);
+    tx.sign([this.relayer, this.claimantKp!]);
     const sig = await conn.sendTransaction(tx, { skipPreflight: false });
     await conn.confirmTransaction(sig, "confirmed");
     return sig;
@@ -1235,6 +1247,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixCancelOrders(this.mint, this.claimant)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1246,7 +1259,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1423,6 +1436,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixCreateConditionalOrdersAccount(this.mint, this.claimant, capacity)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1437,7 +1451,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1456,6 +1470,7 @@ export class PositionsManager {
     return this.program.methods
       .phoenixCreateConditionalOrdersAccount(this.mint, this.claimant, 8)
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1543,6 +1558,7 @@ export class PositionsManager {
         sizePercent,
       )
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1556,7 +1572,7 @@ export class PositionsManager {
         ),
       )
       .preInstructions(preInstructions)
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 
@@ -1586,6 +1602,7 @@ export class PositionsManager {
         disableSecond,
       )
       .accounts({
+        claimantSigner: this.claimant,
         config: this.poolConfig,
         executor: this.executorPda,
         relayer: this.relayer.publicKey,
@@ -1601,7 +1618,7 @@ export class PositionsManager {
       .preInstructions([
         ComputeBudgetProgram.setComputeUnitLimit({ units: this.cu }),
       ])
-      .signers([this.relayer])
+      .signers([this.relayer, this.claimantKp!])
       .rpc();
   }
 }
