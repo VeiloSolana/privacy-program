@@ -194,9 +194,9 @@ pub fn fund_native_jperp_open(
         PrivacyError::Unauthorized
     );
 
-    // Bind the funded amount to the paired open's proof-verified deposit_amount, else the
-    // debit here and the notes burned there are independent. Offset into jperp_open_position's
-    // fixed args: 8 disc + 32 root + 2 in_tree + 2 out_tree -> deposit_amount at 44.
+    // Bind the funded amount to the paired open's deposit_amount so the two always match.
+    // Offset into jperp_open_position's fixed args:
+    // 8 disc + 32 root + 2 in_tree + 2 out_tree -> deposit_amount at 44.
     const JPERP_OPEN_DEPOSIT_OFFSET: usize = 44;
     require!(
         next_ix.data.len() >= JPERP_OPEN_DEPOSIT_OFFSET + 8,
@@ -347,7 +347,7 @@ pub fn jperp_open_position<'info>(
     }
 
     // Relayer fee upper-bound (mirrors transact's max_fee cap): without it a relayer could
-    // set ext_data.fee to drain the vault. The fee is bound into the proof below. fee == 0 ok.
+    // set ext_data.fee too high. The fee is bound into the proof below. fee == 0 ok.
     let max_fee_u128 = (deposit_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -1096,9 +1096,8 @@ pub fn jperp_reissue_notes(
         PrivacyError::InvalidClaimant
     );
 
-    // No profit cap: each reissue is backed by the executor-ATA→vault transfer (below) +
-    // matching TVL bump, so winning positions reissue fully. The ATA balance check blocks
-    // double-mint; `slot.reissued` is now just a cumulative audit counter.
+    // Each reissue is backed by the executor-ATA→vault transfer (below) + matching TVL bump,
+    // so winning positions reissue fully. `slot.reissued` is now just a cumulative audit counter.
     let slot = &mut ctx.accounts.jperp_slot;
     slot.reissued = slot.reissued
         .checked_add(reissue_amount)
@@ -1132,6 +1131,7 @@ pub fn jperp_reissue_notes(
         .checked_add(ext_data.fee)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
+    require!(reissue_amount <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: reissue_amount as i64,
@@ -1147,7 +1147,7 @@ pub fn jperp_reissue_notes(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    // Consume the input nullifiers so each input note is spent exactly once.
     require!(
         input_nullifiers[0] != zero && input_nullifiers[1] != zero,
         PrivacyError::ZeroNullifier
@@ -1431,6 +1431,7 @@ pub fn jperp_recover_native(
     require!(computed_ext_hash == ext_data_hash, PrivacyError::InvalidExtData);
 
     // Deposit circuit: public_amount = +recover_amount binds the minted note to the collateral.
+    require!(recover_amount <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: recover_amount as i64,
@@ -1446,7 +1447,7 @@ pub fn jperp_recover_native(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    // Consume the input nullifiers so each input note is spent exactly once.
     require!(
         input_nullifiers[0] != zero && input_nullifiers[1] != zero,
         PrivacyError::ZeroNullifier

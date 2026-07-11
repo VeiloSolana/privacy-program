@@ -227,8 +227,8 @@ pub fn phoenix_deposit_from_pool<'info>(
     // ── 7a. Relayer fee upper-bound (mirrors transact's max_fee cap) ──────────
     // The fee is paid from the vault on top of deposit_amount and is bound into
     // the ZK proof below (public_amount covers deposit_amount + fee). Without an
-    // upper cap, a relayer could set ext_data.fee to drain the entire vault. The
-    // fee is capped at fee_bps (+ margin) of deposit_amount, exactly as a normal
+    // upper cap, a relayer could set ext_data.fee too high. The fee is capped at
+    // fee_bps (+ margin) of deposit_amount, exactly as a normal
     // withdrawal. fee == 0 remains valid (no minimum is imposed here).
     let max_fee_u128 = (deposit_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
@@ -372,7 +372,7 @@ pub fn phoenix_deposit_from_pool<'info>(
     require!(remaining.len() >= 13, PrivacyError::PhoenixInvalidAccounts);
     require_keys_eq!(remaining[0].key(), PHOENIX_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
     require_keys_eq!(remaining[7].key(), EMBER_PROGRAM_ID, PrivacyError::InvalidSwapProgram);
-    // Pin EMBER/PhUSD system accounts so a relayer can't redirect deposited USDC.
+    // Pin the EMBER/PhUSD system accounts to their canonical addresses.
     require_keys_eq!(remaining[8].key(), PHUSD_MINT_AUTHORITY, PrivacyError::PhoenixInvalidAccounts);
     require_keys_eq!(remaining[9].key(), PHUSD_MINT, PrivacyError::PhoenixInvalidAccounts);
     require_keys_eq!(remaining[11].key(), EMBER_USDC_RESERVE, PrivacyError::PhoenixInvalidAccounts);
@@ -1777,7 +1777,7 @@ pub fn phoenix_reissue_notes(
 
     // ── 8. Phoenix pending reissue — only proceeds from phoenix_ember_unwrap can be minted ──
     // This binds the reissued amount to the exact USDC that Phoenix returned.
-    // Prevents double-minting the same proceeds and blocks stale repeat calls.
+    // Binds the reissued amount to the returned proceeds and blocks stale repeat calls.
     let pending = &mut ctx.accounts.pending_reissue;
     pending.bump = ctx.bumps.pending_reissue;
     require_keys_eq!(
@@ -1804,6 +1804,7 @@ pub fn phoenix_reissue_notes(
     // ── 9. ZK proof verification ──────────────────────────────────────────────
     // public_amount is POSITIVE: circuit constraint is sumIns + pubAmt = sumOuts.
     // With dummy zero-value input notes, the two output notes must sum to `amount`.
+    require!(amount <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: amount as i64,
@@ -1820,7 +1821,7 @@ pub fn phoenix_reissue_notes(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // ── 10b. Burn input nullifiers — deposit circuit permits real non-zero inputs ──
+    // ── 10b. Consume the input nullifiers (each spent exactly once) ──
     require!(
         input_nullifiers[0] != zero && input_nullifiers[1] != zero,
         PrivacyError::ZeroNullifier

@@ -48,8 +48,7 @@ pub struct SwapParams {
     pub deadline: i64,
     /// Amount of destination tokens the user commits to receiving.
     /// Included in swapParamsHash — cryptographically binds the ZK circuit's
-    /// destAmount to the on-chain vault deposit, preventing an attacker from
-    /// encoding an inflated destination note while receiving a tiny swap output.
+    /// destAmount to the on-chain vault deposit.
     pub dest_amount: u64,
     /// SHA-256 hash of the raw swap instruction data (swap_data).
     /// Binds the exact DEX instruction bytes into the ZK proof so the relayer

@@ -138,9 +138,8 @@ pub fn prediction_open<'info>(
         PrivacyError::InsufficientFundsForWithdrawal
     );
 
-    // Relayer fee upper-bound (mirrors transact's max_fee cap): without it a relayer
-    // could set ext_data.fee to drain the vault, since the fee is paid from the vault
-    // on top of deposit_amount. Capped at fee_bps (+ margin); fee == 0 stays valid.
+    // Relayer fee upper-bound (mirrors transact's max_fee cap): the fee is paid from the
+    // vault on top of deposit_amount. Capped at fee_bps (+ margin); fee == 0 stays valid.
     let max_fee_u128 = (deposit_amount as u128)
         .checked_mul(cfg.fee_bps as u128)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))? / 10_000;
@@ -381,6 +380,7 @@ pub fn prediction_reissue<'info>(
         .checked_add(ext_data.fee)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
 
+    require!(reissue_amount <= i64::MAX as u64, PrivacyError::ArithmeticOverflow);
     let public_inputs = TransactionPublicInputs {
         root,
         public_amount: reissue_amount as i64,
@@ -396,7 +396,7 @@ pub fn prediction_reissue<'info>(
         require!(MerkleTree::is_known_root(&*input_tree, root), PrivacyError::UnknownRoot);
     }
 
-    // General deposit circuit permits real non-zero inputs, so burn them to prevent unbacked mint.
+    // Consume the input nullifiers so each input note is spent exactly once.
     require!(
         input_nullifiers[0] != zero && input_nullifiers[1] != zero,
         PrivacyError::ZeroNullifier

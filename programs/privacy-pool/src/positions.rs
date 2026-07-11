@@ -872,6 +872,9 @@ pub fn open_position<'info>(
     )?;
 
     let executor_ai = ctx.accounts.executor.to_account_info();
+    let vault_balance_before = read_token_amount_unchecked(
+        &ctx.accounts.position_vault_ata.to_account_info()
+    )?;
     if dest_is_t22 {
         token_2022_transfer_checked(
             &ctx.accounts.executor_dest_token.to_account_info(),
@@ -897,6 +900,17 @@ pub fn open_position<'info>(
             vault_amount
         )?;
     }
+    // Credit the amount the vault actually received (may differ from the amount sent) and
+    // require it to cover the note's dest_amount.
+    let vault_received = read_token_amount_unchecked(
+        &ctx.accounts.position_vault_ata.to_account_info()
+    )?
+        .checked_sub(vault_balance_before)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
+    require!(
+        vault_received >= swap_params.dest_amount,
+        PrivacyError::InsufficientFundsForWithdrawal
+    );
 
     if relayer_fee > 0 {
         let expected_relayer_ata = get_ata_address(
@@ -945,7 +959,7 @@ pub fn open_position<'info>(
         vault_record.is_token_2022 = dest_is_t22;
     }
     vault_record.total_balance = vault_record.total_balance
-        .checked_add(vault_amount)
+        .checked_add(vault_received)
         .ok_or(PrivacyError::ArithmeticOverflow)?;
     vault_record.position_count = vault_record.position_count
         .checked_add(1)
@@ -1902,7 +1916,7 @@ fn execute_dex_swap<'info>(
     // indices in the relayer-provided list, from the live Jupiter V6 IDL. Every index sits BEFORE any
     // optional account in its variant, so positions are stable. Substituting auth/source/dest with
     // our executor + ATAs forces the swap to authorize via our executor and move funds only through
-    // our ATAs (a relayer can't redirect). v1 route/exact_out place their mints after optional
+    // our ATAs (funds move only through our accounts). v1 route/exact_out place their mints after optional
     // accounts (unstable index) so mints aren't validated there — the substituted ATAs already pin
     // the mints. The v2 variants carry no preceding optionals, so their mints are validated too.
     let disc: [u8; 8] = if swap_data.len() >= 8 {
@@ -2219,7 +2233,7 @@ pub fn merge_positions<'info>(
     require!(out_cap.saturating_sub(out_tree.next_index) >= 2, PrivacyError::MerkleTreeFull);
     drop(out_tree);
 
-    // Double-spend protection (Anchor init constraint already enforces uniqueness,
+    // Reuse protection (Anchor init constraint already enforces uniqueness,
     // but check is_spent for belt-and-suspenders)
     require!(
         !ctx.accounts.position_nullifier_marker_0.is_spent,
