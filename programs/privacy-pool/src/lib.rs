@@ -2137,6 +2137,10 @@ pub struct PhoenixQueueWithdraw<'info> {
     )]
     pub phoenix_slot: UncheckedAccount<'info>,
 
+    /// Claimant co-signer — only the depositor may raise the cap / drive the withdrawal.
+    #[account(constraint = claimant_signer.key() == claimant @ PrivacyError::InvalidClaimant)]
+    pub claimant_signer: Signer<'info>,
+
     #[account(mut)]
     pub relayer: Signer<'info>,
 

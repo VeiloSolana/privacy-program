@@ -1136,8 +1136,7 @@ pub fn phoenix_queue_withdraw<'info>(
         let mut slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
         require_keys_eq!(slot.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
 
-        // Bump the cap for trading PnL above the deposit; Phoenix's withdraw_funds
-        // CPI rejects anything above real collateral, so this cannot mint value.
+        // Raise the cap for trading PnL; real value stays capped by Phoenix withdraw_funds.
         if let Some(max) = max_slot_amount {
             if max > slot.amount {
                 slot.amount = max;

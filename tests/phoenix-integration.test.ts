@@ -927,11 +927,12 @@ describe("Phoenix Eternal Integration", () => {
             executor: testMintExecutor,
             relayer: relayer.publicKey,
             phoenixSlot: testMintPhoenixSlot,
+            claimantSigner: valErrClaimant.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
           .remainingAccounts([])
-          .signers([relayer])
+          .signers([relayer, valErrClaimant])
           .rpc(),
         "PhoenixInvalidPool",
       );
