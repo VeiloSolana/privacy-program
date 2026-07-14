@@ -1281,7 +1281,7 @@ export class PositionsManager {
     amount: BN;
     withdrawalId: Uint8Array;
     executorPhUsdAta: PublicKey;
-    /** Reserved: slot cap override for PnL gains — not yet enforced on-chain. */
+    /** Slot cap override for PnL gains: bumps slot.amount when higher. */
     maxSlotAmount?: BN;
   }): Promise<string> {
     const phoenixSlot = derivePhoenixSlotPda(
@@ -1296,6 +1296,7 @@ export class PositionsManager {
         this.claimant,
         opts.amount,
         Array.from(opts.withdrawalId),
+        opts.maxSlotAmount ?? null,
       )
       .accounts({
         config: this.poolConfig,

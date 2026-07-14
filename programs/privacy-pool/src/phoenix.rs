@@ -706,12 +706,6 @@ pub fn phoenix_place_order<'info>(
         &[executor_seeds]
     )?;
 
-    emit!(PhoenixOrderEvent {
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -1075,12 +1069,6 @@ pub fn phoenix_close_position<'info>(
 
     invoke_signed(&close_ix, &cpi_infos, &[executor_seeds])?;
 
-    emit!(PhoenixClosePositionEvent {
-        mint_address,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -1112,7 +1100,8 @@ pub fn phoenix_queue_withdraw<'info>(
     mint_address: Pubkey,
     claimant: Pubkey,
     amount: u64,
-    _withdrawal_id: [u8; 32]
+    _withdrawal_id: [u8; 32],
+    max_slot_amount: Option<u64>
 ) -> Result<()> {
     let cfg = &ctx.accounts.config;
 
@@ -1146,6 +1135,15 @@ pub fn phoenix_queue_withdraw<'info>(
         let mut slot_data = slot_info.data.borrow_mut();
         let mut slot = crate::PhoenixSlot::try_deserialize(&mut &slot_data[..])?;
         require_keys_eq!(slot.claimant_pubkey, claimant, PrivacyError::InvalidClaimant);
+
+        // Bump the cap for trading PnL above the deposit; Phoenix's withdraw_funds
+        // CPI rejects anything above real collateral, so this cannot mint value.
+        if let Some(max) = max_slot_amount {
+            if max > slot.amount {
+                slot.amount = max;
+            }
+        }
+
         let new_withdrawn = slot.withdrawn
             .checked_add(amount)
             .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
@@ -1210,12 +1208,6 @@ pub fn phoenix_queue_withdraw<'info>(
     ];
 
     invoke_signed(&withdraw_ix, &cpi_infos, &[executor_seeds])?;
-
-    emit!(PhoenixWithdrawQueuedEvent {
-        amount,
-        mint_address,
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -1322,13 +1314,6 @@ pub fn phoenix_register_pool_trader<'info>(
     ];
 
     invoke_signed(&register_ix, &cpi_infos, &[executor_seeds])?;
-
-    emit!(PhoenixRegisterTraderEvent {
-        mint_address,
-        vault: executor_key,
-        trader_account: remaining[3].key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -1683,12 +1668,6 @@ pub fn phoenix_ember_unwrap<'info>(
     pending.amount = pending.amount
         .checked_add(amount)
         .ok_or(error!(PrivacyError::ArithmeticOverflow))?;
-
-    emit!(PhoenixEmberUnwrapEvent {
-        amount,
-        mint_address,
-        timestamp: Clock::get()?.unix_timestamp,
-    });
 
     Ok(())
 }
@@ -2149,20 +2128,6 @@ pub fn phoenix_place_position_conditional_order<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    emit!(PhoenixPlacePositionConditionalOrderEvent {
-        mint_address,
-        asset_id,
-        has_greater,
-        greater_trigger_price,
-        greater_execution_price,
-        has_less,
-        less_trigger_price,
-        less_execution_price,
-        size_percent,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -2332,18 +2297,6 @@ pub fn phoenix_place_limit_order_with_conditionals<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    emit!(PhoenixPlaceLimitOrderWithConditionalsEvent {
-        mint_address,
-        has_greater,
-        greater_trigger_price,
-        greater_execution_price,
-        has_less,
-        less_trigger_price,
-        less_execution_price,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -2429,15 +2382,6 @@ pub fn phoenix_cancel_conditional_order<'info>(
 
     invoke_signed(&ix, &cpi_infos, &[executor_seeds])?;
 
-    emit!(PhoenixCancelConditionalOrderEvent {
-        mint_address,
-        conditional_order_index,
-        disable_first,
-        disable_second,
-        relayer: ctx.accounts.relayer.key(),
-        timestamp: Clock::get()?.unix_timestamp,
-    });
-
     Ok(())
 }
 
@@ -2455,59 +2399,6 @@ pub struct PhoenixDepositEvent {
     pub timestamp: i64,
 }
 
-/// Emitted when an order is placed or cancelled on Phoenix.
-#[event]
-pub struct PhoenixOrderEvent {
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a market close/reduce order is placed via `phoenix_close_position`.
-/// Distinct from `PhoenixOrderEvent` to allow indexers to track position-close events.
-#[event]
-pub struct PhoenixClosePositionEvent {
-    pub mint_address: Pubkey,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a Phoenix withdrawal is queued for the vault.
-#[event]
-pub struct PhoenixWithdrawQueuedEvent {
-    /// Amount queued for withdrawal (will arrive at vault ATA after crank)
-    pub amount: u64,
-    pub mint_address: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when the vault is successfully registered as a Phoenix Eternal trader.
-#[event]
-pub struct PhoenixRegisterTraderEvent {
-    pub mint_address: Pubkey,
-    pub vault: Pubkey,
-    pub trader_account: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when vault PhUSD is unwrapped back to USDC via EMBER.
-#[event]
-pub struct PhoenixEmberUnwrapEvent {
-    /// Amount of PhUSD burned and USDC received (1:1, reflecting P&L)
-    pub amount: u64,
-    pub mint_address: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when the relayer calls the `consumeWithdrawQueue` Phoenix crank.
-#[event]
-pub struct PhoenixConsumeWithdrawQueueEvent {
-    /// Token mint (always PHOENIX_REQUIRED_MINT)
-    pub mint_address: Pubkey,
-    pub vault: Pubkey,
-    pub timestamp: i64,
-}
-
 /// Emitted when private notes are re-issued from Phoenix-returned USDC.
 /// Step 4 (final) of the Phoenix exit flow.
 #[event]
@@ -2516,48 +2407,6 @@ pub struct PhoenixReissueEvent {
     pub amount: u64,
     /// Token mint (always PHOENIX_REQUIRED_MINT)
     pub mint_address: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when an atomic bracket order (SL+TP) is placed via the new conditional-orders API.
-#[event]
-pub struct PhoenixPlacePositionConditionalOrderEvent {
-    pub mint_address: Pubkey,
-    pub asset_id: u32,
-    pub has_greater: bool,
-    pub greater_trigger_price: u64,
-    pub greater_execution_price: u64,
-    pub has_less: bool,
-    pub less_trigger_price: u64,
-    pub less_execution_price: u64,
-    /// Percentage of position size to close (1–100)
-    pub size_percent: u8,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a conditional order is cancelled from the collection.
-#[event]
-pub struct PhoenixCancelConditionalOrderEvent {
-    pub mint_address: Pubkey,
-    pub conditional_order_index: u8,
-    pub disable_first: bool,
-    pub disable_second: bool,
-    pub relayer: Pubkey,
-    pub timestamp: i64,
-}
-
-/// Emitted when a limit order with attached TP/SL conditionals is placed atomically.
-#[event]
-pub struct PhoenixPlaceLimitOrderWithConditionalsEvent {
-    pub mint_address: Pubkey,
-    pub has_greater: bool,
-    pub greater_trigger_price: u64,
-    pub greater_execution_price: u64,
-    pub has_less: bool,
-    pub less_trigger_price: u64,
-    pub less_execution_price: u64,
-    pub relayer: Pubkey,
     pub timestamp: i64,
 }
 

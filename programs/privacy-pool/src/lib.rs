@@ -4356,9 +4356,10 @@ pub mod privacy_pool {
         mint_address: Pubkey,
         claimant: Pubkey,
         amount: u64,
-        withdrawal_id: [u8; 32]
+        withdrawal_id: [u8; 32],
+        max_slot_amount: Option<u64>
     ) -> Result<()> {
-        phoenix::phoenix_queue_withdraw(ctx, mint_address, claimant, amount, withdrawal_id)
+        phoenix::phoenix_queue_withdraw(ctx, mint_address, claimant, amount, withdrawal_id, max_slot_amount)
     }
 
     /// **Crank withdraw queue + convert vault's PhUSD back to USDC via EMBER (step 2 of exit flow).**

@@ -920,6 +920,7 @@ describe("Phoenix Eternal Integration", () => {
             valErrClaimant.publicKey,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 0)),
+            null,
           )
           .accounts({
             config,
@@ -1571,6 +1572,7 @@ describe("Phoenix Eternal Integration", () => {
             valErrClaimant.publicKey,
             new BN(1_000_000),
             Array.from(Buffer.alloc(32, 255)),
+            null,
           )
           .accounts({
             config: usdcConfig,
@@ -3058,6 +3060,7 @@ describe("Phoenix Eternal Integration", () => {
             s4ClaimKey.publicKey, // claimant
             withdrawAmount,
             Array.from(WITHDRAWAL_ID_0),
+            null,
           )
           .accounts({
             config: s4UsdcConfig,
@@ -4952,6 +4955,7 @@ describe("Phoenix Eternal Integration", () => {
             s4ClaimKey.publicKey, // claimant
             new BN(1_000_000),
             Array.from(WITHDRAWAL_ID_0),
+            null,
           )
           .accounts({
             config: s4UsdcConfig,
