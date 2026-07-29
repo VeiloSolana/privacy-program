@@ -90,7 +90,7 @@ pub const MAX_RELAYERS: usize = 16;
 pub const MAX_MERKLE_TREES: u16 = 10000;
 
 /// Maximum withdrawal fee basis points: 500 = 5%
-/// Withdrawal fees are kept low to ensure users can always exit the pool affordably
+/// Protocol-level cap for configured withdrawal fees.
 pub const MAX_FEE_BPS: u16 = 500;
 
 /// Maximum swap fee basis points: 1000 = 10%
@@ -150,7 +150,7 @@ pub struct PrivacyConfig {
     /// Total value locked (all deposits combined)
     pub total_tvl: u64,
 
-    /// Token mint address (for now: SOL, future: multi-token support)
+    /// Pool mint address. Native SOL pools store Pubkey::default(); SPL pools store the mint.
     pub mint_address: Pubkey,
 
     /// Minimum amount allowed per deposit (in lamports/token units)
@@ -429,7 +429,7 @@ impl NullifierMarker {
 /// 2. User knows secrets for both input notes
 /// 3. sum(inputs) + publicAmount = sum(outputs)
 /// 4. Input notes haven't been spent (nullifiers fresh)
-/// 5. extDataHash commits to (recipient, relayer, fee, refund)
+/// 5. extDataHash commits to ExtData::hash() (recipient, relayer, fee, refund, claimant)
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct TransactionPublicInputs {
     /// Merkle root (must be in root_history)
@@ -442,10 +442,10 @@ pub struct TransactionPublicInputs {
     /// ZERO = PRIVATE TRANSFER (no value crossing pool boundary)
     pub public_amount: i64,
 
-    /// Hash of external data: Poseidon(recipient, relayer, fee, refund)
+    /// Hash of external data: ExtData::hash().
     pub ext_data_hash: [u8; 32],
 
-    /// Token mint (for now: use SOL pubkey constant)
+    /// Pool mint address. Native SOL pools use Pubkey::default().
     pub mint_address: Pubkey,
 
     /// Input nullifiers (2 notes consumed)
@@ -463,15 +463,16 @@ pub struct ExtData {
     pub recipient: Pubkey,
     /// Who submits tx (gets fee)
     pub relayer: Pubkey,
-    /// Fee to relayer in lamports
+    /// Fee paid to the relayer, in lamports for native SOL or token base units for SPL pools.
     pub fee: u64,
-    /// Refund to user in lamports
+    /// Refund to the user, in lamports for native SOL or token base units for SPL pools.
     pub refund: u64,
     /// Ephemeral claim key committed by the depositor at proof-generation time.
     /// By including this field in the Poseidon hash that is verified against the
     /// Groth16 public input `ext_data_hash`, the ZK proof cryptographically binds
     /// the claimant identity — a relayer cannot substitute their own key without
-    /// invalidating the proof.  For non-Phoenix flows set to `Pubkey::default()`.
+    /// invalidating the proof. For flows that do not use claimant-gated recovery,
+    /// set to `Pubkey::default()`.
     pub claimant: Pubkey,
 }
 
@@ -3820,7 +3821,9 @@ pub mod privacy_pool {
 
     /// Stage a Jupiter-legs swap blob in a buffer PDA so `open_position` can read it without
     /// carrying it in instruction data (which would overflow the 1232-byte tx limit alongside the
-    /// ZK proof). Send before `open_position`; bound to the proof via `swap_data_hash`.
+    /// ZK proof). Send before `open_position`; the handler checks the staged blob
+    /// against `swap_params.swap_data_hash`. The current swap circuit does not
+    /// include `swap_data_hash` in `swap_params_hash`.
     pub fn stage_swap_legs(
         ctx: Context<StageSwapLegs>,
         input_nullifier_0: [u8; 32],

@@ -198,7 +198,8 @@ export function derivePublicKey(poseidon: any, privateKey: Uint8Array): bigint {
 // Helper: Compute extDataHash = Poseidon(Poseidon(recipient, relayer), Poseidon(fee, refund), claimant)
 // AUDIT-005 fix: claimant is now committed into the Groth16 public input ext_data_hash so a
 // malicious relayer cannot substitute their own key without invalidating the proof.
-// For non-Phoenix flows pass PublicKey.default() (all-zero bytes) as claimant.
+// For flows that do not use claimant-gated recovery, pass PublicKey.default()
+// (all-zero bytes) as claimant.
 export function computeExtDataHash(
   poseidon: any,
   extData: {
@@ -788,7 +789,9 @@ export const SWAP_VK_PATH = path.join(
 );
 
 /**
- * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline, destAmount))
+ * Compute swap params hash = Poseidon(Poseidon(sourceMint, destMint), Poseidon(minAmountOut, deadline, destAmount)).
+ * `swapDataHash` is accepted for legacy call-site compatibility but is not part
+ * of the current swap circuit/VK hash.
  * This must match the on-chain computation in swap.rs and the circuit constraint in swap.circom.
  */
 export function computeSwapParamsHash(

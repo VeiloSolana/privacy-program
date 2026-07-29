@@ -249,8 +249,8 @@ fn u64_to_field_be(value: u64) -> [u8; 32] {
 ///
 /// Public inputs (10 total):
 /// 1. sourceRoot         - Merkle root of source pool
-/// 2. swapParamsHash     - Hash of swap parameters (mints, min amount, deadline)
-/// 3. extDataHash        - Hash of external data (relayer, fee)
+/// 2. swapParamsHash     - Hash of swap parameters (mints, min amount, deadline, dest amount)
+/// 3. extDataHash        - Hash of ExtData::hash() (recipient, relayer, fee, refund, claimant)
 /// 4. sourceMint         - Source token mint address
 /// 5. destMint           - Destination token mint address
 /// 6. inputNullifiers[0] - First input nullifier

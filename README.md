@@ -13,7 +13,7 @@ Deposit SOL or SPL tokens and withdraw to any address with no on-chain link betw
 - PDA-based nullifiers — double-spend protection
 - Native SOL and SPL token support
 - Relayer network — decouple withdrawer from depositor
-- `ExtData::hash()` binds recipient, relayer, fee, and claimant into the proof — prevents front-running
+- `ExtData::hash()` binds recipient, relayer, fee, refund, and claimant into the proof — prevents front-running
 
 ---
 
@@ -42,6 +42,8 @@ anchor test
 ### Security
 
 Veilo breaks the on-chain link between deposits and withdrawals. It does not protect against network-level surveillance or a compromised client. Notes must be stored securely — losing a note means losing access to the funds.
+
+For third-party review context, see [AUDIT.md](./AUDIT.md). For security reporting and scope, see [SECURITY.md](./SECURITY.md).
 
 ---
 

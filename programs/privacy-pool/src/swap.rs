@@ -50,11 +50,11 @@ pub struct SwapParams {
     /// Included in swapParamsHash — cryptographically binds the ZK circuit's
     /// destAmount to the on-chain vault deposit.
     pub dest_amount: u64,
-    /// SHA-256 hash of the raw swap instruction data (swap_data).
-    /// Binds the exact DEX instruction bytes into the ZK proof so the relayer
-    /// cannot substitute different swap_data (e.g. 0% slippage) after the user
-    /// has generated their proof.  Set to [0u8;32] for CPMM/AMM swaps, which
-    /// already enforce dex_min_out by direct instruction decoding.
+    /// SHA-256 hash of the raw Jupiter swap instruction data (`swap_data`).
+    /// The handler checks this against the provided `swap_data` before CPI.
+    /// Current circuit/VK hash only mints, min_amount_out, deadline, and
+    /// dest_amount; `swap_data_hash` is not proof-bound until the circuit and
+    /// verifying key are upgraded to include it.
     pub swap_data_hash: [u8; 32],
 }
 
@@ -822,8 +822,8 @@ pub fn transact_swap<'info>(
             }
         }
 
-        // Verify swap_data matches the hash committed in the ZK proof to prevent
-        // relayer substitution of swap instructions.
+        // Runtime consistency check for relayer-provided Jupiter data. This does
+        // not make `swap_data_hash` proof-bound in the current circuit/VK.
         let computed: [u8; 32] = solana_sha256_hasher::hash(&swap_data).to_bytes();
         require!(computed == swap_params.swap_data_hash, PrivacyError::InvalidSwapParams);
 

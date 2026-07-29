@@ -121,8 +121,9 @@ impl PositionPDA {
 
 /// Staging buffer for a Jupiter-legs swap blob. The legs (Jupiter's setup/route/cleanup) are too
 /// large to carry in `open_position`'s instruction data alongside the ZK proof, so they're written
-/// here in a preceding instruction and read back. Bound to the proof via
-/// `swap_params.swap_data_hash == sha256(legs)`.
+/// here in a preceding instruction and read back. The handler checks
+/// `swap_params.swap_data_hash == sha256(legs)` before CPI. The current swap
+/// circuit does not include `swap_data_hash` in `swap_params_hash`.
 ///
 /// Seeds: [b"swap_legs_v1", input_nullifier_0]
 #[account]
@@ -1799,7 +1800,8 @@ pub fn close_position_to_sol<'info>(
 
 // Staged Jupiter-legs execution: run Jupiter's setup+route+cleanup instructions via invoke_signed.
 // Supports any route Jupiter emits (incl. native-SOL bonding curves) without hand-building the inner
-// instruction or tracking rotating fee accounts. Bound to the proof via swap_data_hash.
+// instruction or tracking rotating fee accounts. The handler checks these legs against
+// swap_params.swap_data_hash; the current swap circuit does not make that field proof-bound.
 
 /// swap_data sentinel that marks the "Jupiter legs" encoding (not a real Anchor discriminator).
 const JUP_LEGS_SENTINEL: [u8; 8] = [0x6a, 0x75, 0x70, 0x6c, 0x65, 0x67, 0x73, 0x00]; // "juplegs\0"
@@ -1827,7 +1829,8 @@ fn is_allowed_leg_program(p: &Pubkey) -> bool {
 
 /// Execute a serialized list of Jupiter legs (swap_data = sentinel ++ borsh(Vec<JupLeg>)).
 /// The executor PDA is marked signer wherever it appears; every other account is non-signer, so a
-/// relayer cannot make an arbitrary account sign. swap_data is bound to the proof hash by the caller.
+/// relayer cannot make an arbitrary account sign. The handler checks staged swap_data against
+/// swap_params.swap_data_hash before CPI; the current circuit does not proof-bind that field.
 fn execute_jup_legs<'info>(
     executor: &AccountInfo<'info>,
     executor_seeds: &[&[u8]],
@@ -1879,7 +1882,7 @@ fn execute_dex_swap<'info>(
     executor_source_token: &AccountInfo<'info>,
     executor_dest_token: &AccountInfo<'info>,
     // token_program + swap_amount were used by the removed direct Raydium/pump CPI branches; the
-    // Jupiter path binds the swap via swap_data_hash and the handlers enforce amounts. Kept in the
+    // Jupiter path checks swap_data_hash at runtime and the handlers enforce amounts. Kept in the
     // signature for call-site stability.
     _token_program: &Program<'info, anchor_spl::token::Token>,
     executor_seeds: &[&[u8]],
@@ -2411,7 +2414,8 @@ pub fn fund_native_open_position(
 }
 
 /// Write a Jupiter-legs blob into the buffer PDA (see `SwapLegsBuffer`). Called before
-/// `open_position`; the blob is read back there and bound to the proof via `swap_data_hash`.
+/// `open_position`; the blob is read back there and checked against `swap_params.swap_data_hash`.
+/// The current swap circuit does not include that field in `swap_params_hash`.
 pub fn stage_swap_legs(
     ctx: Context<crate::StageSwapLegs>,
     input_nullifier_0: [u8; 32],
