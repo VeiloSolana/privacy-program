@@ -18,6 +18,12 @@ Ignored local paths may exist in developer workspaces but
 are not automatically part of the repository audit scope. If any secret material
 is tracked by Git, report it immediately.
 
+Not in this repository, and not coverable by a review of it alone: the Circom circuits, proving
+artifacts, and trusted-setup transcript; the off-chain proof-generation SDK; relayer
+infrastructure and key custody. The circuit enforces the protocol's value-conservation invariant,
+so solvency conclusions cannot be reached from the tracked source alone. Request these artifacts
+separately.
+
 ## Reporting
 
 Report fund-safety, privacy, key-custody, build-verification, and authority
