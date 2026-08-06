@@ -2263,7 +2263,7 @@ describe("Phoenix Eternal Integration", () => {
           const built = await client.api.exchange().buildRegisterIxs({
             traderAuthority: executorPda.toBase58() as string,
             txFeePayer: wallet.publicKey.toBase58() as string,
-            maxPositions: 128,
+            maxPositions: 8,
           });
 
           if (built.includeRegisterTrader) {
@@ -2305,7 +2305,7 @@ describe("Phoenix Eternal Integration", () => {
             transaction: Buffer.from(vtx.serialize()).toString("base64"),
             traderAuthority: executorPda.toBase58() as string,
             txFeePayer: wallet.publicKey.toBase58() as string,
-            maxPositions: 128,
+            maxPositions: 8,
             traderPdaIndex: 0,
             traderSubaccountIndex: 0,
           });

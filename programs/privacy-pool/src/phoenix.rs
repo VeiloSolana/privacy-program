@@ -1264,10 +1264,11 @@ pub fn phoenix_register_pool_trader<'info>(
         &[executor_bump],
     ];
 
-    // Cross: max_positions=128, subaccount_index=0
+    // Cross: max_positions=8, subaccount_index=0 (trader acct rent scales with slots:
+    // 128 slots cost ~0.038 SOL vs ~0.003 for 8).
     // Isolated: max_positions=1,  subaccount_index=1
     let (max_positions, subaccount_index): (u64, u8) = if margin_type == 0 {
-        (128, 0)
+        (8, 0)
     } else {
         (1, 1)
     };
