@@ -1173,6 +1173,10 @@ pub fn close_position<'info>(
     };
 
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
+    // The shared per-mint vault check below only proves the vault as a whole can cover this
+    // swap, not that this position's own note backs it. Bound by the position's own balance so a
+    // malformed/compromised proof can't draw down other positions sharing the same vault.
+    require!(swap_amount <= pos_pda.balance, PrivacyError::InvalidPublicAmount);
 
     let expected_exec_src_ata = get_ata_address(
         &ctx.accounts.executor.key(),
@@ -1363,7 +1367,9 @@ pub fn close_position<'info>(
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     let vault_record = &mut ctx.accounts.position_vault_record;
-    vault_record.total_balance = vault_record.total_balance.saturating_sub(swap_amount);
+    vault_record.total_balance = vault_record.total_balance
+        .checked_sub(swap_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
     vault_record.position_count = vault_record.position_count.saturating_sub(1);
 
     // PositionPDA is auto-closed by Anchor `close = relayer` constraint
@@ -1487,6 +1493,8 @@ pub fn close_position_to_sol<'info>(
     let clock = Clock::get()?;
     require!(clock.unix_timestamp <= swap_params.deadline, PrivacyError::InvalidPublicAmount);
     require!(swap_amount > 0, PrivacyError::InvalidPublicAmount);
+    // See close_position: bound by the position's own balance, not just the shared vault total.
+    require!(swap_amount <= pos_pda.balance, PrivacyError::InvalidPublicAmount);
 
     let input_nullifiers = [input_nullifier_0, input_nullifier_1];
     let output_commitments = [output_commitment_0, output_commitment_1];
@@ -1764,7 +1772,9 @@ pub fn close_position_to_sol<'info>(
         .ok_or(PrivacyError::ArithmeticOverflow)?;
 
     let vault_record = &mut ctx.accounts.position_vault_record;
-    vault_record.total_balance = vault_record.total_balance.saturating_sub(swap_amount);
+    vault_record.total_balance = vault_record.total_balance
+        .checked_sub(swap_amount)
+        .ok_or(PrivacyError::ArithmeticOverflow)?;
     vault_record.position_count = vault_record.position_count.saturating_sub(1);
 
     // Executor MEME ATA must be fully drained by the sell before close.
