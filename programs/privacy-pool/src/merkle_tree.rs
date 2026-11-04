@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(
             core::mem::size_of::<[[u8; 32]; MERKLE_TREE_HEIGHT]>(),
             32 * MERKLE_TREE_HEIGHT,
-            "subtrees array size changed (26 * 32 = 832 bytes)"
+            "subtrees array size changed (22 * 32 = 704 bytes)"
         );
         assert_eq!(
             core::mem::size_of::<[[u8; 32]; ROOT_HISTORY_SIZE]>(),
